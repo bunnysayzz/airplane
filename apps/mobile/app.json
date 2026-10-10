@@ -3,6 +3,7 @@
     "name": "Airplane",
     "slug": "airplane",
     "scheme": "airplane",
+    "version": "0.0.2",
     "platforms": [
       "ios",
       "android"
@@ -16,6 +17,12 @@
         "projectId": "98a17423-033b-4461-a779-82d919336f3c"
       }
     },
-    "owner": "bunnysayzz"
+    "owner": "bunnysayzz",
+    "android": {
+      "package": "com.bunnysayzz.airplane"
+    },
+    "ios": {
+      "bundleIdentifier": "com.bunnysayzz.airplane"
+    }
   }
 }
