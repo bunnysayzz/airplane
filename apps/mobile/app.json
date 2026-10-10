@@ -11,6 +11,12 @@
     "newArchEnabled": true,
     "plugins": [
       "expo-secure-store"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "98a17423-033b-4461-a779-82d919336f3c"
+      }
+    },
+    "owner": "bunnysayzz"
   }
 }
