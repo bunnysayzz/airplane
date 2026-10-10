@@ -136,11 +136,13 @@ jobs:
       - name: EAS preview APK build
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        working-directory: apps/mobile
         run: eas build --platform android --profile preview --non-interactive --wait --json > /tmp/build-preview.json
 
       - name: EAS production AAB build
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        working-directory: apps/mobile
         run: eas build --platform android --profile production --non-interactive --wait --json > /tmp/build-production.json
 
       # Download each finished build's artifact from EAS and name it after

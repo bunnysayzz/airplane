@@ -106,6 +106,7 @@ jobs:
           token: ${{ secrets.EXPO_TOKEN }}
 
       - name: EAS preview APK build
+        working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: eas build --platform android --profile preview --non-interactive --wait --json > /tmp/build.json

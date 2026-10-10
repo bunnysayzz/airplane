@@ -62,6 +62,7 @@ jobs:
 
       # Preview APK for sideloading / Obtainium (P5 distribution story).
       - name: EAS preview APK build
+        working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: eas build --platform android --profile preview --non-interactive
