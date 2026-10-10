@@ -3,7 +3,10 @@
   "name": "airplane-root",
   "version": "0.1.0",
   "license": "Apache-2.0",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit -p packages/protocol && tsc --noEmit -p packages/storage && tsc --noEmit -p packages/crypto && tsc --noEmit -p packages/mesh-sim && tsc --noEmit -p apps/mobile",
     "test": "jest",
@@ -20,5 +23,8 @@
     "ts-jest": "^29.1.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.0.0"
+  },
+  "dependencies": {
+    "react-native-screens": "4.11.1"
   }
 }

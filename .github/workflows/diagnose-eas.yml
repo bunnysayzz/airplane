@@ -38,10 +38,13 @@ jobs:
             try {
               const j = JSON.parse(raw);
               const b = j.data || j;
+              console.log('KEYS:', Object.keys(b).join(', '));
               console.log('status:', b.status);
-              console.log('platform:', b.platform);
-              console.log('error:', JSON.stringify(b.error || b.buildError || null, null, 2).slice(0,4000));
-              console.log('artifacts:', JSON.stringify(b.artifacts || null).slice(0,500));
+              // hunt for any log URLs
+              const s = JSON.stringify(b);
+              const urls = s.match(/https:\/\/[^\"'\s]*log[^\"'\s]*/gi) || [];
+              console.log('LOG URLS:', [...new Set(urls)].slice(0,5).join('\n  '));
+              console.log('error:', JSON.stringify(b.error || null, null, 2).slice(0,1500));
             } catch(e) {
               console.log('parse failed, raw head:', raw.slice(0,1500));
               console.log('stderr:', fs.readFileSync('/tmp/view.err','utf8').slice(0,1000));
