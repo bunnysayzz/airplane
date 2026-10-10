@@ -102,22 +102,23 @@ jobs:
       # Fail fast with a helpful message if the admin hasn't added EXPO_TOKEN
       # (same pattern as build-android.yml).
       - name: Require EXPO_TOKEN secret
-        if: ${{ secrets.EXPO_TOKEN == '' }}
+        env:
+          TOKEN_PRESENT: ${{ secrets.EXPO_TOKEN != '' }}
         run: |
-          echo "::error::EXPO_TOKEN repo secret is not set."
-          echo "The repo admin must add it once at:"
-          echo "  https://github.com/bunnysayzz/airplane/settings/secrets/actions"
-          echo "Generate the token at expo.dev -> Account Settings -> Access Tokens."
-          exit 1
+          if [ "$TOKEN_PRESENT" != "true" ]; then
+            echo "::error::EXPO_TOKEN repo secret is not set."
+            echo "The repo admin must add it once at:"
+            echo "  https://github.com/bunnysayzz/airplane/settings/secrets/actions"
+            echo "Generate the token at expo.dev -> Account Settings -> Access Tokens."
+            exit 1
+          fi
 
       - name: EAS preview APK build
-        if: ${{ secrets.EXPO_TOKEN != '' }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: eas build --platform android --profile preview --non-interactive --wait --json > /tmp/build-preview.json
 
       - name: EAS production AAB build
-        if: ${{ secrets.EXPO_TOKEN != '' }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: eas build --platform android --profile production --non-interactive --wait --json > /tmp/build-production.json
