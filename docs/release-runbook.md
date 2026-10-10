@@ -1,8 +1,27 @@
 # Airplane release runbook
 
-How to cut a release. The actual building and publishing is automated by
-`.github/workflows/release.yml`; this document is the human checklist that
-drives it.
+How releases work. Building and publishing is fully automated; this document
+is the human checklist around it.
+
+## Auto-release (default)
+
+Every push to `main` triggers `.github/workflows/auto-release.yml`, which:
+
+1. Computes the next version from the latest `v*` tag (starts at `0.0.1`,
+   then `0.0.2`, ... — patch auto-increments).
+2. Bumps `apps/mobile/app.json` `expo.version`, commits with `[skip ci]`,
+   pushes the commit and the new tag.
+3. Builds the `preview` profile APK on EAS and attaches it to a new
+   GitHub Release with generated notes.
+
+You do nothing. Merge a PR and the release appears.
+
+## Manual production release (AAB for Play Store)
+
+`.github/workflows/release.yml` is manual-only: Actions tab → Release →
+Run workflow → enter a tag like `v0.3.0`. It re-runs CI gates, builds the
+`preview` APK and the `production` AAB on EAS, and publishes the Release
+with both artifacts plus SHA256SUMS.
 
 ## Prerequisites (one-time, repo owner)
 
@@ -21,7 +40,10 @@ drives it.
    `eas build --platform android --profile production` once interactively
    and accept EAS-managed credentials. CI then reuses the stored credentials.
 
-## Cutting a release
+## Cutting a release (manual path - normally not needed)
+
+Auto-release handles versioning on every `main` push. The manual path below
+is only for cutting a production release with a specific version out of band.
 
 ```bash
 # 1. Bump the version in the ROOT package.json (semver). The tag MUST equal
@@ -29,13 +51,11 @@ drives it.
 #    "version": "0.1.0"  →  "version": "0.2.0"
 git add package.json
 git commit -m "chore: release v0.2.0"
+git push origin main
 
-# 2. Tag the commit. Tags must look like vX.Y.Z (release.yml only triggers
-#    on that pattern).
-git tag v0.2.0
-
-# 3. Push the tag. This triggers .github/workflows/release.yml.
-git push --tags
+# 2. Run the manual Release workflow from the Actions tab and enter the
+#    tag (e.g. v0.2.0) when prompted. It creates the tag, builds, and
+#    publishes the Release.
 ```
 
 Fixing a version mismatch: if release.yml fails on the tag check, delete the
