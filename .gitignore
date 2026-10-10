@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+node_modules/
+dist/
+build/
+.expo/
+android/
+ios/
+*.env
+.env*
+coverage/
+npm-debug.log*
+.DS_Store
+*.log
+# Build artifacts
+*.apk
+*.aab
+SHA256SUMS
+# EAS / signing credentials
+*.jks
+*.keystore
+credentials.json

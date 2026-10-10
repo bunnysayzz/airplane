@@ -1,0 +1,163 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+  ScrollView,
+  Text,
+  View,
+  useWindowDimensions,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { PillButton, PugMark } from '../../components/ui';
+import { useTheme } from '../../src/theme/themeContext';
+import { useThemedStyles } from '../../src/theme/useThemedStyles';
+import { useI18n } from '../../src/i18n/i18nContext';
+import { EXPLAINER_CARDS, ExplainerCard } from './explainerCard';
+import { markOnboardingDone } from './onboardingStatus';
+import { makeStyles } from './styles';
+
+// Setup never holds the user longer than this
+export const SETUP_TIMEOUT_MS = 30_000;
+
+// The pug's messages (setup.messages in the dictionaries) rotate at this pace
+const MESSAGE_INTERVAL_MS = 2500;
+
+interface SetupProps {
+  onDone: () => void;
+  // 0..1 while boot work runs; null/undefined means indeterminate (messages only)
+  progress?: number | null;
+  // When the caller knows boot work finished, passing ready moves to the explainer;
+  // without it the timeout (or Skip) advances instead.
+  ready?: boolean;
+}
+
+// Two phases: the Pugdon boot splash (keypair, store init) first, then 2-3 swipeable
+// anonymous-onboarding cards ending in a single Start button. There is no login,
+// no account, no permissions begging — the Bluetooth/location rationale lives inline
+// on card 1, where the OS will actually prompt. The navigation worker decides when
+// to show Setup and uses onboardingStatus to show it once.
+const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false }) => {
+  const { type, coat } = useTheme();
+  const { t, dict } = useI18n();
+  const styles = useThemedStyles(makeStyles);
+  const [booted, setBooted] = useState(false);
+  const [card, setCard] = useState(0);
+  const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const scroller = useRef<ScrollView>(null);
+
+  const boot = useRef(() => {
+    setBooted(true);
+  }).current;
+
+  // Boot splash: Pugdon's rotating messages and progress bar
+  const [message, setMessage] = useState(0);
+  useEffect(() => {
+    if (booted) return;
+    const timeout = setTimeout(boot, SETUP_TIMEOUT_MS);
+    const rotate = setInterval(() => setMessage((index) => index + 1), MESSAGE_INTERVAL_MS);
+    return () => {
+      clearTimeout(timeout);
+      clearInterval(rotate);
+    };
+  }, [boot, booted]);
+  useEffect(() => {
+    if (ready) boot();
+  }, [ready, boot]);
+
+  const messages = dict.setup.messages;
+  const percent = progress == null ? null : Math.round(Math.min(1, Math.max(0, progress)) * 100);
+
+  if (!booted) {
+    return (
+      <View style={styles.container}>
+        <PugMark coat={coat} size={88} />
+        <Text accessibilityRole="header" style={[type.title, styles.title]}>
+          {t('setup.title')}
+        </Text>
+
+        {/* The jokes are for sighted users; screen readers get the bar's percentage */}
+        <Text
+          style={[type.name, styles.message]}
+          importantForAccessibility="no"
+          accessibilityElementsHidden
+        >
+          {messages[message % messages.length]}…
+        </Text>
+        {percent !== null && (
+          <View
+            style={styles.track}
+            accessible
+            accessibilityRole="progressbar"
+            accessibilityLabel={t('setup.title')}
+            accessibilityValue={{ min: 0, max: 100, now: percent }}
+          >
+            <View style={[styles.fill, { width: `${percent}%` }]} />
+          </View>
+        )}
+
+        <PillButton label={t('common.skip')} variant="ghost" onPress={boot} style={styles.skip} />
+      </View>
+    );
+  }
+
+  // Explainer: swipeable cards with pager dots and a single Next/Start button
+  const isLast = card === EXPLAINER_CARDS.length - 1;
+
+  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const page = Math.round(event.nativeEvent.contentOffset.x / width);
+    setCard(Math.max(0, Math.min(EXPLAINER_CARDS.length - 1, page)));
+  };
+
+  const handlePrimary = async () => {
+    if (!isLast) {
+      scroller.current?.scrollTo({ x: width * (card + 1), animated: true });
+      return;
+    }
+    try {
+      await markOnboardingDone();
+    } catch (error) {
+      // Onboarding still completes; the flag is a convenience for the navigator
+      console.error('Failed to persist onboarding completion:', error);
+    }
+    onDone();
+  };
+
+  return (
+    <View style={[styles.container, styles.explainerContainer]}>
+      <ScrollView
+        ref={scroller}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        onMomentumScrollEnd={handleScroll}
+        accessibilityLabel={t('setup.onboarding.explainerLabel')}
+        style={styles.pager}
+      >
+        {EXPLAINER_CARDS.map((spec) => (
+          <View key={spec.key} style={[styles.page, { width }]}>
+            <ExplainerCard spec={spec} />
+          </View>
+        ))}
+      </ScrollView>
+
+      {/* Pager dots are decorative; the pager region carries the accessibility label */}
+      <View style={styles.dots} importantForAccessibility="no" accessibilityElementsHidden>
+        {EXPLAINER_CARDS.map((spec) => (
+          <View
+            key={spec.key}
+            style={[styles.dot, spec.key === EXPLAINER_CARDS[card].key && styles.dotActive]}
+          />
+        ))}
+      </View>
+
+      <PillButton
+        label={t(isLast ? 'setup.onboarding.start' : 'setup.onboarding.next')}
+        onPress={handlePrimary}
+        style={[styles.primary, { marginBottom: Math.max(insets.bottom, 16) }]}
+      />
+    </View>
+  );
+};
+
+export default Setup;

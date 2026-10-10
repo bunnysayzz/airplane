@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+name: Contact links
+description: How to reach us
+body: []
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/enginoor/airplane/security/advisories/new
+    about: Please don't file public issues for security problems — use Security Advisories (see SECURITY.md).
+  - name: Question / discussion
+    url: https://github.com/enginoor/airplane/issues/new?template=Blank+issue
+    about: >-
+      GitHub Discussions isn't enabled on this repo yet. For questions, ideas,
+      or help, open an issue instead — it will be triaged like everything else.

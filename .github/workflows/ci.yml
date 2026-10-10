@@ -1,0 +1,49 @@
+# CI — runs on every push to main and every PR targeting main.
+# Gates (in order):
+#   1. `npm run lint`      — ESLint must pass with zero warnings; catches style/unused-code drift early.
+#   2. `npm run typecheck` — tsc --noEmit across all workspaces; a type error here blocks merge.
+#   3. `npm test`          — Jest unit tests; currently shallow, grows into P2+ protocol tests.
+# Node version is pinned by the repo's `.nvmrc` (Node 24) so CI matches local dev.
+# `cache: 'npm'` on setup-node keeps `npm ci` fast across runs.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+  # A workflow file that doesn't parse fails the whole run at load time with
+  # a cryptic error, so validate every workflow YAML parses as a gate.
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate all workflow YAML files parse
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 -c "import yaml,glob; files=glob.glob('.github/workflows/*.yml'); [yaml.safe_load(open(f)) for f in files]; print(f'YAML OK: {len(files)} workflow files parsed')"

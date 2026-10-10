@@ -1,0 +1,220 @@
+# Release — triggers when a semver tag (v*.*.*) is pushed.
+#
+# PIPELINE
+#   1. `gates`         — re-run the full CI gates (lint, typecheck, jest). A red
+#                        gate fails the release before any build starts.
+#   2. `gates` (same job) — verify the tag matches root package.json `version`
+#                        (leading `v` stripped). Mismatch fails with a clear error.
+#   3. `build-android`  — EAS cloud builds: `preview` profile (APK, sideloadable)
+#                        and `production` profile (AAB). Requires the `EXPO_TOKEN`
+#                        repo secret; fails fast with setup instructions if missing
+#                        (same pattern as build-android.yml).
+#   4. `build-android` (same job) — download artifacts, generate SHA256SUMS.
+#   5. `release`        — generate notes from git history since the previous tag,
+#                        then create the GitHub Release with the APK, AAB and
+#                        SHA256SUMS attached via softprops/action-gh-release.
+#
+# TOOL CHOICE
+#   softprops/action-gh-release (v3.0.3) over raw `gh release create`: one step
+#   creates the release AND uploads every asset with retry-hardened streaming
+#   uploads (v3.0.2 fixed flaky small-asset uploads) plus clearer diagnostics.
+#   Fewer steps, fewer failure modes, no hand-rolled upload retry loop.
+#
+# NO SECRET HANDLING HERE
+#   The only secret referenced is ${{ secrets.EXPO_TOKEN }} (repo secret the
+#   owner adds at github.com/enginoor/airplane/settings/secrets/actions).
+#   It is never printed and is masked in logs by GitHub.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write # create the GitHub Release and upload assets
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1+2. Re-run CI gates and verify tag == package.json version.
+  # ---------------------------------------------------------------------------
+  gates:
+    name: CI gates + version check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # needed for release-notes generation later
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # The release tag MUST match the version field in the root package.json.
+      # Tag `v0.1.0` <=> "version": "0.1.0". Mismatch = fail loudly; the runbook
+      # (docs/release-runbook.md) covers the fix: bump, commit, re-tag.
+      - name: Verify tag matches package.json version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "Tag version:    ${TAG_VERSION}"
+          echo "package.json:   ${PKG_VERSION}"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag '${GITHUB_REF_NAME}' does not match root package.json version '${PKG_VERSION}'."
+            echo "::error::Fix: bump the version field, commit, delete the tag locally and remotely, then re-tag (see docs/release-runbook.md)."
+            exit 1
+          fi
+          echo "Version check passed."
+
+  # ---------------------------------------------------------------------------
+  # 3+4. EAS cloud builds (preview APK + production AAB), then SHA256SUMS.
+  # ---------------------------------------------------------------------------
+  build-android:
+    name: EAS Android builds
+    needs: gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Install EAS CLI
+        run: npm install -g eas-cli@24
+
+      # Fail fast with a helpful message if the admin hasn't added EXPO_TOKEN
+      # (same pattern as build-android.yml).
+      - name: Require EXPO_TOKEN secret
+        if: ${{ secrets.EXPO_TOKEN == '' }}
+        run: |
+          echo "::error::EXPO_TOKEN repo secret is not set."
+          echo "The repo admin must add it once at:"
+          echo "  https://github.com/enginoor/airplane/settings/secrets/actions"
+          echo "Generate the token at expo.dev -> Account Settings -> Access Tokens."
+          exit 1
+
+      - name: EAS preview APK build
+        if: ${{ secrets.EXPO_TOKEN != '' }}
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: eas build --platform android --profile preview --non-interactive --wait --json > /tmp/build-preview.json
+
+      - name: EAS production AAB build
+        if: ${{ secrets.EXPO_TOKEN != '' }}
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: eas build --platform android --profile production --non-interactive --wait --json > /tmp/build-production.json
+
+      # Download each finished build's artifact from EAS and name it after
+      # the tag so the Release attachments are self-describing.
+      - name: Download build artifacts
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          mkdir -p dist
+          node <<'EOF'
+          const fs = require('fs');
+          const cp = require('child_process');
+          const pairs = [
+            ['/tmp/build-preview.json', `dist/airplane-${process.env.GITHUB_REF_NAME}-preview.apk`],
+            ['/tmp/build-production.json', `dist/airplane-${process.env.GITHUB_REF_NAME}-production.aab`],
+          ];
+          for (const [jsonPath, outPath] of pairs) {
+            const builds = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+            const build = Array.isArray(builds) ? builds[0] : builds;
+            if (!build || build.status !== 'finished') {
+              console.error(`::error::EAS build in ${jsonPath} is not finished: ${build && build.status}`);
+              process.exit(1);
+            }
+            const url = build.artifacts && build.artifacts.buildUrl;
+            if (!url) {
+              console.error(`::error::No artifact URL on finished EAS build (${jsonPath}).`);
+              process.exit(1);
+            }
+            cp.execFileSync('curl', ['-sSL', '-H', `Authorization: Bearer ${process.env.EXPO_TOKEN}`, '-o', outPath, url]);
+            console.log(`Downloaded ${outPath}`);
+          }
+          EOF
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum airplane-*.apk airplane-*.aab > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-artifacts
+          path: dist/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 5. Release notes from git history + GitHub Release with attached artifacts.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: build-android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-artifacts
+          path: dist/
+
+      - name: Generate release notes from git history
+        run: |
+          PREV_TAG="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+          if [ -z "$PREV_TAG" ]; then
+            RANGE="HEAD"
+            RANGE_LABEL="initial release"
+          else
+            RANGE="${PREV_TAG}..HEAD"
+            RANGE_LABEL="${PREV_TAG}..${GITHUB_REF_NAME}"
+          fi
+          {
+            echo "# Airplane ${GITHUB_REF_NAME}"
+            echo
+            echo "Changes since ${RANGE_LABEL}:"
+            echo
+            git log "$RANGE" --pretty='- %s (%h)' --no-merges
+            echo
+            echo "## Artifacts"
+            echo
+            echo "- \`airplane-${GITHUB_REF_NAME}-preview.apk\` — sideloadable preview build (internal distribution)"
+            echo "- \`airplane-${GITHUB_REF_NAME}-production.aab\` — production app bundle"
+            echo "- \`SHA256SUMS\` — SHA-256 checksums for the artifacts above"
+          } > /tmp/release-notes.md
+          cat /tmp/release-notes.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3.0.3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Airplane ${{ github.ref_name }}
+          body_path: /tmp/release-notes.md
+          files: |
+            dist/airplane-*.apk
+            dist/airplane-*.aab
+            dist/SHA256SUMS

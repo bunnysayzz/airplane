@@ -1,0 +1,59 @@
+# Dependency review — runs on every PR.
+#
+# Two independent checks:
+#   1. VULNERABILITIES (hard gate): actions/dependency-review-action fails the
+#      PR if any dependency change introduces a HIGH or CRITICAL CVE.
+#   2. LICENSES (warning only): the project is Apache-2.0. GPL-family
+#      licenses (GPL/AGPL/LGPL) in the dependency tree are surfaced as
+#      annotations but NEVER fail the build — the choice to accept copyleft
+#      code stays with the maintainers.
+#
+# NOTE: the vulnerability gate works off the PR diff (base vs head). The
+# license scan runs `license-checker` over the full production dependency
+# tree after `npm ci`.
+
+name: Dependency review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Vulnerabilities + license scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependency review (fail on high/critical)
+        uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # Warning-only GPL-family scan. Prints ::warning:: annotations so they
+      # show up on the PR checks page, but always exits 0.
+      - name: Flag GPL-family licenses (warning only)
+        run: |
+          npx -y license-checker --json --production > /tmp/licenses.json
+          node <<'EOF'
+          const fs = require('fs');
+          const data = JSON.parse(fs.readFileSync('/tmp/licenses.json', 'utf8'));
+          const hits = Object.entries(data)
+            .filter(([, v]) => /GPL/i.test(String(v.licenses || '')))
+            .map(([name, v]) => `${name}: ${v.licenses}`);
+          if (hits.length === 0) {
+            console.log('No GPL-family licenses detected in the production dependency tree.');
+          } else {
+            console.log('::warning::GPL-family licenses detected (project is Apache-2.0 — review before merging):');
+            for (const h of hits) console.log(`::warning::  ${h}`);
+          }
+          EOF
