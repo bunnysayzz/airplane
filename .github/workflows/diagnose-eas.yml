@@ -23,6 +23,9 @@ jobs:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
 
+      - name: Install dependencies (root workspace)
+        run: npm ci --include=dev 2>&1 | tail -3
+
       - name: Show build details
         working-directory: apps/mobile
         env:
