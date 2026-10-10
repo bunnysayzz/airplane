@@ -85,16 +85,20 @@ jobs:
           fi
 
       - name: Bump app version, commit and tag
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="$APP_VERSION"
+          TAG="$RELEASE_TAG"
           node -e "
             const fs = require('fs');
             const p = 'apps/mobile/app.json';
             const j = JSON.parse(fs.readFileSync(p, 'utf8'));
             j.expo.version = process.env.APP_VERSION;
+            if (!j.expo.version) { throw new Error('APP_VERSION was empty - refusing to write app.json'); }
             fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
-          " APP_VERSION="$VERSION"
+          "
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add apps/mobile/app.json
