@@ -7,4 +7,6 @@ export function addPoints(a: any, b: any) {
   return total;
 }
 const unusedHelper = 42;
+// second push: triggers synchronize event for the fixed serverless path
+export const e2eMarker = "round-2";
 export default addPoints;
