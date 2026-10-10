@@ -25,7 +25,7 @@ export default function AroundTab() {
                 feeds={feeds}
                 activeFeed={activeFeed}
                 onFeedChange={handleFeedChange}
-                // TODO(P2): the viewer's geohash-5 cell (LOC-1) — no location provider in the app yet.
+                // TODO(P2): the viewer's geohash-5 cell (LOC-1) - no location provider in the app yet.
                 cells={[]}
                 onPostPress={eventId => router.push(`/post/${eventId}`)}
             />

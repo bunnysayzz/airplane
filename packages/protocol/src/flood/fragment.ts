@@ -8,7 +8,7 @@
 //   offset 9:     ttl     u8  = remaining flood TTL for this message
 //   offset 10:    flags   u8  = reserved, must be 0
 // Payload per fragment: mtu - 11 bytes (458 at the default mtu of 469).
-// See docs/spec/wire-format.md — the spec is the source of truth.
+// See docs/spec/wire-format.md - the spec is the source of truth.
 
 import { decodeEvent } from '../codec/cbor';import {
   FRAG_HEADER_LEN,

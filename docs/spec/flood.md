@@ -56,7 +56,7 @@ Notes:
 Events carry a precision-5 geohash cell. A node relays and displays an event
 only when its cell is the node's own cell or one of the 8 neighbors
 (`isInScope`). Scope is advisory for relay (a node MAY relay out-of-scope
-events to keep the mesh connected — policy lives in the app layer); it is
+events to keep the mesh connected - policy lives in the app layer); it is
 mandatory for display.
 
 ## 5. Tombstones

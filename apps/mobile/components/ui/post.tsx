@@ -23,7 +23,7 @@
  */
 
 /**
- * Post — a card carrying something somebody said, and what everyone did about it.
+ * Post - a card carrying something somebody said, and what everyone did about it.
  *
  * Vendored from panel-ui/panelui (MIT, see above) and ADAPTED for Airplane:
  * - uniwind `className` props → React Native StyleSheet, driven by the app's
@@ -37,11 +37,11 @@
  *   prop still takes a component, so `Post.Stat icon={EyeIcon}` reads the same.
  * - `Post.Media` (expo-linear-gradient scrim), `Post.Title`, `Post.Community`
  *   and `Post.Votes` were dropped with their subcomponents: v1 Airplane posts
- *   are text-only, there are no communities, and ranking is by views — voting
+ *   are text-only, there are no communities, and ranking is by views - voting
  *   arrows would contradict the product.
  *
- * What survives is the anatomy panelui is built around — the same
- * `Post.Header`, `Post.Body`, `Post.Footer` — so the compound reads exactly
+ * What survives is the anatomy panelui is built around - the same
+ * `Post.Header`, `Post.Body`, `Post.Footer` - so the compound reads exactly
  * like the original:
  *
  * ```tsx
@@ -96,7 +96,7 @@ function usePost() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Styles — one factory per theme, matching the team's useThemedStyles pattern */
+/* Styles - one factory per theme, matching the team's useThemedStyles pattern */
 /* -------------------------------------------------------------------------- */
 
 interface PostStyles {
@@ -309,14 +309,14 @@ function isType(child: ReactNode, type: unknown): boolean {
 
 export interface PostAuthorProps extends Omit<ViewProps, 'children' | 'style'> {
   style?: StyleProp<ViewStyle>;
-  /** Display name — in Airplane, a short pseudonym like "anon·a3f9". */
+  /** Display name - in Airplane, a short pseudonym like "anon·a3f9". */
   name: string;
   /** Origin tag, e.g. "#tdr1v". Shown under the name in `feed`. */
   handle?: string;
   avatar?: ImageSourcePropType;
   /** Initials behind a missing or broken avatar. */
   fallback?: string;
-  /** "3m" — whatever the caller wants to call the time. */
+  /** "3m" - whatever the caller wants to call the time. */
   timestamp?: ReactNode;
   children?: ReactNode;
 }
@@ -375,7 +375,7 @@ const PostAuthor = forwardRef<View, PostAuthorProps>(
 );
 PostAuthor.displayName = 'Post.Author';
 
-/** First letters of the first two words — enough to tell two people apart. */
+/** First letters of the first two words - enough to tell two people apart. */
 function initials(name: string): string {
   return name
     .split(/\s+/)
@@ -390,7 +390,7 @@ export interface PostActionProps extends Omit<ViewProps, 'style'> {
   children?: ReactNode;
 }
 
-/** The header's trailing slot — a badge, a menu, a "world" pill. */
+/** The header's trailing slot - a badge, a menu, a "world" pill. */
 const PostAction = forwardRef<View, PostActionProps>(
   ({ style, children, ...props }, ref) => {
     const styles = usePostStyles();
@@ -423,7 +423,7 @@ export interface PostBodyProps extends Omit<ViewProps, 'children' | 'style'> {
  *
  * Hashtags and mentions inside a string child are picked out and coloured.
  * They are found in the text rather than declared, because a post body arrives
- * as one string from wherever it was typed — asking the caller to pre-split it
+ * as one string from wherever it was typed - asking the caller to pre-split it
  * would mean every caller writing the same tokeniser.
  *
  * A non-string child is left entirely alone: it has already been laid out by
@@ -477,7 +477,7 @@ interface Token {
  * Splits a body into plain runs, hashtags and mentions.
  *
  * The tag pattern stops at whitespace and at punctuation that ends a sentence,
- * so "#mesh." highlights the tag and leaves the full stop alone — the naive
+ * so "#mesh." highlights the tag and leaves the full stop alone - the naive
  * `\S+` swallows it and the sentence loses its ending.
  */
 function tokenize(text: string): Token[] {
@@ -530,7 +530,7 @@ const statTone: Record<'default' | 'like' | 'save' | 'repost', keyof ThemeColors
 
 export interface PostStatProps extends Omit<PressableProps, 'children' | 'style'> {
   style?: StyleProp<ViewStyle>;
-  /** The icon component itself, not an element — it is re-rendered on toggle. */
+  /** The icon component itself, not an element - it is re-rendered on toggle. */
   icon?: ComponentType<{ size?: number; color?: string; filled?: boolean }>;
   /** The number, or a word where a number would be meaningless ("Save"). */
   value?: ReactNode;
@@ -547,7 +547,7 @@ export interface PostStatProps extends Omit<PressableProps, 'children' | 'style'
  * One count in the footer, and the control that changes it.
  *
  * panelui animates the value when it changes; this adaptation renders it
- * statically — reanimated's babel plugin is not configured in this app, so
+ * statically - reanimated's babel plugin is not configured in this app, so
  * animated values would only warn at runtime. The number is still the point:
  * in Airplane the views stat is the hero of the card, not a toggle.
  */

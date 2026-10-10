@@ -79,7 +79,7 @@ const listeners = new Set<FeedListener>();
 
 /**
  * Subscribe to feed mutations. Returns an unsubscribe function.
- * The callback carries no payload — re-query with listFeedPosts().
+ * The callback carries no payload - re-query with listFeedPosts().
  */
 export function subscribeFeed(cb: FeedListener): () => void {
   listeners.add(cb);

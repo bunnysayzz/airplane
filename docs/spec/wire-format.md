@@ -33,8 +33,8 @@ The leading `0` is a domain-separation tag so a pre-image can never be
 confused with a full event.
 
 - **`id`** = `SHA-256(canonical pre-image)` (32 bytes).
-- **`sig`** = `ed25519_sign(secretKey, id)` (64 bytes, over the id — not the
-  pre-image — so verifiers hash once and compare).
+- **`sig`** = `ed25519_sign(secretKey, id)` (64 bytes, over the id - not the
+  pre-image - so verifiers hash once and compare).
 - Verification = recompute `id` from fields 1–6, constant-time-compare with
   field 0, then `ed25519_verify(sig, id, pubkey)`.
 

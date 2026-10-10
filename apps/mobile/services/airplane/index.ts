@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// @airplane mobile services — public surface (replaces services/mastodon/*).
+// @airplane mobile services - public surface (replaces services/mastodon/*).
 
 export type { PostCardModel } from './types';
 export {

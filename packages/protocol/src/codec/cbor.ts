@@ -5,7 +5,7 @@
 // Canonical pre-image for id/sig (7-position array):
 //   [0, pubkey(32B bstr), created_at(uint), kind(uint), geohash(tstr),
 //    tags(arr), content(tstr)]
-// See docs/spec/wire-format.md — the spec is the source of truth.
+// See docs/spec/wire-format.md - the spec is the source of truth.
 
 import { decode, encode } from 'cbor-x';
 import { sha256 } from '@noble/hashes/sha2.js';

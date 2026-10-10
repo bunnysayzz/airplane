@@ -16,7 +16,7 @@ What we chose, stated plainly.
 
 ## Consequences
 
-What this choice buys us and what it costs us. Be honest about the downsides —
+What this choice buys us and what it costs us. Be honest about the downsides -
 that's the point of writing it down.
 
 ## Alternatives considered
@@ -51,7 +51,7 @@ We build with React Native + Expo. The decisive factor was BLE: RN's BLE
 ecosystem (`react-native-ble-plx`, `react-native-ble-manager`,
 `react-native-bluetooth-ble` with central + peripheral + L2CAP + background)
 is healthier than Flutter's, where the leading library (`flutter_blue_plus`)
-went proprietary at v2.0 with a free tier that phones home — hostile to an
+went proprietary at v2.0 with a free tier that phones home - hostile to an
 open-source privacy-first project.
 
 ## Consequences
@@ -62,7 +62,7 @@ fragmentation risk and still face the universal hard limits: iOS background
 BLE is OS-crippled, iOS↔Android background discovery over pure BLE is
 impossible, and ~30–40% of the BLE work is native Swift/Kotlin regardless.
 Apple Guideline 1.2 (Feb 2026) explicitly targets anonymous chat apps, so
-store review risk is real — the app ships sideloadable open source.
+store review risk is real - the app ships sideloadable open source.
 
 ## Alternatives considered
 
@@ -73,7 +73,7 @@ bespoke native code).
 ## Reconsider when
 
 If Apple's App Store review rules harden further, or if a Flutter BLE library
-emerges that is fully open-source and maintained — re-score before P3 (real
+emerges that is fully open-source and maintained - re-score before P3 (real
 BLE wiring).
 
 *Full rationale lives in `docs/blueprint/OPERATIONS.md` §13 (UI verdict) and

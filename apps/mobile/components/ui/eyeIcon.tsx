@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// EyeIcon — the views glyph for Post.Stat.
+// EyeIcon - the views glyph for Post.Stat.
 //
 // panelui's Post.Stat takes an icon *component* (`icon={EyeIcon}`), not an
 // element, and re-renders it with `filled` on toggle. panelui ships its own

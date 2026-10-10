@@ -13,7 +13,7 @@ interface TopBarProps {
 }
 
 // Pugdon's top bar with the account menu stripped: Airplane is anonymous, so there
-// is no avatar, no profile and no logout — just the wordmark and settings.
+// is no avatar, no profile and no logout - just the wordmark and settings.
 export const TopBar: React.FC<TopBarProps> = ({ onSettingsPress }) => {
     const { colors, type, coat } = useTheme();
     const styles = useThemedStyles(makeStyles);

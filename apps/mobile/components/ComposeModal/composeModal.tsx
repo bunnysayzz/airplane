@@ -58,7 +58,7 @@ interface ComposeModalProps {
 }
 
 // Pugdon's compose sheet, stripped for Airplane v1: text only (no media, polls, custom
-// emoji, visibility or language pickers — Airplane posts are anonymous and public by
+// emoji, visibility or language pickers - Airplane posts are anonymous and public by
 // design), plus the product's signature control: the opt-in World uplink switch.
 // Publishing goes straight to services/airplane's composer (signed mesh post, stored
 // locally; the uplink tag is only added when the switch is on).
@@ -189,7 +189,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
 
     // Deviation from pugdon: the Modal unmounts once the close animation finishes
     // (useSheetTransition's `mounted`), instead of staying presented with the sheet parked
-    // off-screen — an invisible presented modal would keep swallowing touches.
+    // off-screen - an invisible presented modal would keep swallowing touches.
     return (
         <Modal visible={mounted} transparent animationType="none" statusBarTranslucent navigationBarTranslucent onRequestClose={onClose}>
             <View style={styles.root}>

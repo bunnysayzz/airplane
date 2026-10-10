@@ -8,7 +8,7 @@
 //
 // SCOPE NOTE: v2's full KeyStorePort also covers the RELAY identity
 // (secp256k1 Schnorr for the Nostr envelope) plus rotation/wipe/panic-wipe.
-// The relay key is a separate, independently generated, UNLINKABLE keypair —
+// The relay key is a separate, independently generated, UNLINKABLE keypair -
 // deliberately OUT OF SCOPE here (see identity.ts trade-off comment).
 // Rotation and wipe are P2 (they need the settings UI).
 
@@ -24,7 +24,7 @@ export interface DeviceKeypair {
 }
 
 /**
- * Key custody port (mesh identity only — see scope note above).
+ * Key custody port (mesh identity only - see scope note above).
  *
  * Implementations must be safe to call from any async context; callers do
  * not serialize access.
@@ -41,7 +41,7 @@ export interface KeyStorePort {
 
   /**
    * Ed25519-sign `msg` with the persisted key. Returns 64 bytes.
-   * Throws when no keypair is stored. The key never leaves the store —
+   * Throws when no keypair is stored. The key never leaves the store -
    * prefer this over loadKeypair()+sign when the caller only needs a
    * signature (P3: move all app signing behind this so key material never
    * enters app memory).
@@ -71,11 +71,11 @@ function checkKeypair(kp: DeviceKeypair, what: string): void {
 }
 
 /**
- * In-memory KeyStorePort. For tests and dev only — the key lives in the JS
+ * In-memory KeyStorePort. For tests and dev only - the key lives in the JS
  * heap and dies with the process.
  *
  * `backing` is the shared persistence: two instances constructed over the
- * same Map behave like one keystore surviving an app restart — the "restart"
+ * same Map behave like one keystore surviving an app restart - the "restart"
  * test seam (re-instantiate the keystore; the loaded key must be identical).
  */
 export class MemoryKeyStore implements KeyStorePort {
@@ -124,7 +124,7 @@ export interface SecureStoreLike {
 
 /** Options forwarded to setItemAsync (e.g. expo-secure-store keychainAccessible). */
 export interface SecureStoreItemOptions {
-  /** e.g. `SecureStore.AFTER_FIRST_UNLOCK` — background relay signing needs the key available without the device being unlocked (blueprint §4.7 trade-off). */
+  /** e.g. `SecureStore.AFTER_FIRST_UNLOCK` - background relay signing needs the key available without the device being unlocked (blueprint §4.7 trade-off). */
   keychainAccessible?: number;
   [option: string]: unknown;
 }
@@ -162,7 +162,7 @@ function fromHex(hex: string): Uint8Array {
  * KeyStorePort over expo-secure-store (iOS Keychain / Android Keystore,
  * hardware-backed where the device offers it).
  *
- * The native module is INJECTED — this package never imports it, so the
+ * The native module is INJECTED - this package never imports it, so the
  * package stays hermetic and unit-testable. The app wires the real module:
  *
  *   new SecureKeyStore(SecureStore, {
@@ -174,7 +174,7 @@ function fromHex(hex: string): Uint8Array {
  * new identity over someone else's slot.
  *
  * TODO(P3): real device persistence needs the native module linked, which
- * Expo dev builds provide (Expo Go / bare node do NOT — fall back to
+ * Expo dev builds provide (Expo Go / bare node do NOT - fall back to
  * MemoryKeyStore there).
  */
 export class SecureKeyStore implements KeyStorePort {

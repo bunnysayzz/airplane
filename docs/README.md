@@ -1,6 +1,6 @@
 # docs/
 
-Project Airplane documentation. Start here if you're new to the repo — or jump straight to the [root README](../README.md) for setup.
+Project Airplane documentation. Start here if you're new to the repo - or jump straight to the [root README](../README.md) for setup.
 
 ## Index
 
@@ -14,15 +14,15 @@ Project Airplane documentation. Start here if you're new to the repo — or jump
 | [`blueprint/ROADMAP.md`](blueprint/ROADMAP.md) | Phased build plan P0–P6 with acceptance criteria and definitions of done |
 | [`blueprint/PLAN_CHANGELOG.md`](blueprint/PLAN_CHANGELOG.md) | What changed between blueprint v1 (pure offline) and v2 (hybrid mesh + relay) |
 | [`assumption-register.md`](assumption-register.md) | Every ASSUMPTION tag with validation plan + owner |
-| [`spec/wire-format.md`](spec/wire-format.md) | Event encoding spec — **source of truth** for `packages/protocol` (code follows spec) |
+| [`spec/wire-format.md`](spec/wire-format.md) | Event encoding spec - **source of truth** for `packages/protocol` (code follows spec) |
 | [`spec/flood.md`](spec/flood.md) | Controlled-flood relay spec: TTL, jitter, seen-cache dedup, fragments |
-| [`adr/0001-template.md`](adr/0001-template.md) | ADR template — use it for every new architecture decision |
-| [`release-runbook.md`](release-runbook.md) | How releases are cut: tagging, signing, checksums, GitHub Releases + Obtainium + TestFlight *(landing — in progress)* |
+| [`adr/0001-template.md`](adr/0001-template.md) | ADR template - use it for every new architecture decision |
+| [`release-runbook.md`](release-runbook.md) | How releases are cut: tagging, signing, checksums, GitHub Releases + Obtainium + TestFlight *(landing - in progress)* |
 | [`threat-model.md`](threat-model.md) | Security posture. Currently a P1 DRAFT stub; the full threat model lands in P4 |
 
 ## Blueprint status
 
-The `blueprint/` files are a byte-identical snapshot of the research and design pass that kicked off the project. As the code matures, `spec/` and `adr/` supersede them — but nothing here gets edited in place. New decisions go in ADRs.
+The `blueprint/` files are a byte-identical snapshot of the research and design pass that kicked off the project. As the code matures, `spec/` and `adr/` supersede them - but nothing here gets edited in place. New decisions go in ADRs.
 
 ## Getting started
 

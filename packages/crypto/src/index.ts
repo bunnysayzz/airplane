@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// @airplane/crypto — public surface.
+// @airplane/crypto - public surface.
 
 export type {
   DeviceKeypair,

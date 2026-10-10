@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // TransportPort: the BLE transport contract.
-// FROZEN — breaking changes need an ADR. Implementations live in the
+// FROZEN - breaking changes need an ADR. Implementations live in the
 // platform packages (BLE GATT client/peripheral); this package only defines
 // the interface so flood logic stays transport-agnostic and testable.
 

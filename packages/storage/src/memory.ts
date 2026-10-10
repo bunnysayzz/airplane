@@ -133,7 +133,7 @@ export class MemoryEventStore implements StorePort {
     if (pendingMatch) this.pendingTombstones.delete(idHex);
     this.events.set(idHex, row);
 
-    // A kind-3 tombstone applies deletion to its target post immediately —
+    // A kind-3 tombstone applies deletion to its target post immediately -
     // but ONLY when the tombstone's author pubkey matches the post's author.
     if (e.kind === 3) {
       const target = taggedPostId(e);
@@ -187,7 +187,7 @@ export class MemoryEventStore implements StorePort {
       if (bytesToHex(row.event.pubkey) === authorHex) {
         row.deleted = true;
       }
-      // else: forged/mismatched tombstone — stored, not honored.
+      // else: forged/mismatched tombstone - stored, not honored.
     } else {
       // Never narrows a pending entry armed by the trusted markDeleted
       // primitive ('any' stays 'any').
@@ -207,7 +207,7 @@ export class MemoryEventStore implements StorePort {
       row.deleted = true;
     } else {
       // Tombstone-wins: remember until the post row arrives. NOTE: this is
-      // the low-level primitive and trusts the caller — authorship is
+      // the low-level primitive and trusts the caller - authorship is
       // enforced at the saveEvent ingress for kind-3 events (applyTombstone).
       // A pending entry armed via markDeleted cannot know the tombstone's
       // author, so it applies to whatever post arrives with this id.

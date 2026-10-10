@@ -5,7 +5,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { listFeedPosts, subscribeFeed } from '../../services/airplane/feed';
 import { trackViewability } from '../../services/airplane/viewTracker';
 import type { PostCardModel } from '../../services/airplane/types';
-// TODO(worker2): PostCard is built by another worker — this import resolves when it lands.
+// TODO(worker2): PostCard is built by another worker - this import resolves when it lands.
 import { PostCard } from '../../components/PostCard';
 import { hitSlopFor } from '../../src/theme/shape';
 import { useTheme } from '../../src/theme/themeContext';
@@ -36,7 +36,7 @@ interface TimelineProps {
     feeds: FeedTab[];
     activeFeed: FeedKey;
     onFeedChange: (feed: FeedKey) => void;
-    // TODO(worker4): wire to services/airplane — `cells` is a stub data prop for now.
+    // TODO(worker4): wire to services/airplane - `cells` is a stub data prop for now.
     // 'around' needs the viewer's geohash-5 cell (no location provider in the app yet);
     // 'world' is the opportunistic Nostr-relay feed, which has no local query yet.
     cells: string[];

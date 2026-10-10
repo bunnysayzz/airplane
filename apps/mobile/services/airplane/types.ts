@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// PostCardModel — the single source of truth for the card view-model.
+// PostCardModel - the single source of truth for the card view-model.
 // The post card UI (separate worker) builds against this exact shape.
 
 export interface PostCardModel {

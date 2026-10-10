@@ -15,7 +15,7 @@ import { useI18n } from '../../src/i18n/i18nContext';
 import { EXPLAINER_CARDS, ExplainerCard } from '../Setup/explainerCard';
 
 // Deliberately opened in-app instead of a browser link: Airplane is an offline-first,
-// sideloaded app — at a protest or on a plane there may be no internet to fetch
+// sideloaded app - at a protest or on a plane there may be no internet to fetch
 // GitHub. The same content is the onboarding privacy card (EXPLAINER_CARDS[1]).
 // The full PRIVACY.md is linked at the bottom for when the user is online.
 const PRIVACY_URL = 'https://github.com/enginoor/airplane/blob/main/PRIVACY.md';

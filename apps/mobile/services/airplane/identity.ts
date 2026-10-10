@@ -7,18 +7,18 @@
 // expo-secure-store; in Jest/node it falls back to an in-memory store.
 // Tests inject their own port with `setKeyStore`.
 //
-// PRIVACY TRADE-OFF — stable key = linkable pseudonym:
+// PRIVACY TRADE-OFF - stable key = linkable pseudonym:
 // A stable per-device keypair means every post, receipt, and tombstone from
 // this device carries the same pubkey, so anyone holding two events can prove
 // they came from one device. This is the price of enforceable tombstones and
-// honest view counts — the v2 blueprint accepts it: authorship continuity
+// honest view counts - the v2 blueprint accepts it: authorship continuity
 // REQUIRES continuity of identity (an ephemeral key makes
 // `tombstone.pubkey == post.pubkey` unenforceable and receipt dedup
 // meaningless across restarts).
 // Rotation (settings -> burn key -> new pubkey) abandons old authorship: a
 // tombstone from the new key cannot delete posts signed by the old one.
 // The RELAY identity (secp256k1/Nostr envelope, v2 §4.7) is a SEPARATE,
-// independently generated keypair with no published binding — unlinkable to
+// independently generated keypair with no published binding - unlinkable to
 // this mesh key by default. Not built here.
 //
 // P3 hardening: signing still happens with the secret key in app memory via
@@ -87,7 +87,7 @@ export async function getDeviceKeypair(): Promise<DeviceKeypair> {
 
 /**
  * Test seam: drop the cached keypair (and any injected keystore) so the
- * next getDeviceKeypair() load-or-generates fresh — simulating a new
+ * next getDeviceKeypair() load-or-generates fresh - simulating a new
  * device / burned identity.
  */
 export function __resetDeviceKeypairForTests(): void {

@@ -1,10 +1,10 @@
-# Airplane — Architecture Diagram Mesh (canonical)
+# Airplane - Architecture Diagram Mesh (canonical)
 
 > Synthesized 2026-10-10 by the architecture coordinator from the diagram-specialist worker output.
 > **v2 re-plan (2026-10-10, Worker 3):** added the RELAY subsystem (RELAY-1…5) + third-party Nostr-relay
 > actor; new diagrams C4, G2, I6/I7/I8; security boundary TB3. All stable v1 node IDs unchanged.
 > All node IDs are stable and identical to [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md) §1 (63 nodes: 58 v1 + 5 RELAY, verified by script).
-> Mermaid was syntax-checked, not rendered — run a renderer pass before publishing.
+> Mermaid was syntax-checked, not rendered - run a renderer pass before publishing.
 
 ---
 
@@ -15,7 +15,7 @@
 
 Node tokens are the registry IDs with the hyphen removed (Mermaid-safe), e.g. token `FEED1` =
 registry **`FEED-1`**. Every node label carries the exact registry ID, so traceability is preserved
-across all diagrams A–P. Five new registry nodes were added in v2 (RELAY-1…5 — see "Registry additions").
+across all diagrams A–P. Five new registry nodes were added in v2 (RELAY-1…5 - see "Registry additions").
 
 | Symbol | Meaning |
 |---|---|
@@ -25,7 +25,7 @@ across all diagrams A–P. Five new registry nodes were added in v2 (RELAY-1…5
 | `⟨external⟩` label prefix | Outside the app / not a registry node (actors, OS, GitHub) |
 | `⟨native⟩` label prefix | Platform native code, touched only via TS interfaces |
 | DB cylinder | Persistent store (SQLite table set / MMKV / Keychain-Keystore) |
-| `verify-before-render` | Trust boundary marker — bytes cross only after EVENT-2 validation |
+| `verify-before-render` | Trust boundary marker - bytes cross only after EVENT-2 validation |
 
 ### Registry additions
 
@@ -48,7 +48,7 @@ types (`EVENT_FRAG`/`SYNC_HELLO`/`SYNC_WANT`/`SYNC_OFFER`) are wire labels, not 
 ## A. Overall application architecture
 
 _One process, no backend: the phone is the whole system. The only "cloud" is static file hosting
-(GitHub Releases) for sideload updates — it never sees user data — plus third-party Nostr relays
+(GitHub Releases) for sideload updates - it never sees user data - plus third-party Nostr relays
 (dumb pipes for opt-in posts only). Neither is Airplane infrastructure; Airplane runs no servers._
 
 ```mermaid
@@ -59,8 +59,8 @@ flowchart TB
     end
     USER["⟨external⟩ User<br/>(taps, reads, posts)"]
 
-    subgraph PHONE["This phone — single app process (no server, no containers)"]
-        subgraph APP_L["APP — composition root"]
+    subgraph PHONE["This phone - single app process (no server, no containers)"]
+        subgraph APP_L["APP - composition root"]
             APP1["APP-1 AppEntry<br/>(boot sequence, DI graph)"]
             APP2["APP-2 NavigationHost"]
             APP3["APP-3 AppLifecycle<br/>(fg/bg state machine)"]
@@ -68,7 +68,7 @@ flowchart TB
             APP5["APP-5 BackgroundCoordinator"]
             APP6["APP-6 PermissionGate"]
         end
-        subgraph UI_L["UI — presentation (renders only)"]
+        subgraph UI_L["UI - presentation (renders only)"]
             UI1["UI-1 FeedScreen"]
             UI2["UI-2 ComposerSheet"]
             UI3["UI-3 PostDetailScreen"]
@@ -77,7 +77,7 @@ flowchart TB
             UI6["UI-6 OnboardingFlow"]
             UI7["UI-7 ThemeI18nShell"]
         end
-        subgraph DOMAIN["FEED — domain (ranking/views/scoping/publishing)"]
+        subgraph DOMAIN["FEED - domain (ranking/views/scoping/publishing)"]
             FEED1["FEED-1 FeedStore"]
             FEED2["FEED-2 RankingEngine"]
             FEED3["FEED-3 ViewTracker"]
@@ -85,7 +85,7 @@ flowchart TB
             FEED5["FEED-5 PostPublisher"]
             FEED6["FEED-6 TombstoneManager"]
         end
-        subgraph EVT["EVENT — signed event model (trust boundary)"]
+        subgraph EVT["EVENT - signed event model (trust boundary)"]
             EVENT1["EVENT-1 EventBuilder"]
             EVENT2["EVENT-2 EventVerifier<br/>verify-before-render"]
             EVENT3["EVENT-3 CborCodec"]
@@ -93,7 +93,7 @@ flowchart TB
             EVENT5["EVENT-5 EventBus"]
             EVENT6["EVENT-6 CanonicalSerializer"]
         end
-        subgraph MESHN["MESH — BLE transport (opaque bytes only)"]
+        subgraph MESHN["MESH - BLE transport (opaque bytes only)"]
             MESH1["MESH-1 MeshEngine"]
             MESH2["MESH-2 FloodRouter"]
             MESH3["MESH-3 Fragmenter"]
@@ -107,19 +107,19 @@ flowchart TB
             MESH11["MESH-11 BroadcastScheduler"]
             MESH12["MESH-12 BleNativeModule<br/>⟨native⟩ TurboModule → IBleAdapter"]
         end
-        subgraph CRYPT["CRYPTO — key custody (leaf)"]
+        subgraph CRYPT["CRYPTO - key custody (leaf)"]
             CRYPTO1["CRYPTO-1 KeyManager<br/>(private key never leaves)"]
             CRYPTO2["CRYPTO-2 Ed25519Ops"]
             CRYPTO3["CRYPTO-3 PeerIdRotator"]
         end
-        subgraph RELAYN["RELAY — opportunistic global relay (L4b, pure TS)"]
+        subgraph RELAYN["RELAY - opportunistic global relay (L4b, pure TS)"]
             RELAY1["RELAY-1 RelayClient<br/>(wss pool; Nostr sessions)"]
             RELAY2["RELAY-2 UplinkQueue<br/>(opt-in events; durable)"]
             RELAY3["RELAY-3 DownlinkSync<br/>(REQ → world feed)"]
             RELAY4["RELAY-4 RelayDirectory<br/>(relay list + health)"]
             RELAY5["RELAY-5 NostrAdapter<br/>(envelope sign/parse)"]
         end
-        subgraph STOREN["STORE — persistence (leaf)"]
+        subgraph STOREN["STORE - persistence (leaf)"]
             STORE1["STORE-1 Database<br/>(op-sqlite, WAL)"]
             STORE2["STORE-2 EventRepository"]
             STORE3["STORE-3 PeerRepository"]
@@ -135,7 +135,7 @@ flowchart TB
             OBS2["OBS-2 MeshMetrics"]
             OBS3["OBS-3 CrashAdapter<br/>(opt-in → GlitchTip)"]
         end
-        subgraph BUILDN["DIST — tooling (build-time only)"]
+        subgraph BUILDN["DIST - tooling (build-time only)"]
             DIST1["DIST-1 BuildPipeline<br/>(EAS profiles)"]
             DIST2["DIST-2 SideloadPackager"]
         end
@@ -144,13 +144,13 @@ flowchart TB
     subgraph SECSTORE["⟨external⟩ Platform secure storage"]
         KS["⟨native⟩ Keychain (iOS) / Keystore (Android)<br/>Ed25519 identity private key"]
     end
-    subgraph GHOSTUFF["⟨external⟩ Distribution only — NOT a backend (no user data)"]
+    subgraph GHOSTUFF["⟨external⟩ Distribution only - NOT a backend (no user data)"]
         GHREL["GitHub Releases<br/>(signed APK/IPA + SHA256SUMS)"]
         OBTAIN["Obtainium<br/>(Android update tracker)"]
         TF["TestFlight / App Store / Play<br/>(iOS + optional store tracks)"]
         EAS["EAS Build (CI)"]
     end
-    subgraph NOSTRNET["⟨external⟩ Third-party Nostr relays — NOT Airplane infra (untrusted dumb pipes)"]
+    subgraph NOSTRNET["⟨external⟩ Third-party Nostr relays - NOT Airplane infra (untrusted dumb pipes)"]
         NR["wss://relay… (anyone-run)<br/>sees: public opt-in posts + courier IP"]
     end
 
@@ -163,7 +163,7 @@ flowchart TB
     RELAY2 --> RELAY1
     RELAY4 -.->|"relay list + health"| RELAY1
     RELAY5 -.->|"envelope codec"| RELAY1
-    RELAY1 <-->|"Nostr EVENT/REQ/CLOSE/EOSE<br/>(relays UNTRUSTED — dumb pipes)"| NR
+    RELAY1 <-->|"Nostr EVENT/REQ/CLOSE/EOSE<br/>(relays UNTRUSTED - dumb pipes)"| NR
     RELAY3 -->|"inbound → verify-before-render"| EVENT2
     MESH12 <-->|"BLE GATT frames<br/>EVENT_FRAG / SYNC_*<br/>(signed, opaque bytes)"| P1
     MESH12 <--> P2
@@ -194,7 +194,7 @@ _The strict rule is UI → FEED → EVENT → {MESH, STORE}; nothing depends upw
 via TS interfaces (`IBleAdapter`, `IDatabase`, `IHotState`, `ISecureStore`, `ILocationProvider`).
 Five carve-outs exist (dashed): FEED→MESH-1 publish-only, MESH→EVENT inbound-verify,
 FEED-4 as a shared scope-policy leaf, FEED→RELAY-1 uplink/world-feed-only, RELAY→EVENT inbound-verify.
-Circular-dependency check: NONE — see note below._
+Circular-dependency check: NONE - see note below._
 
 ```mermaid
 flowchart TB
@@ -265,18 +265,18 @@ flowchart TB
     BU1 x--x|"✕ FORBIDDEN: UI never touches<br/>EVENT/MESH/STORE/CRYPTO"| BE
     BM x--x|"✕ FORBIDDEN: mesh never ranks,<br/>renders, or signs"| BF1
     BE x--x|"✕ FORBIDDEN: event layer<br/>knows no BLE/peers/UI"| BM
-    BS x--x|"✕ FORBIDDEN: leaf —<br/>no upward deps"| BF1
+    BS x--x|"✕ FORBIDDEN: leaf -<br/>no upward deps"| BF1
 ```
 
 **Circular-dependency verification (manual trace, 2026-10-10):**
-- Candidate cycle 1: `MESH-2 → FEED-4 → ?` — FEED-4 depends only on LOC-1/2. No path back to MESH. ✕ no cycle.
-- Candidate cycle 2: `FEED-3/5/6 → MESH-1 → MESH-2 → FEED-4` — FEED-4 does not depend on FEED-3/5/6. ✕ no cycle.
-- Candidate cycle 3: `MESH → EVENT-2 → STORE-2` — STORE-2 is a leaf. ✕ no cycle.
-- Candidate cycle 4: `EVENT-2 → FEED-4 → LOC-1` — LOC-1 depends on nothing in-app. ✕ no cycle.
-- Candidate cycle 5 (v2): `RELAY-1 → EVENT-2 → STORE-2` — STORE-2 is a leaf. ✕ no cycle.
-- Candidate cycle 6 (v2): `FEED-1 → RELAY-1 → ?` — RELAY depends on EVENT/STORE/CRYPTO only (never FEED); world-feed reads flow FEED-1 → STORE-2, not back into RELAY. ✕ no cycle.
+- Candidate cycle 1: `MESH-2 → FEED-4 → ?` - FEED-4 depends only on LOC-1/2. No path back to MESH. ✕ no cycle.
+- Candidate cycle 2: `FEED-3/5/6 → MESH-1 → MESH-2 → FEED-4` - FEED-4 does not depend on FEED-3/5/6. ✕ no cycle.
+- Candidate cycle 3: `MESH → EVENT-2 → STORE-2` - STORE-2 is a leaf. ✕ no cycle.
+- Candidate cycle 4: `EVENT-2 → FEED-4 → LOC-1` - LOC-1 depends on nothing in-app. ✕ no cycle.
+- Candidate cycle 5 (v2): `RELAY-1 → EVENT-2 → STORE-2` - STORE-2 is a leaf. ✕ no cycle.
+- Candidate cycle 6 (v2): `FEED-1 → RELAY-1 → ?` - RELAY depends on EVENT/STORE/CRYPTO only (never FEED); world-feed reads flow FEED-1 → STORE-2, not back into RELAY. ✕ no cycle.
 - **Result: no circular dependencies.** FEED-4 stays acyclic only because it is policy-pure (no
-  MESH/EVENT/STORE imports) — enforce with an import lint rule.
+  MESH/EVENT/STORE imports) - enforce with an import lint rule.
 - **Prohibited directions restated:** nothing depends on APP (it is the root, depended on by none);
   UI depends only on FEED (+ OBS-2 read, APP-2 nav); native modules are consumed exclusively through
   their TS interfaces (TEST-1/TEST-2 swap the implementation without touching callers);
@@ -293,7 +293,7 @@ diagrams for readability: C1 = UI+FEED+APP · C2 = MESH+EVENT+CRYPTO · C3 = STO
 
 ```mermaid
 flowchart TB
-    subgraph UI_S["UI (L1) — depends on FEED-1 (+FEED-3 hook), OBS-2, APP-2 only"]
+    subgraph UI_S["UI (L1) - depends on FEED-1 (+FEED-3 hook), OBS-2, APP-2 only"]
         UI1["UI-1 FeedScreen<br/>(FlashList; impressions → FEED-3)"]
         UI2["UI-2 ComposerSheet<br/>(≤280 chars; offline-first submit)"]
         UI3["UI-3 PostDetailScreen<br/>(live view count; own-post delete)"]
@@ -302,7 +302,7 @@ flowchart TB
         UI6["UI-6 OnboardingFlow<br/>(permissions, offline explainer, keygen)"]
         UI7["UI-7 ThemeI18nShell<br/>(dark-first tokens, i18n)"]
     end
-    subgraph FEED_S["FEED (L2) — the domain; never knows BLE/SQL"]
+    subgraph FEED_S["FEED (L2) - the domain; never knows BLE/SQL"]
         FEED1["FEED-1 FeedStore<br/>IFeedStore: UI-facing facade"]
         FEED2["FEED-2 RankingEngine<br/>pure: log10(1+v)/(age_h+2)^1.5"]
         FEED3["FEED-3 ViewTracker<br/>impression ≥1.5s/50% → receipt"]
@@ -310,7 +310,7 @@ flowchart TB
         FEED5["FEED-5 PostPublisher<br/>draft→sign→store→flood; offline queue"]
         FEED6["FEED-6 TombstoneManager<br/>author-only delete (LWW)"]
     end
-    subgraph APP_S["APP (L0) — composition root"]
+    subgraph APP_S["APP (L0) - composition root"]
         APP1["APP-1 AppEntry<br/>boot: config→migrate→key→db→wire"]
         APP2["APP-2 NavigationHost<br/>airplane://post/‹id› deep links"]
         APP3["APP-3 AppLifecycle<br/>fg/bg → MESH-9 duty policy"]
@@ -379,7 +379,7 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    subgraph MESH_S["MESH (L4) — moves opaque bytes; relays never sign"]
+    subgraph MESH_S["MESH (L4) - moves opaque bytes; relays never sign"]
         MESH1["MESH-1 MeshEngine<br/>facade: start/stop order, publish(), injectRelay()"]
         MESH2["MESH-2 FloodRouter<br/>seen? TTL? scope? → jittered rebroadcast"]
         MESH3["MESH-3 Fragmenter<br/>event → 11B-header frames ≤469B"]
@@ -393,7 +393,7 @@ flowchart TB
         MESH11["MESH-11 BroadcastScheduler<br/>timer wheel; per-peer cap 64"]
         MESH12["MESH-12 BleNativeModule<br/>⟨native⟩ IBleAdapter impl"]
     end
-    subgraph EVENT_S["EVENT (L3) — the signed-event trust boundary"]
+    subgraph EVENT_S["EVENT (L3) - the signed-event trust boundary"]
         EVENT1["EVENT-1 EventBuilder<br/>buildPost/buildReceipt/buildTombstone"]
         EVENT2["EVENT-2 EventVerifier<br/>cheap→expensive check order"]
         EVENT3["EVENT-3 CborCodec<br/>8-position canonical array"]
@@ -401,7 +401,7 @@ flowchart TB
         EVENT5["EVENT-5 EventBus<br/>verified/stored/dropped pub-sub"]
         EVENT6["EVENT-6 CanonicalSerializer<br/>sha256 → event id (consensus-critical)"]
     end
-    subgraph CRYPTO_S["CRYPTO (L5) — leaf; secrets never cross upward"]
+    subgraph CRYPTO_S["CRYPTO (L5) - leaf; secrets never cross upward"]
         CRYPTO1["CRYPTO-1 KeyManager<br/>Keychain/Keystore; sign inside"]
         CRYPTO2["CRYPTO-2 Ed25519Ops<br/>@noble/curves wrappers"]
         CRYPTO3["CRYPTO-3 PeerIdRotator<br/>HMAC-epoch id, 15-min rotation"]
@@ -468,7 +468,7 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    subgraph STORE_S["STORE (L6) — leaf; only platform drivers below"]
+    subgraph STORE_S["STORE (L6) - leaf; only platform drivers below"]
         STORE1["STORE-1 Database<br/>op-sqlite; WAL; tx() helper; wipe()"]
         STORE2["STORE-2 EventRepository<br/>idempotent inserts; feed queries"]
         STORE3["STORE-3 PeerRepository<br/>peers + sync cursors + MTU hints"]
@@ -477,20 +477,20 @@ flowchart TB
         STORE6["STORE-6 HotState<br/>typed MMKV wrapper (no secrets)"]
         STORE7["STORE-7 RetentionJanitor<br/>15-min purge; VACUUM >10MB freed"]
     end
-    subgraph LOC_S["LOC — cross-cutting; consumed by FEED/MESH"]
+    subgraph LOC_S["LOC - cross-cutting; consumed by FEED/MESH"]
         LOC1["LOC-1 LocationService<br/>GPS → geohash-5; raw coords dropped"]
         LOC2["LOC-2 GeohashUtil<br/>encode/neighbors/valid (ngeohash)"]
     end
-    subgraph OBS_S["OBS — cross-cutting sink; depends on nothing"]
+    subgraph OBS_S["OBS - cross-cutting sink; depends on nothing"]
         OBS1["OBS-1 Logger<br/>1000-entry ring; allowlisted fields only"]
         OBS2["OBS-2 MeshMetrics<br/>tx/rx/dedup/drop/peer counters"]
         OBS3["OBS-3 CrashAdapter<br/>queue offline; flush when online"]
     end
-    subgraph DIST_S["DIST — build tooling (never ships in-app logic)"]
+    subgraph DIST_S["DIST - build tooling (never ships in-app logic)"]
         DIST1["DIST-1 BuildPipeline<br/>EAS dev/sideload-apk/sideload-ipa"]
         DIST2["DIST-2 SideloadPackager<br/>artifacts + .sha256 + RELEASES.md"]
     end
-    subgraph TEST_S["TEST — implement the same TS interfaces"]
+    subgraph TEST_S["TEST - implement the same TS interfaces"]
         TEST1["TEST-1 SimulatorTransport<br/>in-memory IGattTransport; N-node sim"]
         TEST2["TEST-2 BleFakes<br/>scripted IBleAdapter fake"]
         TEST3["TEST-3 EventFixtures<br/>deterministic keypair + vectors"]
@@ -536,7 +536,7 @@ World posts (`source='world'`) are never admitted to the mesh flood._
 
 ```mermaid
 flowchart TB
-    subgraph RELAY_S["RELAY (L4b) — internet path; pure TS, no RN deps"]
+    subgraph RELAY_S["RELAY (L4b) - internet path; pure TS, no RN deps"]
         RELAY1["RELAY-1 RelayClient<br/>wss pool; connect/disconnect<br/>publish + subscribe(REQ); failover"]
         RELAY2["RELAY-2 UplinkQueue<br/>durable; retry w/ backoff<br/>flush on connectivity"]
         RELAY3["RELAY-3 DownlinkSync<br/>REQ filters; EOSE handling<br/>dedup via EVENT-2"]
@@ -562,7 +562,7 @@ flowchart TB
     FEED5 -->|"opt-in posts only"| RELAY2
     FEED1 -.->|"world-feed query mode"| STORE2
 
-    STORE2["STORE-2 EventRepository<br/>(queue ops + world inserts — schema: Appendix D, migration 002)"]
+    STORE2["STORE-2 EventRepository<br/>(queue ops + world inserts - schema: Appendix D, migration 002)"]
     EVENT2["EVENT-2 EventVerifier"]
     CRYPTO1["CRYPTO-1 KeyManager<br/>(hosts the unlinkable Nostr keypair)"]
     OBS2["OBS-2 MeshMetrics"]
@@ -791,12 +791,12 @@ non-secret keypair. APP-1's `AppGraph` is the only place implementations are cho
 ## E. Runtime & process topology
 
 _One OS process. The JS thread owns policy; native threads own I/O. The IPC mechanism is the
-React Native bridge/JSI (TurboModule events) — labeled on every crossing._
+React Native bridge/JSI (TurboModule events) - labeled on every crossing._
 
 ```mermaid
 flowchart TB
     subgraph PROC["⟨external⟩ One app process (per OS)"]
-        subgraph JS["Hermes JS thread — single-threaded policy owner"]
+        subgraph JS["Hermes JS thread - single-threaded policy owner"]
             J_APP["APP-1/2/3/5: bootstrap, nav, lifecycle"]
             J_UI["UI-1…7: render (FlashList virtualization)"]
             J_FEED["FEED-1…6: ranking, receipts, scope, publish"]
@@ -805,7 +805,7 @@ flowchart TB
             J_STORE["STORE-1…7: query logic, repos, janitor"]
             J_OBS["OBS-1/2: ring buffer, counters"]
         end
-        subgraph NAT["Native threads — I/O owners (never block JS)"]
+        subgraph NAT["Native threads - I/O owners (never block JS)"]
             N_BLE["⟨native⟩ MESH-12 Swift/Kotlin<br/>CoreBluetooth queues / BT binder threads<br/>scan · advertise · GATT server/client"]
             N_SQL["⟨native⟩ op-sqlite JSI driver<br/>own threading; sync-ish calls"]
             N_MMKV["⟨native⟩ MMKV JSI<br/>synchronous reads"]
@@ -833,7 +833,7 @@ flowchart TB
     FGS -.-> N_BLE
     BGAPP -.-> N_BLE
 
-    note1["RULE: native → JS delivers small summaries (peer appeared,<br/>frame received). MESH-4 assembles in a bounded JS buffer,<br/>then EVENT-2 validates. Validation failure drops + counts —<br/>never throws across the bridge."]
+    note1["RULE: native → JS delivers small summaries (peer appeared,<br/>frame received). MESH-4 assembles in a bounded JS buffer,<br/>then EVENT-2 validates. Validation failure drops + counts -<br/>never throws across the bridge."]
 ```
 
 ---
@@ -849,10 +849,10 @@ flowchart LR
         SRC["enginoor/airplane<br/>source (Apache-2.0)"]
         CI["GitHub Actions CI<br/>lint · typecheck · unit · property"]
         EASB["EAS Build (DIST-1)<br/>profiles: dev / sideload-apk / sideload-ipa"]
-        SIGN["Sign in CI<br/>apksigner + GH-secret keystore<br/>(stable key — Obtainium needs it)"]
+        SIGN["Sign in CI<br/>apksigner + GH-secret keystore<br/>(stable key - Obtainium needs it)"]
         PKG["DIST-2 SideloadPackager<br/>airplane-‹ver›-arm64.apk<br/>+ .sha256 + RELEASES.md"]
     end
-    subgraph HOST["⟨external⟩ Static file hosting — no user data, no API"]
+    subgraph HOST["⟨external⟩ Static file hosting - no user data, no API"]
         GHR["GitHub Releases<br/>APK + AAB + SHA256SUMS"]
     end
     subgraph CHAN["⟨external⟩ Distribution channels"]
@@ -883,7 +883,7 @@ flowchart LR
     PH1 <-->|"BLE mesh (no internet needed)"| PH2
     PH2 <--> PH3
 
-    noteF["ROLLBACK = fast-forward hotfix (vX.Y.Z+1). Android forbids<br/>downgrading versionCode — there is no graceful rollback.<br/>Keep the pipeline runnable in <30 min: hotfix speed IS the rollback plan."]
+    noteF["ROLLBACK = fast-forward hotfix (vX.Y.Z+1). Android forbids<br/>downgrading versionCode - there is no graceful rollback.<br/>Keep the pipeline runnable in <30 min: hotfix speed IS the rollback plan."]
 ```
 
 ---
@@ -895,17 +895,17 @@ exactly one secret. Retention is TTL-driven (STORE-7); caches are bounded and re
 
 ```mermaid
 flowchart TB
-    subgraph SQLITE["SQLite (STORE-1 op-sqlite, WAL) — DDL per SYSTEM_DESIGN.md App. D"]
+    subgraph SQLITE["SQLite (STORE-1 op-sqlite, WAL) - DDL per SYSTEM_DESIGN.md App. D"]
         T_EVENTS[("events<br/>id PK · pubkey · kind(1/2/3)<br/>created_at · geohash(5)<br/>tags(CBOR) · content · sig<br/>received_at · expires_at · deleted")]
         T_RECEIPTS[("receipts<br/>PK(pubkey, post_id, day_bucket)<br/>event_id UNIQUE")]
-        T_VC[("view_counts<br/>post_id PK · views<br/>DERIVED — recomputed on migrate")]
+        T_VC[("view_counts<br/>post_id PK · views<br/>DERIVED - recomputed on migrate")]
         T_PEERS[("peers<br/>peer_id PK · first/last_seen<br/>rssi · mtu(hint) · platform")]
         T_SYNC[("sync_state<br/>peer_id PK · cursor_ts<br/>last_hello_at")]
         T_SEEN[("seen<br/>msg_tag PK · seen_at<br/>dedup spillover, 7d")]
         T_FRAG[("frag_buf<br/>PK(msg_tag, idx)<br/>reassembly spillover, 60s")]
         T_LOGS[("logs<br/>ts · level · tag · msg<br/>OBS-1 tail (200 rows)")]
     end
-    subgraph MMKVK["MMKV (STORE-6 HotState) — typed keys; NO secrets"]
+    subgraph MMKVK["MMKV (STORE-6 HotState) - typed keys; NO secrets"]
         K_GH["lastGeohash"]
         K_CFG["powerMode · retentionH<br/>locale · theme<br/>config overrides"]
         K_DRAFT["draftPost (7d TTL)"]
@@ -913,7 +913,7 @@ flowchart TB
     end
     subgraph KEYSTORE["⟨native⟩ Keychain/Keystore (CRYPTO-1 only)"]
         K_ID["Ed25519 identity private key<br/>(THE one secret)"]
-        K_EPOCH["peer-id epoch key (MMKV ok —<br/>not identity; unlinkable)"]
+        K_EPOCH["peer-id epoch key (MMKV ok -<br/>not identity; unlinkable)"]
     end
     subgraph REPOS["Repository interfaces (only writers)"]
         R2["STORE-2 EventRepository<br/>events · receipts · view_counts"]
@@ -921,7 +921,7 @@ flowchart TB
         R5["STORE-5 FragmentBuffer<br/>frag_buf"]
         R7["STORE-7 RetentionJanitor<br/>purge expired"]
     end
-    subgraph CACHES["Bounded caches (rebuildable — never load-bearing)"]
+    subgraph CACHES["Bounded caches (rebuildable - never load-bearing)"]
         C_SEEN["SeenCache LRU 10k<br/>(memory + seen spillover)"]
         C_RANK["Feed ranking window<br/>(FEED-1 memory; ≤2000 posts)"]
         C_REASM["Reassembly buffers<br/>(MESH-4; 64KB/peer cap)"]
@@ -962,7 +962,7 @@ flowchart TB
     CRYPTO1["CRYPTO-1 KeyManager"]
     CRYPTO3["CRYPTO-3 PeerIdRotator"]
 
-    noteG["RETENTION LIFECYCLE: expires_at = created_at + retentionH (default 24h).<br/>Receipts/tombstones share the target's lifetime (tombstone kept ≥ target).<br/>STORE-7 purges every 15 min + on boot; expired events are invisible AND unrelayed<br/>(MESH-2 checks expires_at — do not relay the dead). seen: 7d · peers: 7d inactive · frag_buf: 60s."]
+    noteG["RETENTION LIFECYCLE: expires_at = created_at + retentionH (default 24h).<br/>Receipts/tombstones share the target's lifetime (tombstone kept ≥ target).<br/>STORE-7 purges every 15 min + on boot; expired events are invisible AND unrelayed<br/>(MESH-2 checks expires_at - do not relay the dead). seen: 7d · peers: 7d inactive · frag_buf: 60s."]
 ```
 
 ### G2. Relay data flows (new in v2)
@@ -999,7 +999,7 @@ flowchart LR
     D1 --> D2 --> D3 --> D4 --> D5
     D4 -.->|"source='world' excluded<br/>from flood scope"| M
 
-    noteG2["SCHEMA (normative — SYSTEM_DESIGN.md Appendix D, migration 002):<br/>events.source ∈ {'mesh','world'} (default 'mesh', never rewritten);<br/>uplink_queue(event_id PK, kind, wrapped_at, views_snapshot, attempts,<br/>next_retry_at, priority, expires_at). World posts keep their ORIGIN<br/>geohash-5 in the geohash column (display + filter), but FEED-4<br/>mesh-scope checks never admit source='world' rows into the flood."]
+    noteG2["SCHEMA (normative - SYSTEM_DESIGN.md Appendix D, migration 002):<br/>events.source ∈ {'mesh','world'} (default 'mesh', never rewritten);<br/>uplink_queue(event_id PK, kind, wrapped_at, views_snapshot, attempts,<br/>next_retry_at, priority, expires_at). World posts keep their ORIGIN<br/>geohash-5 in the geohash column (display + filter), but FEED-4<br/>mesh-scope checks never admit source='world' rows into the flood."]
 ```
 
 ---
@@ -1010,7 +1010,7 @@ flowchart LR
 
 _Wire protocol: one frame envelope, four frame types. Flood = TTL-decrement + jitter + LRU dedup.
 Sync = negentropy-style inventory catch-up. Delivery guarantee, stated honestly: **best-effort
-flood, no ACKs, no delivery receipts** — the UI says "relaying…", never "delivered"._
+flood, no ACKs, no delivery receipts** - the UI says "relaying…", never "delivered"._
 
 ### H1. Frame types & fragment flow
 
@@ -1058,7 +1058,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    subgraph FLOOD["MESH-2 FloodRouter.onVerified(event, ingress) — decision is O(1), pure"]
+    subgraph FLOOD["MESH-2 FloodRouter.onVerified(event, ingress) - decision is O(1), pure"]
         D1{"seen(msg_tag)?<br/>(LRU 10k + seen table)"}
         D2{"TTL == 0?"}
         D3{"FEED-4 inScope(geohash)?"}
@@ -1074,7 +1074,7 @@ flowchart TB
         D4 -->|yes| DROP
         D4 -->|no| SCHED
     end
-    subgraph SYNC["MESH-8 StoreForwardSync — per-connection negentropy-style catch-up"]
+    subgraph SYNC["MESH-8 StoreForwardSync - per-connection negentropy-style catch-up"]
         S1["onConnect(peer): read cursor (STORE-3)"]
         S2["→ send SYNC_HELLO<br/>{cells, min_ts, 200 newest tags}"]
         S3["← recv peer HELLO<br/>diff = their_tags − my_tags"]
@@ -1087,7 +1087,7 @@ flowchart TB
         S4 -->|yes| S8
         S4 -->|no| S5 --> S6 --> S7 --> S8
     end
-    subgraph GUAR["Delivery guarantees — honest"]
+    subgraph GUAR["Delivery guarantees - honest"]
         G1["BEST-EFFORT flood: no ACKs, no retries to a specific peer"]
         G2["Redundancy comes from MANY relays + MESH-8 sync on every connect"]
         G3["Idempotent everywhere: same bytes 50× cost one dedup lookup"]
@@ -1121,14 +1121,14 @@ sequenceDiagram
     Note over KM: private key never leaves CRYPTO-1
     KM-->>EB: sig (64B)
     EB-->>FP: SignedEvent (id = sha256)
-    FP->>SR: insert(event) — idempotent
+    FP->>SR: insert(event) - idempotent
     FP->>FS: optimistic add → feed:updated
     U-->>U: post visible instantly, badge "relaying…"
-    FP->>ME: publish(event) — resolves when QUEUED ≤1s
+    FP->>ME: publish(event) - resolves when QUEUED ≤1s
     ME->>FR: fragment(compressed, msgTag, mtu)
     FR-->>ME: frames[] (11B hdr + ≤458B)
     ME->>BS: enqueue(frames, peers, TTL=7)
-    Note over BS: jitter 50–500ms per rebroadcast;<br/>NO delivery ack — best effort
+    Note over BS: jitter 50–500ms per rebroadcast;<br/>NO delivery ack - best effort
 ```
 
 ### I2. Receiving + verifying + rendering a post
@@ -1150,7 +1150,7 @@ sequenceDiagram
     Note over EV: cheap→expensive: size→CBOR→kind→<br/>geohash→ts→id==sha256→Ed25519→<br/>tombstone-auth→scope→dedup
     alt valid
         EV-->>RA: ok(event)
-        RA->>SR: insert(event) — INSERT OR IGNORE
+        RA->>SR: insert(event) - INSERT OR IGNORE
         SR-->>EB: emit event:stored
         EB->>FS: incremental update
         FS->>FS: rescore via FEED-2; re-sort
@@ -1182,7 +1182,7 @@ sequenceDiagram
         alt not yet counted today
             VT->>EB: buildReceipt(postId)
             EB-->>VT: SignedEvent kind=2
-            VT->>ME: publish(receipt) — TTL=7 flood
+            VT->>ME: publish(receipt) - TTL=7 flood
             VT->>SR: insertReceipt (PK dedups)
             Note over VT: ≤1 receipt / 2s app-wide (storm guard);<br/>publish failure → drop silently (next impression retries)
         end
@@ -1224,11 +1224,11 @@ sequenceDiagram
         SY->>SY: setCursor(peer, now)
     else connect fails / timeout
         CM->>CM: backoff 1/2/4/8s + jitter; pool cap 5
-        Note over CM: link-loss preserves cursor — resume is cheap
+        Note over CM: link-loss preserves cursor - resume is cheap
     end
 ```
 
-### I5. Failure path — corrupt event rejected (trust boundary in action)
+### I5. Failure path - corrupt event rejected (trust boundary in action)
 
 ```mermaid
 sequenceDiagram
@@ -1244,7 +1244,7 @@ sequenceDiagram
     RA->>EV: verify(bytes)
     EV->>EV: id == sha256(canonical)? Ed25519.verify?
     alt BAD_SIG / BAD_ID / NOT_AUTHOR / OVERSIZE …
-        EV-->>RA: reject(code) — a VALUE, not a throw
+        EV-->>RA: reject(code) - a VALUE, not a throw
         RA->>OB: incr verify_rejects{code}
         RA->>RA: drop frame; never reaches STORE-2, never renders
         Note over RA: attacker spends THEIR battery;<br/>our integrity is untouched
@@ -1252,7 +1252,7 @@ sequenceDiagram
             EV->>OB: per-key throttle counter
         end
     end
-    Note over AT,OB: Timeouts on this path: reassembly 30s → purge;<br/>verify is CPU-bounded (≤5ms p99 target) — no retries, invalid is invalid.
+    Note over AT,OB: Timeouts on this path: reassembly 30s → purge;<br/>verify is CPU-bounded (≤5ms p99 target) - no retries, invalid is invalid.
 ```
 
 ### I6. Global relay round-trip (post → mesh → uplink → relay → downlink → world feed)
@@ -1277,16 +1277,16 @@ sequenceDiagram
 
     U->>FP: submitPost(draft, uplinkOptIn=true)
     Note over U: opt-in toggle default OFF;<br/>copy: "public everywhere, not encrypted"
-    FP->>ME: publish(event) — mesh flood (I1 path)
+    FP->>ME: publish(event) - mesh flood (I1 path)
     ME->>PEER: flood → peer stores event (opt_in flag intact)
-    PEER->>UQ: enqueue(event) — opt_in=true only
+    PEER->>UQ: enqueue(event) - opt_in=true only
     UQ->>RC: flush() when online
     RC->>RC: RELAY-5 wrap → Nostr EVENT<br/>sign w/ unlinkable Nostr keypair
     RC->>NR: ["EVENT", nostrEvent]
     Note over NR: relay is a dumb pipe;<br/>sees courier IP + public post
     NR-->>DS: ["EVENT", …] (viewer subscribed w/ REQ)
     DS->>DS: RELAY-5 unwrap → canonical CBOR bytes
-    DS->>EV: verify(bytes) — same pipeline as mesh (I2)
+    DS->>EV: verify(bytes) - same pipeline as mesh (I2)
     EV-->>DS: ok(event)
     DS->>SR: insert(event, source='world')
     SR-->>FS: event:stored
@@ -1294,7 +1294,7 @@ sequenceDiagram
     FS-->>UI: World tab shows post + "Delhi · via relay"
 ```
 
-### I7. Offline viewer — Around-you only
+### I7. Offline viewer - Around-you only
 
 _No internet means no World feed, ever: the mesh product is fully intact and the UI says so
 honestly instead of spinning._
@@ -1308,15 +1308,15 @@ sequenceDiagram
 
     UI->>DS: worldFeed.refresh()
     DS->>DS: connectivity? none
-    DS-->>UI: skip subscribe — no retry spin
-    UI->>UI: banner: "offline — World feed unavailable"
+    DS-->>UI: skip subscribe - no retry spin
+    UI->>UI: banner: "offline - World feed unavailable"
     UI->>FS: getSnapshot(scope=aroundYou)
     FS-->>UI: mesh posts render (unchanged)
     ME->>ME: flood continues (BLE unaffected)
     Note over UI,ME: relay subsystem dormant costs zero battery;<br/>uplink queue persists for later
 ```
 
-### I8. Relay failure fallback — mesh unaffected
+### I8. Relay failure fallback - mesh unaffected
 
 _Relays are third-party and flaky; a dead relay degrades only the World feed, never the mesh.
 Failover is silent and bounded._
@@ -1440,7 +1440,7 @@ stateDiagram-v2
 ## K. Security architecture
 
 _Trust boundaries, in order: (1) wire→EVENT-2 verify-before-render, (2) CRYPTO-1 key custody,
-(3) BLE link (unauthenticated — public by design), (4) relays (v2: third-party Nostr relays —
+(3) BLE link (unauthenticated - public by design), (4) relays (v2: third-party Nostr relays -
 untrusted dumb pipes). What's NOT protected in v1 is labeled honestly._
 
 ```mermaid
@@ -1448,7 +1448,7 @@ flowchart TB
     subgraph Z0["⟨external⟩ UNTRUSTED: radio / peers"]
         ADV["adversary in range:<br/>reads posts (public by design)<br/>injects invalid frames<br/>observes timing/RSSI"]
     end
-    subgraph TB1["TRUST BOUNDARY 1 — verify-before-render (EVENT-2)"]
+    subgraph TB1["TRUST BOUNDARY 1 - verify-before-render (EVENT-2)"]
         direction LR
         WIRE["wire bytes"]
         V1["size ≤4096"]
@@ -1468,7 +1468,7 @@ flowchart TB
         STORE["STORE-2: only verified rows"]
         UI["UI-1/3: renders verified rows as TEXT"]
     end
-    subgraph TB2["TRUST BOUNDARY 2 — key custody (CRYPTO-1)"]
+    subgraph TB2["TRUST BOUNDARY 2 - key custody (CRYPTO-1)"]
         direction LR
         KM["CRYPTO-1 KeyManager"]
         SEC["⟨native⟩ Keychain/Keystore<br/>private key at rest"]
@@ -1481,7 +1481,7 @@ flowchart TB
         NOCORD["LOC-1: raw coords → geohash-5 in a local var;<br/>never persisted, never logged"]
         NOADV["adv packet: service UUID + 8B peer id only<br/>no device name, no pubkey"]
     end
-    subgraph TB3["TRUST BOUNDARY 3 — relays (v2; RELAY-1…5)"]
+    subgraph TB3["TRUST BOUNDARY 3 - relays (v2; RELAY-1…5)"]
         direction LR
         RU["relays: UNTRUSTED<br/>may drop/censor/reorder;<br/>may serve invalid events"]
         RV["EVENT-2 verify on downlink<br/>invalid → drop (same as mesh)"]
@@ -1489,7 +1489,7 @@ flowchart TB
         RK["cannot link mesh identity<br/>to Nostr keypair (separate)"]
         RU --> RV --> RS --> RK
     end
-    subgraph NOTP["NOT protected in v1 — labeled honestly"]
+    subgraph NOTP["NOT protected in v1 - labeled honestly"]
         T1["traffic analysis (who publishes when)"]
         T2["Sybil views: receipts are cheap; ranking is gameable<br/>(mitigated: 24h dedup, log-scale scoring, per-key rate limits)"]
         T3["BLE link-layer tracking via timing/RSSI"]
@@ -1559,7 +1559,7 @@ flowchart LR
 ## M. Observability
 
 _On-device first, privacy-constrained: ring buffer + opt-in crash reporting to a SELF-HOSTED
-GlitchTip. NO cloud analytics — ever (hard product constraint)._
+GlitchTip. NO cloud analytics - ever (hard product constraint)._
 
 ```mermaid
 flowchart TB
@@ -1589,7 +1589,7 @@ flowchart TB
     SENTRY --> SCRUB --> GLITCH
     RING -.->|"queued envelopes;<br/>flush when online"| SENTRY
 
-    noteM["PRIVACY CONSTRAINT: no Firebase Analytics, no tracking SDKs, no analytics<br/>phoning home. Offline-first means crash reports may sit for days — accepted.<br/>Lint rule: logging content/pubkey/peerId/coords = P0 bug."]
+    noteM["PRIVACY CONSTRAINT: no Firebase Analytics, no tracking SDKs, no analytics<br/>phoning home. Offline-first means crash reports may sit for days - accepted.<br/>Lint rule: logging content/pubkey/peerId/coords = P0 bug."]
 ```
 
 ---
@@ -1597,7 +1597,7 @@ flowchart TB
 ## N. Testing architecture
 
 _Test types mapped to the node IDs they cover. The simulator transport (TEST-1) runs the REAL
-MESH-1…11 + EVENT stack per virtual node — the highest-value test asset._
+MESH-1…11 + EVENT stack per virtual node - the highest-value test asset._
 
 ```mermaid
 flowchart TB
@@ -1651,7 +1651,7 @@ flowchart TB
     end
     subgraph F_KILL["OS kills app (OEM battery mgr / iOS jetsam)"]
         K1["relay stops;<br/>device becomes leaf"]
-        K2["FGS START_STICKY (Android)<br/>state restoration (iOS)<br/>— neither guaranteed"]
+        K2["FGS START_STICKY (Android)<br/>state restoration (iOS)<br/>- neither guaranteed"]
         K3["next launch: integrity check<br/>→ resume full mesh"]
         K1 --> K2 --> K3
         K3 -->|"missed events"| K4["re-flood from neighbors<br/>(append-only store)"]
@@ -1665,7 +1665,7 @@ flowchart TB
     subgraph F_SQL["SQLite corruption"]
         S1["startup integrity_check fails"]
         S2["quarantine: rename →<br/>airplane.db.corrupt.‹ts›<br/>recreate schema"]
-        S1 --> S2 --> S3["resync from mesh<br/>(identity key in secure store — unaffected)"]
+        S1 --> S2 --> S3["resync from mesh<br/>(identity key in secure store - unaffected)"]
     end
     subgraph F_KEY["Key loss (uninstall / device loss)"]
         E1["old posts stay verifiable<br/>(pubkey embedded)"]
@@ -1674,7 +1674,7 @@ flowchart TB
     end
     subgraph F_SKEW["Clock skew (rank gaming)"]
         T1["ts outside [now−ret−skew, now+300s]<br/>→ dropped at EVENT-2"]
-        T1 --> T2["ranking age uses LOCAL receive-time,<br/>not sender ts — self-healing"]
+        T1 --> T2["ranking age uses LOCAL receive-time,<br/>not sender ts - self-healing"]
     end
     subgraph F_CONG["Dense-crowd congestion"]
         G1["backpressure: inbound cap<br/>drop receipts-first"]
@@ -1693,7 +1693,7 @@ flowchart TB
 |---|---|---|---|
 | BLE off / permission revoked | MESH only | Dormant state, no spin, one fix-it banner | Re-enable → resume; queued posts flood |
 | OS kill (OEM / jetsam) | Relay stops; leaf until relaunch | START_STICKY / state restoration (best-effort) | Next launch resumes; missed events re-flood |
-| Corrupt event (bad CBOR/sig) | One datagram | Drop + count at EVENT-2; per-key throttle | None needed — redundancy via other paths |
+| Corrupt event (bad CBOR/sig) | One datagram | Drop + count at EVENT-2; per-key throttle | None needed - redundancy via other paths |
 | SQLite corruption | STORE reads/writes; feed stale | integrity_check; quarantine + recreate | Resync from mesh; identity key unaffected |
 | Key loss | Identity only | Never silently fork identity | Explicit new-identity flow (v1); export (v2) |
 | Clock skew | Ranking distortion | ts window reject; age = local receive-time | Self-healing as skewed events age out |
@@ -1704,8 +1704,8 @@ flowchart TB
 
 ## P. Event verification pipeline (trust-boundary detail)
 
-_Added because it's the single most security-critical data path in the system (every ingest —
-flood, sync, and local build — passes through it), and no other diagram shows the check order.
+_Added because it's the single most security-critical data path in the system (every ingest -
+flood, sync, and local build - passes through it), and no other diagram shows the check order.
 Cheap checks run first so attackers burn their own radio budget, not our CPU._
 
 ```mermaid
@@ -1736,7 +1736,7 @@ flowchart LR
     S12 -->|yes| R_DP["reject DUP<br/>(idempotent-ok)"]
     S12 -->|no| OK["ACCEPT → insert<br/>→ feed → relay decision"]
 
-    noteP["Rejection is a VALUE (VerifyReject), never a throw — hot path.<br/>Budget ≤5ms p99. Counters: verify_rejects{per code} → OBS-2."]
+    noteP["Rejection is a VALUE (VerifyReject), never a throw - hot path.<br/>Budget ≤5ms p99. Counters: verify_rejects{per code} → OBS-2."]
 ```
 
 ---
@@ -1749,18 +1749,18 @@ APP-1…6 ✓ · UI-1…7 ✓ · FEED-1…6 ✓ · MESH-1…12 ✓ · EVENT-1…
 CRYPTO-1…3 ✓ · LOC-1…2 ✓ · OBS-1…3 ✓ · DIST-1…2 ✓ · TEST-1…4 ✓ ·
 RELAY-1…5 ✓ (tokens RELAY1…RELAY5, used in A/B/C4/D2/G2/I6–I8/K).
 No token appears that is not in the registry; no registry node is missing from diagram set C
-(all 63 shown exactly once across C1/C2/C3/C4 — C1: 7+6+6=19 · C2: 12+6+3=21 · C3: 7+2+3+2+4=18 ·
+(all 63 shown exactly once across C1/C2/C3/C4 - C1: 7+6+6=19 · C2: 12+6+3=21 · C3: 7+2+3+2+4=18 ·
 C4: 5; 19+21+18+5=63 ✓). All stable v1 node labels are byte-identical to v1.
 
 **A/B/C mutual consistency:**
 - A shows the subsystem boxes and the same dependency directions B formalizes (UI→FEED→EVENT→{MESH,STORE}, APP wiring, OBS sink, native behind interfaces), plus the v2 RELAY box and the untrusted third-party Nostr-relay actor. ✓
 - B's layer rule and its five carve-outs (FEED→MESH-1 publish, MESH→EVENT verify, FEED-4 shared policy, FEED→RELAY-1 uplink/world-feed, RELAY→EVENT verify) are exactly the edges drawn in C1/C2/C4. ✓
 - B's "prohibited" edges (UI↛EVENT/MESH/STORE/CRYPTO, MESH↛FEED-domain, EVENT↛MESH, RELAY↛rank/render/mint) hold in C: no such edge is drawn anywhere in C1–C4. ✓
-- B's circular-dependency verdict (none — cycles 1–6 checked, incl. the two v2 RELAY candidates) is consistent with C's edges: FEED-4's only deps are LOC-1/2; STORE/CRYPTO are leaves; RELAY never depends on FEED; no back-edges exist. ✓
+- B's circular-dependency verdict (none - cycles 1–6 checked, incl. the two v2 RELAY candidates) is consistent with C's edges: FEED-4's only deps are LOC-1/2; STORE/CRYPTO are leaves; RELAY never depends on FEED; no back-edges exist. ✓
 - Sequence diagrams (I) use the same component responsibilities as C (e.g., FEED-5→EVENT-1→CRYPTO-1→STORE-2→FEED-1→MESH-1 matches C1 edges; I6's RELAY-2→RELAY-1→RELAY-3 path matches C4 edges). ✓
-- Data diagrams (G/G2) tables match Appendix D DDL; repository ownership matches C3; retention values match §5.5; G2's schema is the normative `events.source` / `uplink_queue` DDL from SYSTEM_DESIGN.md Appendix D (migration 002) — the earlier `events.origin` proposal was reconciled to `source ∈ {'mesh','world'}` during the v2 consistency review. ✓
+- Data diagrams (G/G2) tables match Appendix D DDL; repository ownership matches C3; retention values match §5.5; G2's schema is the normative `events.source` / `uplink_queue` DDL from SYSTEM_DESIGN.md Appendix D (migration 002) - the earlier `events.origin` proposal was reconciled to `source ∈ {'mesh','world'}` during the v2 consistency review. ✓
 - Security diagram K's TB3 (relay boundary) is consistent with I6/I8: relays see courier IP + public posts, cannot forge authorship, cannot link mesh identity to the Nostr keypair. ✓
 
 **Known simplifications (not inconsistencies):** B abstracts 63 nodes to subsystem boxes; C re-states
-edges at node granularity — both were cross-checked. Mermaid `x--x` edges mark prohibitions
-(rendered with crosses). Sequence participant names are registry IDs verbatim. Mermaid fences: 31 open / 31 close — balanced.
+edges at node granularity - both were cross-checked. Mermaid `x--x` edges mark prohibitions
+(rendered with crosses). Sequence participant names are registry IDs verbatim. Mermaid fences: 31 open / 31 close - balanced.

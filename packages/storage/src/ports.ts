@@ -56,7 +56,7 @@ export interface StorePort {
    *
    * Trusts the caller: this is the low-level primitive. Authorship
    * (`tombstone.pubkey == post.pubkey`) is enforced at the `saveEvent`
-   * ingress for kind-3 events — a pending entry armed here applies to
+   * ingress for kind-3 events - a pending entry armed here applies to
    * whatever post arrives with this id.
    */
   markDeleted(postId: Hex64): Promise<void>;

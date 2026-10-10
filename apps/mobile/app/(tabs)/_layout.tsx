@@ -16,7 +16,7 @@ interface DockBarProps {
 
 // The vendored floating glass dock, driven by expo-router's tab state. The
 // compose button sits in the middle and opens the compose sheet as a modal
-// overlay — compose is not a route.
+// overlay - compose is not a route.
 function DockBar({ activeTab, onTabPress, onComposePress }: DockBarProps) {
     const { t } = useI18n();
     const tabs: TabDef[] = [

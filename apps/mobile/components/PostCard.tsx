@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// PostCard — the Airplane feed card, built on panelui's Post compound
+// PostCard - the Airplane feed card, built on panelui's Post compound
 // (see components/ui/post.tsx for the vendored, adapted source).
 //
 // The card is presentational: it takes a PostCardModel view-model (mapped from
 // real mesh events by another worker) and renders author, body and the views
-// count. Views are the hero stat — this product ranks by views, so there are
+// count. Views are the hero stat - this product ranks by views, so there are
 // deliberately no hearts, reposts, bookmarks or follow buttons.
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
@@ -16,7 +16,7 @@ import { radii, space } from '../src/theme/shape';
 export interface PostCardModel {
   /** hex event hash (stable key) */
   eventId: string;
-  /** e.g. "anon·a3f9" — short pseudonym, NEVER a real name/handle */
+  /** e.g. "anon·a3f9" - short pseudonym, NEVER a real name/handle */
   authorLabel: string;
   /** post text */
   body: string;
@@ -39,7 +39,7 @@ export interface PostCardProps {
 
 /**
  * Compact relative time: "now", "45s", "3m", "2h", "5d", "3w", "4mo", "1y".
- * No date library — the mesh feed only needs coarse recency.
+ * No date library - the mesh feed only needs coarse recency.
  */
 export function timeAgo(createdAtMs: number, nowMs: number = Date.now()): string {
   const s = Math.max(0, Math.floor((nowMs - createdAtMs) / 1000));

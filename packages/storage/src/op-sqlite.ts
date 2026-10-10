@@ -6,7 +6,7 @@
 // adapter over `open({ name: 'airplane.db' })` from op-sqlite, then call
 // `OpSqliteStore.migrate(db)` once at boot before any other method.
 // Until the native module is linked, `migrate` is the only method safe to
-// call — the rest will attempt real SQL against whatever DatabasePort is
+// call - the rest will attempt real SQL against whatever DatabasePort is
 // supplied and are untested on this VM.
 //
 // Security note: secrets (identity keys, etc.) must NEVER live in SQLite;
@@ -145,7 +145,7 @@ export class OpSqliteStore implements StorePort {
       if (bytesToHex(rows[0].pubkey) === authorHex) {
         await this.db.exec(`UPDATE events SET deleted = 1 WHERE id = ?`, [hexToBytes(key)]);
       }
-      // else: forged/mismatched tombstone — stored, not honored.
+      // else: forged/mismatched tombstone - stored, not honored.
     } else {
       // Tombstone-wins: remember the AUTHOR so a late-arriving post is
       // checked before its deleted flag is set. Never narrows a pending
@@ -204,7 +204,7 @@ export class OpSqliteStore implements StorePort {
       hexToBytes(key),
     ]);
     // If the row did not exist yet, remember the tombstone for when it arrives.
-    // NOTE: the trusted-primitive semantics of memory.ts apply here too — a
+    // NOTE: the trusted-primitive semantics of memory.ts apply here too - a
     // pending entry armed via markDeleted cannot know the tombstone's author.
     const check = await this.db.query<{ n: number }>(
       `SELECT COUNT(*) AS n FROM events WHERE id = ?`,

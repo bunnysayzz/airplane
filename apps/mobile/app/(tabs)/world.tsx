@@ -12,7 +12,7 @@ export default function WorldTab() {
     const feeds = useFeedTabs();
 
     // The feed pills live at the route level: tapping "Around you" jumps back to the mesh tab.
-    // 'world' shows the honest empty state until the Nostr-relay update lands — no fake data.
+    // 'world' shows the honest empty state until the Nostr-relay update lands - no fake data.
     const [activeFeed, setActiveFeed] = useState<FeedKey>('world');
     const handleFeedChange = (key: FeedKey) => {
         setActiveFeed(key);

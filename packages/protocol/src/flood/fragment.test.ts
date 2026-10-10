@@ -77,7 +77,7 @@ describe('fragmentation', () => {
     }
 
     const rx = new Reassembler();
-    // Out of order: 2, 0, 1 — nothing complete until the last push.
+    // Out of order: 2, 0, 1 - nothing complete until the last push.
     expect(rx.push(frames[2])).toBeNull();
     expect(rx.push(frames[0])).toBeNull();
     // Duplicate of frame 0 must not corrupt or double-count.

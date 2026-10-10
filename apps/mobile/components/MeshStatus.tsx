@@ -15,7 +15,7 @@ const RELAY_ICON: Record<RelayState, React.ComponentProps<typeof Ionicons>['name
 
 // A small status pill for the top bar: peers seen on the mesh plus relay state.
 // Pugdon's pill language (hairline border, soft fill, meta type). The numbers are
-// honest — peersNearby stays 0 until useMeshStatus is wired to the real transport (P3).
+// honest - peersNearby stays 0 until useMeshStatus is wired to the real transport (P3).
 export const MeshStatus: React.FC = () => {
     const { colors, type } = useTheme();
     const styles = useThemedStyles(makeStyles);

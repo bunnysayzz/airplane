@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// @airplane/protocol — public surface. Re-export everything.
+// @airplane/protocol - public surface. Re-export everything.
 
 export * from './hex';
 export * from './events/types';

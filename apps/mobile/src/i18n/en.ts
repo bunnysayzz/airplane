@@ -72,7 +72,7 @@ export const en = {
       card2Title: 'Public posts. Anonymous people.',
       card2Body: 'Everyone nearby can read what you post. Nobody knows it’s you.',
       card2Identity:
-        'There are no accounts, no names, no phone numbers — just a random tag like anon·a3f9 that marks posts as yours.',
+        'There are no accounts, no names, no phone numbers - just a random tag like anon·a3f9 that marks posts as yours.',
       card2World: 'Turn on World uplink and everyone on earth can read it.',
       card3Title: 'Views decide what rises',
       card3Body: 'No likes. No followers. The more a post is seen, the higher it climbs the feed.',
@@ -89,7 +89,7 @@ export const en = {
     around: 'Around you',
     world: 'World',
     emptyAround: 'Nothing nearby yet \u2014 be the first to post.',
-    emptyWorld: 'No relayed posts yet — World arrives with the relay update.',
+    emptyWorld: 'No relayed posts yet - World arrives with the relay update.',
     emptyHome: 'No posts on your home timeline yet!',
     emptyLocal: 'No posts on your local timeline yet!',
     emptyFederated: 'No posts on your federated timeline yet!',

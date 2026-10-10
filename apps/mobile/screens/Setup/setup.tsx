@@ -33,7 +33,7 @@ interface SetupProps {
 
 // Two phases: the boot splash (keypair, store init) first, then 2-3 swipeable
 // anonymous-onboarding cards ending in a single Start button. There is no login,
-// no account, no permissions begging — the Bluetooth/location rationale lives inline
+// no account, no permissions begging - the Bluetooth/location rationale lives inline
 // on card 1, where the OS will actually prompt. The navigation worker decides when
 // to show Setup and uses onboardingStatus to show it once.
 const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false }) => {

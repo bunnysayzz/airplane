@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// @airplane/storage — public surface.
+// @airplane/storage - public surface.
 
 export type { StorePort, KvPort, DatabasePort, ListFeedOpts } from './ports';
 export { MIGRATION_001 } from './schema';
