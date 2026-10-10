@@ -22,7 +22,7 @@
 #
 # NO SECRET HANDLING HERE
 #   The only secret referenced is ${{ secrets.EXPO_TOKEN }} (repo secret the
-#   owner adds at github.com/enginoor/airplane/settings/secrets/actions).
+#   owner adds at github.com/bunnysayzz/airplane/settings/secrets/actions).
 #   It is never printed and is masked in logs by GitHub.
 
 name: Release
@@ -106,7 +106,7 @@ jobs:
         run: |
           echo "::error::EXPO_TOKEN repo secret is not set."
           echo "The repo admin must add it once at:"
-          echo "  https://github.com/enginoor/airplane/settings/secrets/actions"
+          echo "  https://github.com/bunnysayzz/airplane/settings/secrets/actions"
           echo "Generate the token at expo.dev -> Account Settings -> Access Tokens."
           exit 1
 

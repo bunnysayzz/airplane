@@ -2,10 +2,10 @@
 
 *the feed that works in airplane mode.*
 
-[![CI](https://github.com/enginoor/airplane/actions/workflows/ci.yml/badge.svg)](https://github.com/enginoor/airplane/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/enginoor/airplane/actions/workflows/codeql.yml/badge.svg)](https://github.com/enginoor/airplane/actions/workflows/codeql.yml)
-[![License](https://img.shields.io/github/license/enginoor/airplane)](LICENSE)
-[![Latest release](https://img.shields.io/github/v/release/enginoor/airplane)](https://github.com/enginoor/airplane/releases)
+[![CI](https://github.com/bunnysayzz/airplane/actions/workflows/ci.yml/badge.svg)](https://github.com/bunnysayzz/airplane/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/bunnysayzz/airplane/actions/workflows/codeql.yml/badge.svg)](https://github.com/bunnysayzz/airplane/actions/workflows/codeql.yml)
+[![License](https://img.shields.io/github/license/bunnysayzz/airplane)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/bunnysayzz/airplane)](https://github.com/bunnysayzz/airplane/releases)
 
 **Airplane** is an open-source iOS + Android app: an anonymous, location-based **public broadcast feed** that works fully offline over a phone-to-phone Bluetooth mesh. Phones store-and-forward signed posts with no server, no accounts, and no internet — built for protests, concerts, and anywhere the network is gone.
 
@@ -164,7 +164,7 @@ Full acceptance criteria and definitions of done: [`docs/blueprint/ROADMAP.md`](
 Prerequisites: **Node 24** (repo pins it via `.nvmrc`), npm (bundled with Node).
 
 ```bash
-git clone https://github.com/enginoor/airplane.git
+git clone https://github.com/bunnysayzz/airplane.git
 cd airplane
 npm install
 npm test            # 9 suites, 71 tests — protocol, storage, mesh-sim
@@ -223,7 +223,7 @@ CI runs lint, typecheck, and the full Jest suite on every push/PR; CodeQL and de
 
 We ship sideload-first — the product's threat model includes store takedowns, so stores are not the primary channel:
 
-- **Android:** signed APK (and AAB) attached to [GitHub Releases](https://github.com/enginoor/airplane/releases), with SHA-256 checksums. Import the releases page in [Obtainium](https://obtainium.imranr98.com/) for updates.
+- **Android:** signed APK (and AAB) attached to [GitHub Releases](https://github.com/bunnysayzz/airplane/releases), with SHA-256 checksums. Import the releases page in [Obtainium](https://obtainium.imranr98.com/) for updates.
 - **iOS:** TestFlight builds (once P6 lands).
 
 Install only from the official releases page — Android will warn about unknown sources; that's expected for sideloaded apps. The exact cut-and-publish procedure (tagging, signing, checksums, notes format) is in [`docs/release-runbook.md`](docs/release-runbook.md), and each release's notes land in [`CHANGELOG.md`](CHANGELOG.md).
@@ -254,7 +254,7 @@ iOS background BLE is OS-crippled: Apple throttles background advertising/scanni
 Likes are cheap, brigadable signals. Views measure actual reach: a post rises only if real devices actually receive and render it. The log₁₀ scaling means the 10,000th view matters far less than the 10th, which dampens Sybil-inflated counts. View receipts are signed and deduped per (device, post, UTC day), and counts are labeled *approximate device counts* — never used for trust or money.
 
 **Is sideloading legal / safe?**
-Yes, sideloading is legal. We sign every APK, publish SHA-256 checksums on the releases page, and support Obtainium for verified updates. Only install builds from the official [releases page](https://github.com/enginoor/airplane/releases) — never from forwarded files or mirrors you can't verify.
+Yes, sideloading is legal. We sign every APK, publish SHA-256 checksums on the releases page, and support Obtainium for verified updates. Only install builds from the official [releases page](https://github.com/bunnysayzz/airplane/releases) — never from forwarded files or mirrors you can't verify.
 
 **How are posts moderated?**
 There is no central server, so there are no takedowns. You can delete your *own* posts (tombstone events the network honors). Client-side, hash-based blocklists land in P4. Spam without identity is fundamentally rate-limits + TTL only — residual abuse is accepted and documented rather than wished away.
