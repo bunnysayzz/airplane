@@ -20,3 +20,4 @@ export {
 } from './viewTracker';
 export { getDeviceKeypair, setKeyStore, crypto, type DeviceKeypair } from './identity';
 export { getStore } from './store';
+export { startTransport, stopTransport, publishViaTransport } from './transport';

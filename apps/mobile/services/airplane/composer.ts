@@ -62,6 +62,10 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
     content,
   });
   await getStore().saveEvent(event);
+  // Fan out via hybrid transport (BLE + Nostr when online). Non-blocking;
+  // the post is already in the local feed.
+  const { publishViaTransport } = await import('./transport');
+  publishViaTransport(event).catch(() => {});
   notifyFeedListeners();
   return toHex(event.id);
 }

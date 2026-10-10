@@ -5,6 +5,7 @@ import { ThemeProvider, useTheme } from '../src/theme/themeContext';
 import { I18nProvider, useI18n } from '../src/i18n/i18nContext';
 import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
+import { startTransport } from '../services/airplane';
 
 SplashScreen.preventAutoHideAsync().catch(() => {
     /* splash may already be hidden in tests */
@@ -39,6 +40,12 @@ function ReadyGate({ children }: { children: React.ReactNode }) {
 }
 
 export default function RootLayout() {
+    useEffect(() => {
+        // Start hybrid transport (BLE always, Nostr when online).
+        // Failures are non-fatal; the feed works offline regardless.
+        startTransport().catch(() => {});
+    }, []);
+
     return (
         <ThemeProvider>
             <I18nProvider>

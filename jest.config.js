@@ -33,6 +33,7 @@ module.exports = {
       testMatch: ['<rootDir>/services/**/*.test.ts'],
       moduleNameMapper: {
         '^@airplane/([^/]+)$': path.join(rootDir, 'packages', '$1', 'src'),
+        '^@react-native-community/netinfo$': path.join(rootDir, '__mocks__', '@react-native-community', 'netinfo.ts'),
       },
       transform: {
         '^.+\\.[tj]sx?$': [
