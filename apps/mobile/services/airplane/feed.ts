@@ -30,13 +30,9 @@ export function authorLabelFor(pubkey: Uint8Array): string {
   return 'anon·' + toHex(pubkey).slice(0, 4);
 }
 
-/** True when the event carries the signed ["uplink","1"] opt-in tag. */
-export function hasUplinkTag(tags: string[][]): boolean {
-  return tags.some((t) => t.length >= 2 && t[0] === 'uplink' && t[1] === '1');
-}
-
-/** Pure mapping: protocol FeedPost -> card view-model. Unit-tested. */
-export function toPostCardModel(post: FeedPost): PostCardModel {
+/** Pure mapping: protocol FeedPost -> card view-model. Unit-tested.
+ * worldConfirmed is looked up from storage (not in the signed payload). */
+export function toPostCardModel(post: FeedPost, worldConfirmed = false): PostCardModel {
   return {
     eventId: toHex(post.event.id),
     createdAtMs: post.event.created_at * 1000,
@@ -45,7 +41,7 @@ export function toPostCardModel(post: FeedPost): PostCardModel {
     geohash: post.event.geohash,
     views: post.views,
     score: post.score,
-    uplinked: hasUplinkTag(post.event.tags),
+    worldConfirmed,
   };
 }
 
@@ -62,9 +58,18 @@ export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[
     limit: opts.limit ?? DEFAULT_LIMIT,
     before: opts.before,
   };
-  const posts = await getStore().listFeed(storeOpts);
+  const store = getStore();
+  const posts = await store.listFeed(storeOpts);
   const ranked = [...posts].sort((a, b) => b.score - a.score);
-  return ranked.map(toPostCardModel);
+  // Look up World confirmation status for each post (client-side tracking).
+  const cards = await Promise.all(
+    ranked.map(async (p) => {
+      const eventId = toHex(p.event.id);
+      const worldConfirmed = await store.isWorldConfirmed(eventId);
+      return toPostCardModel(p, worldConfirmed);
+    }),
+  );
+  return cards;
 }
 
 // --- feed change notifications --------------------------------------------

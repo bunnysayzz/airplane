@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Post composer.
 //
-// Builds a signed kind-1 post event and stores it locally. The opt-in global
-// uplink is a SIGNED ["uplink","1"] tag inside the event - default OFF, only
-// present when the user explicitly opts in at compose time (v2 privacy rule:
-// a local mesh post must never silently go global).
+// Builds a signed kind-1 post event and stores it locally. Under the
+// single-feed hybrid model, every post is relay-eligible by default:
+// phones with internet silently relay posts to Nostr (no opt-in tag,
+// no per-post approval). World status is tracked client-side via
+// worldConfirmed in storage, not via a signed tag.
 
 import {
   normalizeContent,
@@ -18,8 +19,6 @@ import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
 
 export interface PublishOpts {
-  /** Opt-in global relay uplink. Default false. NEVER silently true. */
-  uplink: boolean;
   /**
    * Override for the post's geohash-5 cell. Defaults to the device cell via
    * getLocationCell() - which throws until the real location provider lands
@@ -40,8 +39,8 @@ export function getLocationCell(): string {
 }
 
 /** Pure builder seam: which tags a post carries for the given opts. Unit-tested. */
-export function tagsForPublish(opts: PublishOpts): string[][] {
-  return opts.uplink ? [['uplink', '1']] : [];
+export function tagsForPublish(_opts: PublishOpts): string[][] {
+  return [];
 }
 
 /**

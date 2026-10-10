@@ -20,7 +20,7 @@ import type {
   UnixSec,
 } from '@airplane/protocol';
 import type { StorePort, DatabasePort, ListFeedOpts } from './ports';
-import { MIGRATION_001 } from './schema';
+import { MIGRATION_001, MIGRATION_002 } from './schema';
 import {
   DEFAULT_RETENTION_SEC,
   RECEIPT_DAY_BUCKET_SEC,
@@ -93,11 +93,16 @@ export class OpSqliteStore implements StorePort {
   ) {}
 
   /**
-   * Apply MIGRATION_001. Real and idempotent-safe for first boot
+   * Apply MIGRATION_001 then MIGRATION_002. Idempotent-safe for first boot
    * (CREATE TABLE without IF NOT EXISTS will throw on re-run; call once).
+   * For upgrades on existing installs, gate on a schema_version table -
+   * TODO(P3) when the native driver lands.
    */
   static async migrate(db: DatabasePort): Promise<void> {
     for (const stmt of splitStatements(MIGRATION_001)) {
+      await db.exec(stmt);
+    }
+    for (const stmt of splitStatements(MIGRATION_002)) {
       await db.exec(stmt);
     }
   }
@@ -297,5 +302,35 @@ export class OpSqliteStore implements StorePort {
       [],
     );
     return count.length > 0 ? count[0].n : 0;
+  }
+
+  async markWorldConfirmed(eventId: Hex64): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    await this.db.exec(
+      `INSERT INTO world_confirmed (event_id, confirmed_at)
+       VALUES (?, ?)
+       ON CONFLICT(event_id) DO NOTHING`,
+      [hexToBytes(eventId), now],
+    );
+  }
+
+  async isWorldConfirmed(eventId: Hex64): Promise<boolean> {
+    const rows = await this.db.query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM world_confirmed WHERE event_id = ?`,
+      [hexToBytes(eventId)],
+    );
+    return rows.length > 0 && rows[0].n > 0;
+  }
+
+  async getUnconfirmed(): Promise<Hex64[]> {
+    const rows = await this.db.query<{ id: Uint8Array }>(
+      `SELECT e.id AS id FROM events e
+       WHERE e.kind = 1 AND e.deleted = 0
+         AND NOT EXISTS (
+           SELECT 1 FROM world_confirmed w WHERE w.event_id = e.id
+         )`,
+      [],
+    );
+    return rows.map((r) => bytesToHex(r.id));
   }
 }

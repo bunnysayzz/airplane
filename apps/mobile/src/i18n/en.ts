@@ -73,7 +73,7 @@ export const en = {
       card2Body: 'Everyone nearby can read what you post. Nobody knows it’s you.',
       card2Identity:
         'There are no accounts, no names, no phone numbers - just a random tag like anon·a3f9 that marks posts as yours.',
-      card2World: 'Turn on World uplink and everyone on earth can read it.',
+      card2World: 'Posts may reach the wider network through other phones. A tiny globe marks posts that made it out.',
       card3Title: 'Views decide what rises',
       card3Body: 'No likes. No followers. The more a post is seen, the higher it climbs the feed.',
       next: 'Next',
@@ -249,10 +249,6 @@ export const en = {
     charactersLeft: '{{count}} characters left',
     charactersOver: '{{count}} characters over the limit',
     overShort: '{{count}} over',
-    // Airplane: the opt-in World uplink
-    uplink: 'Share with the World feed',
-    uplinkDescription:
-      'Also send this to the World feed via public relays. Anyone, anywhere will be able to read it.',
     posted: 'Post published',
   },
   attachments: {

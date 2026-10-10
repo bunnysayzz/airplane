@@ -16,7 +16,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../src/theme/themeContext';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
 import { space } from '../../src/theme/shape';
-import { PillButton, ThemedSwitch } from '../ui';
+import { PillButton } from '../ui';
 import { CharacterCounter } from './characterCounter';
 import { useDragToDismiss, useSheetTransition } from './sheetTransition';
 import { makeStyles } from './styles';
@@ -59,9 +59,8 @@ interface ComposeModalProps {
 
 // Pugdon's compose sheet, stripped for Airplane v1: text only (no media, polls, custom
 // emoji, visibility or language pickers - Airplane posts are anonymous and public by
-// design), plus the product's signature control: the opt-in World uplink switch.
-// Publishing goes straight to services/airplane's composer (signed mesh post, stored
-// locally; the uplink tag is only added when the switch is on).
+// design). Publishing goes straight to services/airplane's composer (signed post,
+// stored locally; relay to World happens silently via hybrid transport).
 const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublished }) => {
     const { colors, type } = useTheme();
     const { t } = useI18n();
@@ -71,7 +70,6 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
     const keyboard = useKeyboard(windowHeight);
 
     const [text, setText] = useState('');
-    const [uplink, setUplink] = useState(false);
     const [loading, setLoading] = useState(false);
 
     const inputRef = useRef<TextInput>(null);
@@ -95,7 +93,6 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
     useEffect(() => {
         if (isOpen) {
             setText('');
-            setUplink(false);
             setLoading(false);
             initialText.current = '';
             const focus = setTimeout(() => inputRef.current?.focus(), 350);
@@ -110,7 +107,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
         if (isPublishDisabled || loading) return;
         setLoading(true);
         try {
-            const eventId = await publishPost(text, { uplink });
+            const eventId = await publishPost(text, {});
             dialog.toast(t('compose.posted'));
             onPublished?.(eventId);
             onClose();
@@ -168,13 +165,6 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
                     maxLength={MAX_POST_LENGTH + 50}
                 />
 
-                <View style={styles.uplinkRow}>
-                    <View style={styles.uplinkText}>
-                        <Text style={[type.name, styles.uplinkLabel]}>{t('compose.uplink')}</Text>
-                        <Text style={[type.meta, styles.uplinkDetail]}>{t('compose.uplinkDescription')}</Text>
-                    </View>
-                    <ThemedSwitch value={uplink} onValueChange={setUplink} accessibilityLabel={t('compose.uplink')} />
-                </View>
             </ScrollView>
 
             <View

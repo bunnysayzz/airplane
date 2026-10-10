@@ -25,6 +25,7 @@ module.exports = {
     pkg('storage'),
     pkg('crypto'),
     pkg('mesh-sim'),
+    pkg('transport'),
     {
       displayName: 'mobile-services',
       testEnvironment: 'node',

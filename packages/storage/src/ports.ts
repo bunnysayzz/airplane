@@ -79,6 +79,24 @@ export interface StorePort {
    * Returns the number of event rows removed.
    */
   pruneExpired(nowSec: UnixSec): Promise<number>;
+
+  // ------------------------------------------------------------------
+  // World confirmation (hybrid single-feed plan §4). Client-side only:
+  // tracks which event IDs have been observed on at least one Nostr relay.
+  // Never part of the signed payload, never relayed. Sticky by design.
+  // ------------------------------------------------------------------
+
+  /** Mark an event ID as confirmed on World. Idempotent. */
+  markWorldConfirmed(eventId: Hex64): Promise<void>;
+
+  /** True when the event ID has been confirmed on World. */
+  isWorldConfirmed(eventId: Hex64): Promise<boolean>;
+
+  /**
+   * Event IDs of kind-1 posts known locally but not yet World-confirmed.
+   * Used by the sync engine to decide what to push / query.
+   */
+  getUnconfirmed(): Promise<Hex64[]>;
 }
 
 /** Tiny string key/value store (STORE-5). Backed by MMKV on device. */

@@ -68,3 +68,18 @@ CREATE TABLE logs(
 );
 CREATE INDEX idx_logs_ts ON logs(ts);
 `;
+
+/**
+ * MIGRATION_002 - World confirmation tracking (hybrid single-feed plan §4).
+ *
+ * `world_confirmed` records event IDs observed on at least one Nostr relay.
+ * Client-side only: never part of the signed payload, never relayed.
+ * Confirmation is sticky - there is no un-confirm path by design.
+ */
+export const MIGRATION_002 = `
+CREATE TABLE world_confirmed(
+  event_id     BLOB PRIMARY KEY,
+  confirmed_at INTEGER NOT NULL
+);
+CREATE INDEX idx_world_confirmed_at ON world_confirmed(confirmed_at);
+`;

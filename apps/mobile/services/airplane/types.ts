@@ -17,6 +17,6 @@ export interface PostCardModel {
   views: number;
   /** Protocol ranking score (higher sorts first). */
   score: number;
-  /** True when the post carries the signed ["uplink","1"] opt-in tag. */
-  uplinked: boolean;
+  /** True when the post's event ID has been confirmed on a Nostr relay. */
+  worldConfirmed: boolean;
 }

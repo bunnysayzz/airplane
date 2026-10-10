@@ -8,7 +8,7 @@ import {
   bytesToHex,
   rankScore,
 } from '../memory';
-import { MIGRATION_001 } from '../schema';
+import { MIGRATION_001, MIGRATION_002 } from '../schema';
 import { MmkvKv } from '../mmkv';
 import { NobleCrypto, createViewReceipt, fromHex } from '@airplane/protocol';
 import { MemoryKeyStore, loadOrGenerateKeypair } from '@airplane/crypto';
@@ -364,5 +364,62 @@ describe('MmkvKv stub', () => {
     await expect(kv.get('k')).rejects.toThrow(/not linked \(P2\)/);
     await expect(kv.set('k', 'v')).rejects.toThrow(/not linked \(P2\)/);
     await expect(kv.del('k')).rejects.toThrow(/not linked \(P2\)/);
+  });
+});
+
+describe('world confirmation', () => {
+  test('mark/is round-trip; idempotent; case-insensitive', async () => {
+    const store = new MemoryEventStore();
+    const e = makeEvent({ seed: 41 });
+    const id = bytesToHex(e.id);
+    await store.saveEvent(e);
+
+    expect(await store.isWorldConfirmed(id)).toBe(false);
+    await store.markWorldConfirmed(id);
+    expect(await store.isWorldConfirmed(id)).toBe(true);
+    // Idempotent + case-insensitive.
+    await store.markWorldConfirmed(id.toUpperCase());
+    expect(await store.isWorldConfirmed(id.toUpperCase())).toBe(true);
+  });
+
+  test('getUnconfirmed returns kind-1 posts not yet confirmed', async () => {
+    const store = new MemoryEventStore();
+    const p1 = makeEvent({ seed: 51 });
+    const p2 = makeEvent({ seed: 52 });
+    const receipt = makeReceipt(53, bytesToHex(p1.id), Math.floor(Date.now() / 1000));
+    await store.saveEvent(p1);
+    await store.saveEvent(p2);
+    await store.saveEvent(receipt);
+
+    let unconfirmed = await store.getUnconfirmed();
+    expect(unconfirmed).toHaveLength(2); // receipts excluded
+
+    await store.markWorldConfirmed(bytesToHex(p1.id));
+    unconfirmed = await store.getUnconfirmed();
+    expect(unconfirmed).toEqual([bytesToHex(p2.id)]);
+  });
+
+  test('getUnconfirmed excludes deleted posts', async () => {
+    const store = new MemoryEventStore();
+    const e = makeEvent({ seed: 61 });
+    await store.saveEvent(e);
+    await store.markDeleted(bytesToHex(e.id));
+    expect(await store.getUnconfirmed()).toEqual([]);
+  });
+
+  test('confirming an unknown id is harmless', async () => {
+    const store = new MemoryEventStore();
+    const ghost = 'ab'.repeat(32);
+    await store.markWorldConfirmed(ghost);
+    expect(await store.isWorldConfirmed(ghost)).toBe(true);
+    // getUnconfirmed only lists known posts, so the ghost never appears.
+    expect(await store.getUnconfirmed()).toEqual([]);
+  });
+});
+
+describe('schema MIGRATION_002', () => {
+  test('creates world_confirmed table', () => {
+    expect(MIGRATION_002).toContain('CREATE TABLE world_confirmed(');
+    expect(MIGRATION_002).toContain('event_id     BLOB PRIMARY KEY');
   });
 });

@@ -7,11 +7,10 @@
 // count. Views are the hero stat - this product ranks by views, so there are
 // deliberately no hearts, reposts, bookmarks or follow buttons.
 import React from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Text } from 'react-native';
 import { Post } from './ui/post';
 import { EyeIcon } from './ui/eyeIcon';
 import { useTheme } from '../src/theme/themeContext';
-import { radii, space } from '../src/theme/shape';
 
 export interface PostCardModel {
   /** hex event hash (stable key) */
@@ -28,8 +27,8 @@ export interface PostCardModel {
   views: number;
   /** ranking score (not computed here) */
   score: number;
-  /** true if opted into the World feed */
-  uplinked: boolean;
+  /** true when confirmed on a Nostr relay (World) */
+  worldConfirmed: boolean;
 }
 
 export interface PostCardProps {
@@ -59,7 +58,7 @@ export function timeAgo(createdAtMs: number, nowMs: number = Date.now()): string
 }
 
 export function PostCard({ post, onPress }: PostCardProps) {
-  const { colors, type } = useTheme();
+  const { type } = useTheme();
 
   return (
     <Post
@@ -72,14 +71,14 @@ export function PostCard({ post, onPress }: PostCardProps) {
           handle={`#${post.geohash}`}
           timestamp={timeAgo(post.createdAtMs)}
         />
-        {post.uplinked ? (
+        {post.worldConfirmed ? (
           <Post.Action>
-            <View
-              style={[styles.worldPill, { backgroundColor: colors.accentSoft }]}
-              accessibilityLabel="Shared to the world feed"
+            <Text
+              style={[type.meta, { fontSize: 10, opacity: 0.6 }]}
+              accessibilityLabel="Reached the world network"
             >
-              <Text style={[type.meta, { color: colors.accentText }]}>🌍 world</Text>
-            </View>
+              🌐
+            </Text>
           </Post.Action>
         ) : null}
       </Post.Header>
@@ -90,11 +89,3 @@ export function PostCard({ post, onPress }: PostCardProps) {
     </Post>
   );
 }
-
-const styles = StyleSheet.create({
-  worldPill: {
-    paddingHorizontal: space.sm,
-    paddingVertical: 3,
-    borderRadius: radii.pill,
-  },
-});

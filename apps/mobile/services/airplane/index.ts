@@ -7,7 +7,6 @@ export {
   subscribeFeed,
   notifyFeedListeners,
   authorLabelFor,
-  hasUplinkTag,
   toPostCardModel,
   type FeedQueryOpts,
   type FeedListener,

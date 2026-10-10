@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit -p packages/protocol && tsc --noEmit -p packages/storage && tsc --noEmit -p packages/crypto && tsc --noEmit -p packages/mesh-sim && tsc --noEmit -p apps/mobile",
+    "typecheck": "tsc --noEmit -p packages/protocol && tsc --noEmit -p packages/storage && tsc --noEmit -p packages/crypto && tsc --noEmit -p packages/mesh-sim && tsc --noEmit -p packages/transport && tsc --noEmit -p apps/mobile",
     "test": "jest",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write ."

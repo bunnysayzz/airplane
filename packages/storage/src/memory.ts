@@ -105,6 +105,11 @@ export class MemoryEventStore implements StorePort {
    */
   private readonly pendingTombstones = new Map<Hex64, Set<string> | 'any'>();
   private readonly retentionSec: number;
+  /**
+   * World confirmation (hybrid plan §4): event id hex -> confirmed_at sec.
+   * Client-side only; sticky (no un-confirm).
+   */
+  private readonly worldConfirmed = new Map<Hex64, UnixSec>();
 
   constructor(opts: MemoryEventStoreOpts = {}) {
     this.retentionSec = opts.retentionSec ?? DEFAULT_RETENTION_SEC;
@@ -271,6 +276,28 @@ export class MemoryEventStore implements StorePort {
       }
     }
     return removed;
+  }
+
+  async markWorldConfirmed(eventId: Hex64): Promise<void> {
+    const key = eventId.toLowerCase();
+    if (!this.worldConfirmed.has(key)) {
+      this.worldConfirmed.set(key, Math.floor(Date.now() / 1000));
+    }
+  }
+
+  async isWorldConfirmed(eventId: Hex64): Promise<boolean> {
+    return this.worldConfirmed.has(eventId.toLowerCase());
+  }
+
+  async getUnconfirmed(): Promise<Hex64[]> {
+    const out: Hex64[] = [];
+    for (const [idHex, row] of this.events) {
+      if (row.event.kind !== 1) continue;
+      if (row.deleted) continue;
+      if (this.worldConfirmed.has(idHex)) continue;
+      out.push(idHex);
+    }
+    return out;
   }
 }
 
