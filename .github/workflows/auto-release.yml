@@ -2,13 +2,13 @@
 #
 # PIPELINE (single job, serialized via concurrency):
 #   1. Compute next version from the latest `v*` tag (starts at 0.0.1).
-#   2. Bump `apps/mobile/app.json` expo.version, commit with [auto-release]
-#      (the marker + the job-level `if` below stop infinite loops; CI still
-#      runs on the bump commit so tests stay visible),
-#      then push the commit and the new tag.
+#   2. Bump `apps/mobile/app.json` expo.version and push the commit
+#      (idempotent: skips if already at the target version).
 #   3. EAS cloud build of the `preview` profile (APK, sideloadable).
 #      Requires the `EXPO_TOKEN` repo secret; fails fast if missing.
-#   4. Download the APK and create the GitHub Release with generated notes.
+#   4. ONLY on build success: create the tag and the GitHub Release with
+#      the APK. Failed builds leave no tag behind, so the next push retries
+#      the same version instead of leaving orphan tags.
 #
 # VERSIONING
 #   Patch auto-increments: v0.0.1, v0.0.2, ... No manual tagging needed.
@@ -84,13 +84,16 @@ jobs:
             exit 1
           fi
 
-      - name: Bump app version, commit and tag
+      - name: Bump app version (idempotent)
         env:
           APP_VERSION: ${{ steps.version.outputs.version }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
           VERSION="$APP_VERSION"
-          TAG="$RELEASE_TAG"
+          CURRENT=$(node -e "console.log(require('./apps/mobile/app.json').expo.version)")
+          if [ "$CURRENT" = "$VERSION" ]; then
+            echo "app.json already at $VERSION, skipping bump commit"
+            exit 0
+          fi
           node -e "
             const fs = require('fs');
             const p = 'apps/mobile/app.json';
@@ -103,8 +106,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add apps/mobile/app.json
           git commit -m "chore: bump version to $VERSION [auto-release]"
-          git tag "$TAG"
-          git push origin main "$TAG"
+          git push origin main
 
       - name: Set up EAS
         uses: expo/expo-github-action@v8
