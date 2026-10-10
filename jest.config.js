@@ -23,6 +23,7 @@ module.exports = {
   projects: [
     pkg('protocol'),
     pkg('storage'),
+    pkg('crypto'),
     pkg('mesh-sim'),
     {
       displayName: 'mobile-services',

@@ -19,5 +19,5 @@ export {
   emitViewReceipt,
   type ViewabilityInfo,
 } from './viewTracker';
-export { getDeviceKeypair, crypto, type DeviceKeypair } from './identity';
+export { getDeviceKeypair, setKeyStore, crypto, type DeviceKeypair } from './identity';
 export { getStore } from './store';

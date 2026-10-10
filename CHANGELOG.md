@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- CI/CD hardening: CodeQL, dependency-review, nightly spec-drift checks,
+  release automation, and issue/PR templates.
+- v2 blueprint: hybrid mesh+relay architecture, two-feed (Around / World)
+  product model, privacy model, and an assumption register with validation
+  plans.
+- Mobile UI shell (anonymous onboarding, mesh status, compose, two-feed
+  timeline, panelui Post cards) wired to the airplane protocol; `PRIVACY.md`
+  and `NOTICE` added.
+
+### Changed
+
+- Badges, docs links, and CODEOWNERS repointed from `enginoor/airplane` to
+  `bunnysayzz/airplane`.
+
 ## [0.1.0] - 2026-10-10
 
 P1 foundation scaffold — the protocol, storage, simulation, and app-skeleton

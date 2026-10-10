@@ -7,7 +7,6 @@
 // a local mesh post must never silently go global).
 
 import {
-  encodeGeohash,
   normalizeContent,
   signEvent,
   toHex,
@@ -22,20 +21,22 @@ export interface PublishOpts {
   /** Opt-in global relay uplink. Default false. NEVER silently true. */
   uplink: boolean;
   /**
-   * Override for the post's geohash-5 cell. Defaults to the current cell.
-   * TODO(P2): remove the placeholder fallback — wire the real location
-   * provider and fail loudly instead of posting to a fake cell.
+   * Override for the post's geohash-5 cell. Defaults to the device cell via
+   * getLocationCell() — which throws until the real location provider lands
+   * (TODO(LOC-1)). The override exists for tests/dev.
    */
   geohash5?: string;
 }
 
-// TODO(P2): no location provider exists in the app yet, so new posts land in
-// a placeholder cell. The placeholder is computed with the real geohash
-// encoder (Bengaluru, where the project is built) — it is a visible hack,
-// not a silent default. Location scope for listFeedPosts still comes from
-// the real viewer cell passed by the caller.
-function placeholderCell(): string {
-  return encodeGeohash(12.9716, 77.5946, 5);
+// TODO(LOC-1): no location provider exists in the app yet — real GPS needs a
+// device permissions flow (P2/P3). The old code fell back to hardcoded
+// Bengaluru coords (12.9716, 77.5946); that was worse than honest, so it is
+// gone: a fake location poisons feed scoping and erodes trust in the mesh.
+// Until the provider lands, composing without an explicit cell fails loudly.
+export function getLocationCell(): string {
+  throw new Error(
+    'getLocationCell: location unavailable — pass geohash5 explicitly until TODO(LOC-1) lands',
+  );
 }
 
 /** Pure builder seam: which tags a post carries for the given opts. Unit-tested. */
@@ -45,7 +46,10 @@ export function tagsForPublish(opts: PublishOpts): string[][] {
 
 /**
  * Publish a post to the local mesh feed. Returns the event id (hex).
- * Throws PayloadError on empty/overlong content (protocol validation).
+ * Signed with the STABLE device keypair (identity.ts), so the post's author
+ * pubkey is enforceable for tombstones and view receipts across restarts.
+ * Throws PayloadError on empty/overlong content (protocol validation), and
+ * throws when no geohash5 override is given and location is unavailable.
  */
 export async function publishPost(body: string, opts: PublishOpts): Promise<string> {
   const content = normalizeContent(body);
@@ -54,7 +58,7 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
     pubkey: publicKey,
     created_at: Math.floor(Date.now() / 1000),
     kind: EVENT_KIND_POST as EventKind,
-    geohash: opts.geohash5 ?? placeholderCell(),
+    geohash: opts.geohash5 ?? getLocationCell(),
     tags: tagsForPublish(opts),
     content,
   });

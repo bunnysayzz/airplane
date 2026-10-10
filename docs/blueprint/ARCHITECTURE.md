@@ -17,7 +17,7 @@
 | [OPERATIONS.md](OPERATIONS.md) | Runtime strategy, dependency map, threat model (§10), reliability/perf/security, failure analysis, gaps, full ADRs (§1, §2, §8, §10, §11, §12, §13, §O) |
 | [ROADMAP.md](ROADMAP.md) | Proposed repo structure, phased roadmap P0–P5, acceptance criteria (§14, §15, §23, §24) |
 | [PLAN_CHANGELOG.md](PLAN_CHANGELOG.md) | v1→v2 change log: what changed, why, who decided (coordinator-owned) |
-| [docs/assumption-register.md](docs/assumption-register.md) | All ASSUMPTION tags: statement, source, validation plan, owner |
+| [docs/assumption-register.md](../assumption-register.md) | All ASSUMPTION tags: statement, source, validation plan, owner |
 
 **How to read:** start here for decisions and sequencing; go to SYSTEM_DESIGN.md for buildable detail;
 DIAGRAMS.md for traceability; OSS_RESEARCH.md before adding any dependency; OPERATIONS.md before

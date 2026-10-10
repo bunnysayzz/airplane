@@ -96,8 +96,14 @@ export class MemoryEventStore implements StorePort {
   private readonly receiptKeys = new Set<string>();
   private readonly viewCounts = new Map<Hex64, number>();
   private readonly peers = new Map<string, PeerInfo>();
-  /** Tombstones that arrived before their post; applied on saveEvent. */
-  private readonly pendingTombstones = new Set<Hex64>();
+  /**
+   * Tombstones that arrived before their post; postId -> tombstone AUTHOR
+   * pubkey hexes, or 'any' when armed by the trusted markDeleted primitive
+   * (which cannot know the tombstone's author). Authorship is checked when
+   * the post row arrives, so a forged tombstone from another key can never
+   * arm a pending deletion.
+   */
+  private readonly pendingTombstones = new Map<Hex64, Set<string> | 'any'>();
   private readonly retentionSec: number;
 
   constructor(opts: MemoryEventStoreOpts = {}) {
@@ -112,19 +118,26 @@ export class MemoryEventStore implements StorePort {
       return;
     }
     const now = Math.floor(Date.now() / 1000);
+    // A pending tombstone only arms deletion when its author matches the
+    // arriving event's author (tombstone authorship, audit P0).
+    const pendingAuthors = this.pendingTombstones.get(idHex);
+    const pendingMatch =
+      pendingAuthors !== undefined &&
+      (pendingAuthors === 'any' || pendingAuthors.has(bytesToHex(e.pubkey)));
     const row: EventRow = {
       event: cloneEvent(e),
       receivedAt: now,
       expiresAt: e.created_at + this.retentionSec,
-      deleted: this.pendingTombstones.has(idHex),
+      deleted: pendingMatch,
     };
-    if (row.deleted) this.pendingTombstones.delete(idHex);
+    if (pendingMatch) this.pendingTombstones.delete(idHex);
     this.events.set(idHex, row);
 
-    // A kind-3 tombstone applies deletion to its target post immediately.
+    // A kind-3 tombstone applies deletion to its target post immediately —
+    // but ONLY when the tombstone's author pubkey matches the post's author.
     if (e.kind === 3) {
       const target = taggedPostId(e);
-      if (target) await this.markDeleted(target);
+      if (target) await this.applyTombstone(e, target);
     }
   }
 
@@ -158,14 +171,47 @@ export class MemoryEventStore implements StorePort {
     return posts.slice(0, Math.max(0, opts.limit));
   }
 
+  /**
+   * Honor a tombstone ONLY when its author pubkey matches the target post's
+   * author pubkey (audit P0: unenforceable with ephemeral keys, meaningful
+   * now that the device keypair is stable). A tombstone from any other key
+   * is stored as an event (relay/dedup integrity) but deletes nothing.
+   * If the post row does not exist yet, the tombstone's AUTHOR is remembered
+   * and checked when the post arrives (tombstone-wins LWW, authorship-gated).
+   */
+  private async applyTombstone(tomb: SignedEvent, target: Hex64): Promise<void> {
+    const key = target.toLowerCase();
+    const authorHex = bytesToHex(tomb.pubkey);
+    const row = this.events.get(key);
+    if (row) {
+      if (bytesToHex(row.event.pubkey) === authorHex) {
+        row.deleted = true;
+      }
+      // else: forged/mismatched tombstone — stored, not honored.
+    } else {
+      // Never narrows a pending entry armed by the trusted markDeleted
+      // primitive ('any' stays 'any').
+      const existing = this.pendingTombstones.get(key);
+      if (existing === undefined) {
+        this.pendingTombstones.set(key, new Set<string>([authorHex]));
+      } else if (existing !== 'any') {
+        existing.add(authorHex);
+      }
+    }
+  }
+
   async markDeleted(postId: Hex64): Promise<void> {
     const key = postId.toLowerCase();
     const row = this.events.get(key);
     if (row) {
       row.deleted = true;
     } else {
-      // Tombstone-wins: remember until the post row arrives.
-      this.pendingTombstones.add(key);
+      // Tombstone-wins: remember until the post row arrives. NOTE: this is
+      // the low-level primitive and trusts the caller — authorship is
+      // enforced at the saveEvent ingress for kind-3 events (applyTombstone).
+      // A pending entry armed via markDeleted cannot know the tombstone's
+      // author, so it applies to whatever post arrives with this id.
+      this.pendingTombstones.set(key, 'any');
     }
   }
 

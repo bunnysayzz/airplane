@@ -84,7 +84,8 @@ function taggedPostId(e: SignedEvent): Hex64 | null {
  * BLOB columns are bound as Uint8Array params (supported by op-sqlite).
  */
 export class OpSqliteStore implements StorePort {
-  private readonly pendingTombstones = new Set<Hex64>();
+  /** Tombstones that arrived before their post; see memory.ts for semantics. */
+  private readonly pendingTombstones = new Map<Hex64, Set<string> | 'any'>();
 
   constructor(
     private readonly db: DatabasePort,
@@ -105,7 +106,11 @@ export class OpSqliteStore implements StorePort {
     const idHex = bytesToHex(e.id);
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = e.created_at + this.retentionSec;
-    const deleted = this.pendingTombstones.has(idHex) ? 1 : 0;
+    // A pending tombstone only arms deletion when its author matches the
+    // arriving event's author (tombstone authorship, audit P0).
+    const pending = this.pendingTombstones.get(idHex);
+    const deleted =
+      pending !== undefined && (pending === 'any' || pending.has(bytesToHex(e.pubkey))) ? 1 : 0;
     if (deleted) this.pendingTombstones.delete(idHex);
     await this.db.exec(
       `INSERT INTO events
@@ -121,7 +126,36 @@ export class OpSqliteStore implements StorePort {
     );
     if (e.kind === 3) {
       const target = taggedPostId(e);
-      if (target) await this.markDeleted(target);
+      if (target) await this.applyTombstone(e, target);
+    }
+  }
+
+  /**
+   * Honor a tombstone ONLY when its author pubkey matches the target post's
+   * author pubkey (audit P0). Mirrors MemoryEventStore.applyTombstone.
+   */
+  private async applyTombstone(tomb: SignedEvent, target: Hex64): Promise<void> {
+    const key = target.toLowerCase();
+    const authorHex = bytesToHex(tomb.pubkey);
+    const rows = await this.db.query<{ pubkey: Uint8Array }>(
+      `SELECT pubkey FROM events WHERE id = ?`,
+      [hexToBytes(key)],
+    );
+    if (rows.length > 0) {
+      if (bytesToHex(rows[0].pubkey) === authorHex) {
+        await this.db.exec(`UPDATE events SET deleted = 1 WHERE id = ?`, [hexToBytes(key)]);
+      }
+      // else: forged/mismatched tombstone — stored, not honored.
+    } else {
+      // Tombstone-wins: remember the AUTHOR so a late-arriving post is
+      // checked before its deleted flag is set. Never narrows a pending
+      // entry armed by the trusted markDeleted primitive ('any' stays 'any').
+      const existing = this.pendingTombstones.get(key);
+      if (existing === undefined) {
+        this.pendingTombstones.set(key, new Set<string>([authorHex]));
+      } else if (existing !== 'any') {
+        existing.add(authorHex);
+      }
     }
   }
 
@@ -170,12 +204,14 @@ export class OpSqliteStore implements StorePort {
       hexToBytes(key),
     ]);
     // If the row did not exist yet, remember the tombstone for when it arrives.
+    // NOTE: the trusted-primitive semantics of memory.ts apply here too — a
+    // pending entry armed via markDeleted cannot know the tombstone's author.
     const check = await this.db.query<{ n: number }>(
       `SELECT COUNT(*) AS n FROM events WHERE id = ?`,
       [hexToBytes(key)],
     );
     if (check.length === 0 || check[0].n === 0) {
-      this.pendingTombstones.add(key);
+      this.pendingTombstones.set(key, 'any');
     }
   }
 

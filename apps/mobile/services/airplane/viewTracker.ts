@@ -7,11 +7,10 @@
 // per (device, post, UTC day)); this layer additionally tracks what it has
 // already emitted this launch so it doesn't re-sign for the same post.
 //
-// Receipts are signed with the device keypair (see identity.ts). NOTE the
-// honest limitation: until P2 the keypair is ephemeral per launch, so the
-// (pubkey, post, day) dedup bucket changes identity on restart — the same
-// device can count twice for one post across launches. TODO(P2): fixed by the
-// stable KeyStore-backed keypair.
+// Receipts are signed with the stable device keypair (see identity.ts), so
+// the store's (pubkey, post, day) dedup bucket is a stable device identity
+// across restarts: the same device re-viewing a post after a restart does
+// NOT count twice.
 
 import { createViewReceipt, fromHex } from '@airplane/protocol';
 import { getDeviceKeypair, crypto } from './identity';

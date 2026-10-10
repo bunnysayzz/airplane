@@ -19,7 +19,7 @@ import { makeStyles } from './styles';
 // Setup never holds the user longer than this
 export const SETUP_TIMEOUT_MS = 30_000;
 
-// The pug's messages (setup.messages in the dictionaries) rotate at this pace
+// Boot status lines (setup.messages in the dictionaries) rotate at this pace
 const MESSAGE_INTERVAL_MS = 2500;
 
 interface SetupProps {
@@ -31,7 +31,7 @@ interface SetupProps {
   ready?: boolean;
 }
 
-// Two phases: the Pugdon boot splash (keypair, store init) first, then 2-3 swipeable
+// Two phases: the boot splash (keypair, store init) first, then 2-3 swipeable
 // anonymous-onboarding cards ending in a single Start button. There is no login,
 // no account, no permissions begging — the Bluetooth/location rationale lives inline
 // on card 1, where the OS will actually prompt. The navigation worker decides when
@@ -50,7 +50,7 @@ const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false })
     setBooted(true);
   }).current;
 
-  // Boot splash: Pugdon's rotating messages and progress bar
+  // Boot splash: rotating status messages and progress bar
   const [message, setMessage] = useState(0);
   useEffect(() => {
     if (booted) return;

@@ -50,7 +50,7 @@ export const COATS: readonly Coat[] = [
     { key: 'brindle', name: 'Brindle', hue: 20, neutralTint: 0.6,
         light: { accent: '#B7825F', accentText: '#7E4A2E', onAccent: '#22160F' },
         dark: { accent: '#C9936F', accentText: '#DDA886', onAccent: '#1A110B' } },
-    { key: 'black', name: 'Black pug', hue: 25, neutralTint: 0.15,
+    { key: 'black', name: 'Black', hue: 25, neutralTint: 0.15,
         light: { accent: '#2E2622', accentText: '#2E2622', onAccent: '#FFF8F1' },
         dark: { accent: '#E9DFD6', accentText: '#EFE6DD', onAccent: '#1A1512' } },
     { key: 'silver', name: 'Silver', hue: 210, neutralTint: 0.25,

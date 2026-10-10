@@ -21,7 +21,7 @@ import {
   notifyFeedListeners,
   __resetFeedListenersForTests,
 } from './feed';
-import { tagsForPublish, publishPost } from './composer';
+import { tagsForPublish, publishPost, getLocationCell } from './composer';
 import {
   extractNewViewIds,
   emitViewReceipt,
@@ -125,6 +125,15 @@ describe('publishPost', () => {
   it('rejects empty / overlong bodies via protocol validation', async () => {
     await expect(publishPost('', { uplink: false, geohash5: 'tdr1v' })).rejects.toThrow();
     await expect(publishPost('x'.repeat(281), { uplink: false, geohash5: 'tdr1v' })).rejects.toThrow();
+  });
+
+  it('fails loudly without a cell: getLocationCell is an honest stub (TODO(LOC-1))', async () => {
+    expect(() => getLocationCell()).toThrow(/location unavailable/);
+    await expect(publishPost('no cell', { uplink: false })).rejects.toThrow(
+      /location unavailable/,
+    );
+    // No fake coords are ever written: nothing landed in the store.
+    expect(await getStore().listFeed({ cells: ['tdr1v'], limit: 10 })).toHaveLength(0);
   });
 
   it('notifies feed subscribers after publish', async () => {

@@ -10,6 +10,8 @@ import {
 } from '../memory';
 import { MIGRATION_001 } from '../schema';
 import { MmkvKv } from '../mmkv';
+import { NobleCrypto, createViewReceipt, fromHex } from '@airplane/protocol';
+import { MemoryKeyStore, loadOrGenerateKeypair } from '@airplane/crypto';
 
 function seedBytes(seed: number, len = 32): Uint8Array {
   const b = new Uint8Array(len);
@@ -24,12 +26,14 @@ interface FixtureOpts {
   createdAt?: number;
   tags?: string[][];
   content?: string;
+  /** Override the author pubkey (default derives from seed). */
+  pubkey?: Uint8Array;
 }
 
 function makeEvent(o: FixtureOpts): SignedEvent {
   return {
     id: seedBytes(o.seed),
-    pubkey: seedBytes(o.seed + 1000),
+    pubkey: o.pubkey ?? seedBytes(o.seed + 1000),
     created_at: o.createdAt ?? Math.floor(Date.now() / 1000),
     kind: o.kind ?? 1,
     geohash: o.geohash ?? 'tdr1v',
@@ -87,11 +91,74 @@ describe('MemoryEventStore', () => {
     await store.saveEvent(post);
     expect(await store.listFeed({ cells: ['tdr1v'], limit: 10 })).toHaveLength(1);
 
-    const tomb = makeEvent({ seed: 4, kind: 3, tags: [['e', postId]], content: '' });
+    // ACCEPT: tombstone signed by the post's author is honored.
+    const tomb = makeEvent({
+      seed: 4,
+      kind: 3,
+      tags: [['e', postId]],
+      content: '',
+      pubkey: post.pubkey,
+    });
     await store.saveEvent(tomb);
     expect(await store.listFeed({ cells: ['tdr1v'], limit: 10 })).toHaveLength(0);
     // The post row still exists, flagged deleted.
     expect(await store.getEvent(postId)).not.toBeNull();
+  });
+
+  test('tombstone from a different author is REJECTED (not honored)', async () => {
+    const store = new MemoryEventStore();
+    const post = makeEvent({ seed: 30 });
+    const postId = bytesToHex(post.id);
+    await store.saveEvent(post);
+
+    // Forged tombstone: a different key claims to delete someone else's post.
+    const forged = makeEvent({
+      seed: 31,
+      kind: 3,
+      tags: [['e', postId]],
+      content: '',
+      pubkey: seedBytes(9999),
+    });
+    await store.saveEvent(forged);
+    // Stored as an event (relay integrity) but the post stays visible.
+    expect(await store.getEvent(bytesToHex(forged.id))).not.toBeNull();
+    expect(await store.listFeed({ cells: ['tdr1v'], limit: 10 })).toHaveLength(1);
+  });
+
+  test('pending tombstone: honored only when the late post author matches', async () => {
+    // ACCEPT: tombstone arrives first, post arrives later from the same author.
+    {
+      const store = new MemoryEventStore();
+      const authorPubkey = seedBytes(5001);
+      const postId = bytesToHex(seedBytes(50));
+      const tomb = makeEvent({
+        seed: 51,
+        kind: 3,
+        tags: [['e', postId]],
+        content: '',
+        pubkey: authorPubkey,
+      });
+      await store.saveEvent(tomb); // no post row yet -> pending, author remembered
+      const post = makeEvent({ seed: 50, pubkey: authorPubkey });
+      await store.saveEvent(post);
+      expect(await store.listFeed({ cells: ['tdr1v'], limit: 10 })).toHaveLength(0);
+    }
+    // REJECT: tombstone author != late-arriving post author.
+    {
+      const store = new MemoryEventStore();
+      const postId = bytesToHex(seedBytes(60));
+      const tomb = makeEvent({
+        seed: 61,
+        kind: 3,
+        tags: [['e', postId]],
+        content: '',
+        pubkey: seedBytes(6001),
+      });
+      await store.saveEvent(tomb);
+      const post = makeEvent({ seed: 60, pubkey: seedBytes(6002) });
+      await store.saveEvent(post);
+      expect(await store.listFeed({ cells: ['tdr1v'], limit: 10 })).toHaveLength(1);
+    }
   });
 
   test('tombstone arriving before the post still deletes it (tombstone-wins)', async () => {
@@ -127,6 +194,41 @@ describe('MemoryEventStore', () => {
     r3.pubkey = seedBytes(4242);
     expect(await store.saveReceipt(r3)).toBe(true);
     expect(await store.countViews(postId)).toBe(3);
+  });
+
+  test('receipt dedup with stable viewer keys across restarts (re-instantiated keystore)', async () => {
+    const store = new MemoryEventStore();
+    const post = makeEvent({ seed: 70 });
+    const postId = bytesToHex(post.id);
+    await store.saveEvent(post);
+
+    const crypto = new NobleCrypto();
+    const day = NOW - (NOW % 86400);
+    // One keystore backing shared across "restarts": the viewer key is
+    // stable, so the (pubkey, post, day) bucket is identical.
+    const backing = new Map<string, Uint8Array>();
+    const receiptFor = async (createdAt: number) => {
+      // "Restart": brand-new keystore instance over the same persistence.
+      const { publicKey, secretKey } = await loadOrGenerateKeypair(
+        new MemoryKeyStore(backing),
+      );
+      return createViewReceipt({
+        crypto,
+        secretKey,
+        pubkey: publicKey,
+        geohash5: 'tdr1v',
+        postId: fromHex(postId),
+        createdAt,
+      });
+    };
+
+    expect(await store.saveReceipt(await receiptFor(day + 100))).toBe(true);
+    // Same device, same day, after a "restart" -> still deduped.
+    expect(await store.saveReceipt(await receiptFor(day + 200))).toBe(false);
+    expect(await store.countViews(postId)).toBe(1);
+    // Next day counts again.
+    expect(await store.saveReceipt(await receiptFor(day + 86400 + 100))).toBe(true);
+    expect(await store.countViews(postId)).toBe(2);
   });
 
   test('saveReceipt rejects non-receipt kinds and tagless receipts', async () => {

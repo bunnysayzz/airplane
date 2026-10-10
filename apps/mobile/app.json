@@ -1,11 +1,16 @@
-// SPDX-License-Identifier: Apache-2.0
 {
   "expo": {
     "name": "Airplane",
     "slug": "airplane",
     "scheme": "airplane",
     "version": "1.0.0",
-    "platforms": ["ios", "android"],
-    "newArchEnabled": true
+    "platforms": [
+      "ios",
+      "android"
+    ],
+    "newArchEnabled": true,
+    "plugins": [
+      "expo-secure-store"
+    ]
   }
 }
