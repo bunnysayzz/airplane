@@ -6,7 +6,7 @@ import ComposeModal from '../../components/ComposeModal/composeModal';
 import { useI18n } from '../../src/i18n/i18nContext';
 import { useTheme } from '../../src/theme/themeContext';
 
-type TabRouteName = 'around' | 'world' | 'settings';
+type TabRouteName = 'feed' | 'settings';
 
 interface DockBarProps {
     activeTab: string;
@@ -20,8 +20,7 @@ interface DockBarProps {
 function DockBar({ activeTab, onTabPress, onComposePress }: DockBarProps) {
     const { t } = useI18n();
     const tabs: TabDef[] = [
-        { key: 'around', label: t('timeline.around'), icon: 'radio-outline', activeIcon: 'radio' },
-        { key: 'world', label: t('timeline.world'), icon: 'globe-outline', activeIcon: 'globe' },
+        { key: 'feed', label: t('timeline.feed'), icon: 'radio-outline', activeIcon: 'radio' },
         { key: 'settings', label: t('common.settings'), icon: 'settings-outline', activeIcon: 'settings' },
     ];
     return (
@@ -47,14 +46,13 @@ export default function TabsLayout() {
                 screenOptions={{ headerShown: false }}
                 tabBar={props => (
                     <DockBar
-                        activeTab={props.state.routes[props.state.index]?.name ?? 'around'}
+                        activeTab={props.state.routes[props.state.index]?.name ?? 'feed'}
                         onTabPress={key => props.navigation.navigate(key)}
                         onComposePress={() => setComposeOpen(true)}
                     />
                 )}
             >
-                <Tabs.Screen name="around" options={{ title: t('timeline.around') }} />
-                <Tabs.Screen name="world" options={{ title: t('timeline.world') }} />
+                <Tabs.Screen name="feed" options={{ title: t('timeline.feed') }} />
                 <Tabs.Screen name="settings" options={{ title: t('common.settings') }} />
             </Tabs>
             <ComposeModal isOpen={composeOpen} onClose={() => setComposeOpen(false)} />

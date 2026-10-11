@@ -85,11 +85,9 @@ export const en = {
     local: 'Local',
     federated: 'Federated',
     trending: 'Trending',
-    // Airplane's two feeds
-    around: 'Around you',
-    world: 'World',
-    emptyAround: 'Nothing nearby yet \u2014 be the first to post.',
-    emptyWorld: 'No relayed posts yet - World arrives with the relay update.',
+    // Airplane's single feed
+    feed: 'Feed',
+    empty: 'Nothing here yet - be the first to post.',
     emptyHome: 'No posts on your home timeline yet!',
     emptyLocal: 'No posts on your local timeline yet!',
     emptyFederated: 'No posts on your federated timeline yet!',
