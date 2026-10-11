@@ -3,7 +3,7 @@
 // connections are attempted; NetInfo is the repo's __mocks__ version.
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport } from './transport';
+import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests } from './transport';
 import { __resetStoreForTests } from './store';
 
 /** Fake WebSocket that never connects - records constructor calls only. */
@@ -53,6 +53,7 @@ describe('transport manager', () => {
     netInfoMock.addEventListener.mockClear();
     netInfoMock.addEventListener.mockReturnValue(jest.fn());
     __resetStoreForTests();
+    __resetNetInfoForTests();
     jest.useFakeTimers();
   });
 
@@ -128,5 +129,20 @@ describe('transport manager', () => {
     expect(result).toHaveProperty('blePeers');
     expect(result).toHaveProperty('relays');
     expect(Array.isArray(result.relays)).toBe(true);
+  });
+
+  test('startTransport survives NetInfo native module load failure', async () => {
+    // Simulate a broken/missing native module: require throws.
+    jest.resetModules();
+    jest.doMock('@react-native-community/netinfo', () => {
+      throw new Error('native module not linked');
+    });
+    // Re-import the transport module fresh so it picks up the throwing mock.
+    const fresh = await import('./transport');
+    fresh.__resetNetInfoForTests();
+    // Must not throw — app launches in offline-only mode.
+    await expect(fresh.startTransport()).resolves.toBeUndefined();
+    await fresh.stopTransport();
+    jest.dontMock('@react-native-community/netinfo');
   });
 });

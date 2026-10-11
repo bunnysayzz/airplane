@@ -8,7 +8,7 @@
 // - Incoming posts from any source are stored and fed to the UI.
 // - WorldSync runs when online to push unconfirmed posts and check relays.
 
-import NetInfo from '@react-native-community/netinfo';
+import type { NetInfoState } from '@react-native-community/netinfo';
 import {
   HybridTransport,
   BleTransport,
@@ -18,6 +18,36 @@ import {
 import type { SignedEvent, TransportPort, Hex64 } from '@airplane/protocol';
 import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
+
+/**
+ * NetInfo is a native module. If it fails to load (not linked, Expo Go,
+ * etc.), the app must still launch — transport just runs offline-only.
+ * We load it lazily so a broken native module can't crash the app at import.
+ */
+let NetInfoModule: {
+  fetch: () => Promise<NetInfoState>;
+  addEventListener: (cb: (s: NetInfoState) => void) => () => void;
+} | null = null;
+let netInfoLoadAttempted = false;
+
+/** Test seam: reset the NetInfo module cache so tests can simulate load failure. */
+export function __resetNetInfoForTests(): void {
+  NetInfoModule = null;
+  netInfoLoadAttempted = false;
+}
+
+function getNetInfo() {
+  if (netInfoLoadAttempted) return NetInfoModule;
+  netInfoLoadAttempted = true;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require('@react-native-community/netinfo');
+    NetInfoModule = mod.default ?? mod;
+  } catch {
+    NetInfoModule = null;
+  }
+  return NetInfoModule;
+}
 
 /**
  * No-op BLE port until real GATT lands (P0). Satisfies TransportPort so
@@ -93,8 +123,15 @@ export async function startTransport(): Promise<void> {
 
   await hybrid.start();
 
+  const netInfo = getNetInfo();
+  if (!netInfo) {
+    // No connectivity module — run offline-only (BLE stub). Nostr stays
+    // stopped; the feed works fine without it.
+    return;
+  }
+
   // React to connectivity changes.
-  netUnsub = NetInfo.addEventListener((state) => {
+  netUnsub = netInfo.addEventListener((state) => {
     const online = !!state.isConnected && !!state.isInternetReachable;
     if (online) {
       void hybrid?.nostr.start();
@@ -113,7 +150,7 @@ export async function startTransport(): Promise<void> {
   });
 
   // Initial state check.
-  const initial = await NetInfo.fetch();
+  const initial = await netInfo.fetch();
   if (initial.isConnected && initial.isInternetReachable) {
     void runSync();
     syncTimer = setInterval(() => void runSync(), SYNC_INTERVAL_MS);
