@@ -20,6 +20,41 @@ const pkg = (name) => ({
 });
 
 module.exports = {
+  // Coverage gates: fail the run if coverage drops below these floors.
+  // Current (2026-10-11): ~90% stmts / 80% branches / 85% funcs / 91% lines.
+  // Thresholds sit just below to catch regressions without blocking
+  // incremental progress. Raise them as untested modules gain tests.
+  coverageThreshold: {
+    global: {
+      statements: 85,
+      branches: 75,
+      functions: 80,
+      lines: 85,
+    },
+  },
+  collectCoverageFrom: [
+    // Paths are relative to each project's rootDir (packages/<name> or
+    // apps/mobile), so keep them project-local. Only directories with test
+    // coverage are included; UI components and i18n are excluded (they need
+    // a React Native test harness, tracked separately).
+    'src/**/*.ts',
+    'services/airplane/*.ts',
+    '!**/*.test.ts',
+    '!**/__tests__/**',
+    '!**/__mocks__/**',
+    '!**/test-helpers*',
+    // Native stubs: can't run in Node, excluded from coverage.
+    '!src/op-sqlite.ts',
+    '!src/mmkv.ts',
+    // Mobile UI support files: no unit tests (need RN harness).
+    '!src/i18n/**',
+    '!src/lib/**',
+    '!src/theme/**',
+    // Pure re-export barrels and type-only modules: nothing to execute.
+    '!**/index.ts',
+    '!**/types.ts',
+    '!**/ports.ts',
+  ],
   projects: [
     pkg('protocol'),
     pkg('storage'),

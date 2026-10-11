@@ -2,9 +2,14 @@
 # Gates (in order):
 #   1. `npm run lint`      — ESLint must pass with zero warnings; catches style/unused-code drift early.
 #   2. `npm run typecheck` — tsc --noEmit across all workspaces; a type error here blocks merge.
-#   3. `npm test`          — Jest unit tests; currently shallow, grows into P2+ protocol tests.
+#   3. `npm run test:coverage` — Jest with coverage thresholds; a drop in
+#      covered lines/branches fails the run so untested code can't merge silently.
 # Node version is pinned by the repo's `.nvmrc` (Node 24) so CI matches local dev.
 # `cache: 'npm'` on setup-node keeps `npm ci` fast across runs.
+#
+# --forceExit: some suites (mobile-services) leave async handles open after
+# tests complete (pre-existing; tracked). Tests themselves pass; forceExit
+# keeps CI from hanging on the 1s "did not exit" grace period.
 
 name: CI
 
@@ -33,8 +38,16 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm test
+      - name: Test with coverage
+        run: npm run test:coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
 
   # A workflow file that doesn't parse fails the whole run at load time with
   # a cryptic error, so validate every workflow YAML parses as a gate.
