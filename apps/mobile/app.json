@@ -3,7 +3,7 @@
     "name": "Airplane",
     "slug": "airplane",
     "scheme": "airplane",
-    "version": "0.0.14",
+    "version": "0.0.2",
     "platforms": [
       "ios",
       "android"
@@ -19,10 +19,23 @@
     },
     "owner": "bunnysayzz",
     "android": {
-      "package": "com.bunnysayzz.airplane"
+      "package": "com.bunnysayzz.airplane",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0A0A0B"
+      }
     },
     "ios": {
       "bundleIdentifier": "com.bunnysayzz.airplane"
+    },
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0A0B"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
     }
   }
 }

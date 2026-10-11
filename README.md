@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./logo.png" width="120" alt="Airplane logo" />
+</p>
+
 # Airplane
 
 *the feed that works in airplane mode.*
