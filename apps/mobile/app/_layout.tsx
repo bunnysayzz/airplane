@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SplashScreen, Stack } from 'expo-router';
 import { ThemeProvider, useTheme } from '../src/theme/themeContext';
 import { I18nProvider, useI18n } from '../src/i18n/i18nContext';
@@ -26,14 +26,22 @@ export function ErrorBoundary({ error, retry }: { error: Error; retry: () => voi
 
 // The splash stays up until the theme fonts and the saved language are ready,
 // so there's no flash of unstyled or wrong-language UI on launch.
+// The 8s timeout is a safety net: if fonts/storage hang, the app still opens
+// instead of wedging on the splash forever.
 function ReadyGate({ children }: { children: React.ReactNode }) {
     const { fontsReady } = useTheme();
     const { languageReady } = useI18n();
-    const ready = fontsReady && languageReady;
+    const [timedOut, setTimedOut] = React.useState(false);
+    const ready = (fontsReady && languageReady) || timedOut;
 
     useEffect(() => {
         if (ready) SplashScreen.hideAsync().catch(() => {});
     }, [ready]);
+
+    useEffect(() => {
+        const t = setTimeout(() => setTimedOut(true), 8000);
+        return () => clearTimeout(t);
+    }, []);
 
     if (!ready) return null;
     return <>{children}</>;
@@ -41,9 +49,13 @@ function ReadyGate({ children }: { children: React.ReactNode }) {
 
 export default function RootLayout() {
     useEffect(() => {
-        // Start hybrid transport (BLE always, Nostr when online).
-        // Failures are non-fatal; the feed works offline regardless.
-        startTransport().catch(() => {});
+        // Start hybrid transport (BLE always, Nostr when online) AFTER first
+        // paint so nothing blocks the UI thread during launch. Failures are
+        // non-fatal; the feed works offline regardless.
+        const task = InteractionManager.runAfterInteractions(() => {
+            startTransport().catch(() => {});
+        });
+        return () => task.cancel();
     }, []);
 
     return (

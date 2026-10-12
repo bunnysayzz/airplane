@@ -33,5 +33,5 @@ export default function Index() {
 
     if (!checked) return null;
     if (showSetup) return <Setup onDone={handleDone} />;
-    return <Redirect href="/(tabs)/around" />;
+    return <Redirect href="/(tabs)/feed" />;
 }

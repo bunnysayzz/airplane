@@ -31,7 +31,7 @@ export default function PostScreen() {
 
     const goBack = () => {
         if (router.canGoBack()) router.back();
-        else router.replace('/(tabs)/around');
+        else router.replace('/(tabs)/feed');
     };
 
     return (
