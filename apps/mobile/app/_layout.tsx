@@ -1,6 +1,8 @@
+import '../src/sentry';
 import React, { useEffect } from 'react';
 import { InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SplashScreen, Stack } from 'expo-router';
+import Sentry from '../src/sentry';
 import { ThemeProvider, useTheme } from '../src/theme/themeContext';
 import { I18nProvider, useI18n } from '../src/i18n/i18nContext';
 import { SettingsProvider } from '../src/lib/settingsContext';
@@ -47,7 +49,7 @@ function ReadyGate({ children }: { children: React.ReactNode }) {
     return <>{children}</>;
 }
 
-export default function RootLayout() {
+export default Sentry.wrap(function RootLayout() {
     useEffect(() => {
         // Start hybrid transport (BLE always, Nostr when online) AFTER first
         // paint so nothing blocks the UI thread during launch. Failures are
@@ -75,7 +77,7 @@ export default function RootLayout() {
             </I18nProvider>
         </ThemeProvider>
     );
-}
+});
 
 const fallbackStyles = StyleSheet.create({
     center: {

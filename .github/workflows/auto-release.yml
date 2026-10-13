@@ -118,7 +118,18 @@ jobs:
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: eas build --platform android --profile preview --non-interactive --wait --json > /tmp/build.json
+        run: |
+          # Wire the Sentry DSN into this build (JS bundle + native pre-JS crash
+          # capture) from the SENTRY_DSN repo secret. Generated on the runner,
+          # never committed; gitignored. Without it Sentry stays disabled.
+          if [ -n "${{ secrets.SENTRY_DSN }}" ]; then
+            printf 'EXPO_PUBLIC_SENTRY_DSN=%s\n' "${{ secrets.SENTRY_DSN }}" > .env
+            printf '{"dsn":"%s"}\n' "${{ secrets.SENTRY_DSN }}" > sentry.options.json
+            echo "Sentry DSN injected for build"
+          else
+            echo "SENTRY_DSN secret not set; building with Sentry disabled"
+          fi
+          eas build --platform android --profile preview --non-interactive --wait --json > /tmp/build.json
 
       - name: Show EAS build error (on failure)
         if: failure()
