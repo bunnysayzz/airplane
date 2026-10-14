@@ -15,11 +15,10 @@ import * as Sentry from '@sentry/react-native';
 
 Sentry.init({
     dsn: process.env.EXPO_PUBLIC_SENTRY_DSN,
-    // Native crash handling re-enabled with Sentry 6.14.0 (compatible with
-    // Expo SDK 53's Gradle toolchain; v8.x broke the build). Captures native
-    // crashes during app startup before the JS bundle loads.
-    enableNative: true,
-    enableNativeCrashHandling: true,
+    // JS-only: native module breaks EAS Gradle build. The SENTRY_DSN secret
+    // is now set, so the workflow injects it via .env during build.
+    enableNative: false,
+    enableNativeCrashHandling: false,
 });
 
 export default Sentry;

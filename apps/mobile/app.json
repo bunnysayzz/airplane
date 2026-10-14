@@ -3,21 +3,14 @@
     "name": "Airplane",
     "slug": "airplane",
     "scheme": "airplane",
-    "version": "0.0.19",
+    "version": "0.0.18",
     "platforms": [
       "ios",
       "android"
     ],
     "newArchEnabled": true,
     "plugins": [
-      "expo-secure-store",
-      [
-        "@sentry/react-native/expo",
-        {
-          "url": "https://sentry.io/",
-          "useNativeInit": true
-        }
-      ]
+      "expo-secure-store"
     ],
     "extra": {
       "eas": {
