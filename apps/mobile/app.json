@@ -10,7 +10,14 @@
     ],
     "newArchEnabled": true,
     "plugins": [
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "@sentry/react-native/expo",
+        {
+          "url": "https://sentry.io/",
+          "useNativeInit": true
+        }
+      ]
     ],
     "extra": {
       "eas": {
