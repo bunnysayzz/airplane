@@ -15,10 +15,12 @@ import * as Sentry from '@sentry/react-native';
 
 Sentry.init({
     dsn: process.env.EXPO_PUBLIC_SENTRY_DSN,
-    enableNative: true,
-    // Captures crashes during JS bundle load (before React mounts) as well as
-    // native crashes routed through the native layer armed via useNativeInit.
-    enableNativeCrashHandling: true,
+    // JS-only mode: the Sentry Expo plugin (native module) breaks the EAS
+    // Gradle build, so we skip native crash handling. This still captures
+    // JS import-time throws during bundle evaluation — the crash pattern
+    // we're hunting.
+    enableNative: false,
+    enableNativeCrashHandling: false,
 });
 
 export default Sentry;
