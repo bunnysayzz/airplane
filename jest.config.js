@@ -50,6 +50,8 @@ module.exports = {
     '!src/i18n/**',
     '!src/lib/**',
     '!src/theme/**',
+    // Crash reporting bootstrap: init-only, no testable logic.
+    '!src/sentry.ts',
     // Pure re-export barrels and type-only modules: nothing to execute.
     '!**/index.ts',
     '!**/types.ts',
