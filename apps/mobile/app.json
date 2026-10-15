@@ -3,15 +3,13 @@
     "name": "Airplane",
     "slug": "airplane",
     "scheme": "airplane",
-    "version": "0.0.20",
+    "version": "0.0.18",
     "platforms": [
       "ios",
       "android"
     ],
     "newArchEnabled": true,
-    "plugins": [
-      "expo-secure-store"
-    ],
+    "plugins": [],
     "extra": {
       "eas": {
         "projectId": "98a17423-033b-4461-a779-82d919336f3c"
