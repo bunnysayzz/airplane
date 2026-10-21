@@ -9,7 +9,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -31,20 +31,47 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android platform + build-tools
         run: |
           yes | sdkmanager --licenses > /dev/null
           sdkmanager "platform-tools" "platforms;android-35" "platforms;android-34" "build-tools;35.0.0" "build-tools;34.0.0"
 
-      - name: Expo prebuild (generate android/)
-        working-directory: apps/mobile
-        run: npx expo prebuild --platform android --clean --no-install
-
-      - name: Build debug APK
+      # android/ is committed to the repo (NovaMind route) — no Expo prebuild.
+      # The native project is reviewed in git and identical between builds.
+      - name: Build debug APK (arm64-v8a only)
         working-directory: apps/mobile/android
-        run: ./gradlew assembleDebug --no-daemon
+        run: ./gradlew assembleDebug -PreactNativeArchitectures=arm64-v8a --no-daemon
+
+      - name: Verify APK native payload (no Sentry, allowlisted .so only)
+        run: |
+          APK=apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK not found at $APK"
+            exit 1
+          fi
+          echo "=== Full .so inventory of $APK ==="
+          unzip -Z1 "$APK" | grep -E '^lib/[^/]+/[^/]+\.so$' | sort -u | tee /tmp/so-inventory.txt
+          echo "=== End of inventory ==="
+
+          # Hard fail: any Sentry native library, under any ABI/name variant.
+          if grep -qi 'sentry' /tmp/so-inventory.txt; then
+            echo "::error::Sentry native library found in APK:"
+            grep -i 'sentry' /tmp/so-inventory.txt
+            exit 1
+          fi
+
+          # Hard fail: any native library outside the known RN 0.79 / Expo SDK 53
+          # families for this app's installed modules. If a legit new module is
+          # added later, extend this allowlist in the same commit.
+          UNEXPECTED=$(sed -E 's|^lib/[^/]+/||' /tmp/so-inventory.txt | sort -u | grep -vE '^(libc\+\+_shared\.so|libfbjni\.so|libfolly_runtime\.so|libglog\.so|libhermes\.so|libhermes_executor\.so|libimagepipeline\.so|libjsi\.so|liblogger\.so|libmapbufferjni\.so|libreactnative\.so|libreactnativejni\.so|libturbomodulejsijni\.so|libyoga\.so|libworklets\.so|libappmodules\.so|libexpo-modules-core\.so|libExpoModulesCore\.so|libfabricjni\.so|libuimanagerjni\.so|librrc_.*\.so|libreact_codegen_.*\.so)$' || true)
+          if [ -n "$UNEXPECTED" ]; then
+            echo "::error::Unexpected native libraries in APK:"
+            echo "$UNEXPECTED"
+            exit 1
+          fi
+          echo "APK payload verification passed: no Sentry, all native libs allowlisted."
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

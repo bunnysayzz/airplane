@@ -1,4 +1,6 @@
-# Auto-release — every push to main becomes a GitHub Release.
+# Auto-release — MANUAL DISPATCH ONLY (gated 2026-10-21, NovaMind route:
+# EAS retired from the push path; APKs now come from the Gradle CI build).
+# Previously: every push to main became a GitHub Release.
 #
 # PIPELINE (single job, serialized via concurrency):
 #   1. Compute next version from the latest `v*` tag (starts at 0.0.1).
@@ -24,8 +26,7 @@
 name: Auto release
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: auto-release
