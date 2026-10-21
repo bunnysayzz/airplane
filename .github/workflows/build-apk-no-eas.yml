@@ -64,8 +64,9 @@ jobs:
 
           # Hard fail: any native library outside the known RN 0.79 / Expo SDK 53
           # families for this app's installed modules. If a legit new module is
-          # added later, extend this allowlist in the same commit.
-          UNEXPECTED=$(sed -E 's|^lib/[^/]+/||' /tmp/so-inventory.txt | sort -u | grep -vE '^(libc\+\+_shared\.so|libfbjni\.so|libfolly_runtime\.so|libglog\.so|libhermes\.so|libhermes_executor\.so|libimagepipeline\.so|libjsi\.so|liblogger\.so|libmapbufferjni\.so|libreactnative\.so|libreactnativejni\.so|libturbomodulejsijni\.so|libyoga\.so|libworklets\.so|libappmodules\.so|libexpo-modules-core\.so|libExpoModulesCore\.so|libfabricjni\.so|libuimanagerjni\.so|librrc_.*\.so|libreact_codegen_.*\.so)$' || true)
+          # added later, extend this allowlist in the same commit. Allowlist
+          # completed from the first verified build's inventory (run 39649181234).
+          UNEXPECTED=$(sed -E 's|^lib/[^/]+/||' /tmp/so-inventory.txt | sort -u | grep -vE '^(libc\+\+_shared\.so|libfbjni\.so|libfolly_runtime\.so|libglog\.so|libhermes\.so|libhermes_executor\.so|libimagepipeline\.so|libjsi\.so|liblogger\.so|libmapbufferjni\.so|libreactnative\.so|libreactnativejni\.so|libturbomodulejsijni\.so|libyoga\.so|libworklets\.so|libappmodules\.so|libexpo-modules-core\.so|libExpoModulesCore\.so|libfabricjni\.so|libuimanagerjni\.so|librrc_.*\.so|libreact_codegen_.*\.so|libgesturehandler\.so|libgifimage\.so|libhermestooling\.so|libnative-filters\.so|libnative-imagetranscoder\.so|libreanimated\.so|librnscreens\.so|libstatic-webp\.so)$' || true)
           if [ -n "$UNEXPECTED" ]; then
             echo "::error::Unexpected native libraries in APK:"
             echo "$UNEXPECTED"
