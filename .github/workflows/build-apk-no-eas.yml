@@ -40,13 +40,13 @@ jobs:
 
       # android/ is committed to the repo (NovaMind route) — no Expo prebuild.
       # The native project is reviewed in git and identical between builds.
-      - name: Build debug APK (arm64-v8a only)
+      - name: Build release APK (arm64-v8a only)
         working-directory: apps/mobile/android
-        run: ./gradlew assembleDebug -PreactNativeArchitectures=arm64-v8a --no-daemon
+        run: ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon
 
-      - name: Verify APK native payload (no Sentry, allowlisted .so only)
+      - name: Verify APK payload (no Sentry, allowlisted .so, embedded JS bundle)
         run: |
-          APK=apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          APK=apps/mobile/android/app/build/outputs/apk/release/app-release.apk
           if [ ! -f "$APK" ]; then
             echo "::error::APK not found at $APK"
             exit 1
@@ -72,11 +72,24 @@ jobs:
             echo "$UNEXPECTED"
             exit 1
           fi
-          echo "APK payload verification passed: no Sentry, all native libs allowlisted."
+
+          # Hard fail: the JS bundle must be embedded in the APK. Release builds
+          # bundle the JS (debug builds load it from Metro and ship no bundle,
+          # which is exactly the v0.0.21 "Unable to load script" RedBox).
+          echo "=== Assets in APK ==="
+          unzip -Z1 "$APK" | grep '^assets/' | sort | tee /tmp/assets-inventory.txt || true
+          if ! grep -qx 'assets/index.android.bundle' /tmp/assets-inventory.txt; then
+            echo "::error::assets/index.android.bundle is MISSING from the APK - JS bundle not embedded."
+            exit 1
+          fi
+          BUNDLE_SIZE=$(unzip -l "$APK" assets/index.android.bundle | awk 'NR==4 {print $1}')
+          echo "JS bundle embedded OK: assets/index.android.bundle (${BUNDLE_SIZE} bytes)"
+
+          echo "APK payload verification passed: no Sentry, all native libs allowlisted, JS bundle embedded."
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: airplane-debug-apk
-          path: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          name: airplane-release-apk
+          path: apps/mobile/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
