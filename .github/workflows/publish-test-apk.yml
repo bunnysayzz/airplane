@@ -1,0 +1,40 @@
+name: Publish test APK to Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build run ID to take the artifact from"
+        required: true
+        default: "39652544562"
+      tag:
+        description: "Release tag to attach the APK to"
+        required: true
+        default: "v0.0.21"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: airplane-debug-apk
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: apk
+
+      - name: Upload APK to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          ls -la apk
+          APK=$(find apk -name '*.apk' | head -1)
+          echo "Found: $APK"
+          cp "$APK" "airplane-${TAG}-gradle-test.apk"
+          gh release upload "$TAG" "airplane-${TAG}-gradle-test.apk" --clobber --repo "${{ github.repository }}"
