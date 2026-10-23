@@ -2,8 +2,6 @@ import { StyleSheet } from 'react-native';
 import { ThemeColors } from '../../src/theme/themeContext';
 import { MIN_TOUCH, radii, space } from '../../src/theme/shape';
 
-export const FEED_PILL_HEIGHT = 34;
-
 export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     container: {
         flex: 1,
@@ -14,13 +12,6 @@ export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
         backgroundColor: colors.background,
         justifyContent: 'center',
         alignItems: 'center',
-    },
-    feedPicker: {
-        flexDirection: 'row',
-        gap: space.sm,
-        paddingHorizontal: 16,
-        paddingTop: 6,
-        paddingBottom: 10,
     },
     list: {
         flex: 1,
@@ -98,27 +89,5 @@ export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     retryText: {
         color: colors.buttonTextColor,
         fontSize: 14,
-    },
-    feedPill: {
-        height: FEED_PILL_HEIGHT,
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 6,
-        paddingHorizontal: 14,
-        borderRadius: radii.pill,
-        borderWidth: StyleSheet.hairlineWidth,
-        borderColor: colors.borderColor,
-        backgroundColor: colors.cardBackground,
-    },
-    feedPillActive: {
-        backgroundColor: colors.accentColor,
-        borderColor: colors.accentColor,
-    },
-    feedPillText: {
-        fontSize: 13.5,
-        color: colors.textSecondary,
-    },
-    feedPillTextActive: {
-        color: colors.buttonTextColor,
     },
 });

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Animated, BackHandler, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../src/theme/themeContext';
 import { useI18n } from '../../src/i18n/i18nContext';
 import {
@@ -103,7 +103,7 @@ export const DialogHost: React.FC<DialogHostProps> = ({ active = true }) => {
                             accessibilityElementsHidden
                         />
                     </Animated.View>
-                    <View style={styles.center} pointerEvents="box-none">
+                    <SafeAreaView edges={['top', 'bottom']} style={styles.center} pointerEvents="box-none">
                         <Animated.View
                             accessibilityViewIsModal
                             testID="dialog"
@@ -132,7 +132,7 @@ export const DialogHost: React.FC<DialogHostProps> = ({ active = true }) => {
                                 ))}
                             </View>
                         </Animated.View>
-                    </View>
+                    </SafeAreaView>
                 </>
             )}
             {toast && (

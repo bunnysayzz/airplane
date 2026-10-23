@@ -254,7 +254,7 @@ const PostRoot = forwardRef<View, PostProps>(
         {...props}
         accessibilityRole="button"
         onPress={onPress}
-        style={[styles.root, style]}
+        style={({ pressed }) => [styles.root, style, pressed && { opacity: 0.9 }]}
       >
         {body}
       </Pressable>

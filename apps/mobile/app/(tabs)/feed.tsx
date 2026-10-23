@@ -15,8 +15,7 @@ export default function FeedTab() {
         <View style={[styles.root, { backgroundColor: colors.background }]}>
             <TopBar onSettingsPress={() => router.navigate('/(tabs)/settings')} />
             <Timeline
-                // No location provider in the app yet (location track, P2/P3):
-                // the feed is unscoped until the viewer's geohash-5 cell exists.
+                // TODO: the viewer's geohash-5 cell (LOC-1) - no location provider in the app yet.
                 cells={[]}
                 onPostPress={eventId => router.push(`/post/${eventId}`)}
                 onComposePress={openCompose}

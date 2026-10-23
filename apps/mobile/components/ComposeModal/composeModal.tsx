@@ -147,11 +147,18 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
         }
     }, [isOpen]);
 
-    const remaining = MAX_POST_LENGTH - text.length;
+    // The counter and the send gate measure the same thing: trimmed length,
+    // so trailing whitespace can't show a false "over".
+    const remaining = MAX_POST_LENGTH - text.trim().length;
     const isPublishDisabled = text.trim().length === 0 || remaining < 0;
 
+    // Ref guard against double-submit: setState only lands after re-render,
+    // so two taps in one frame could both pass the `loading` check.
+    const publishingRef = useRef(false);
+
     const handlePublish = async () => {
-        if (isPublishDisabled || loading) return;
+        if (isPublishDisabled || loading || publishingRef.current) return;
+        publishingRef.current = true;
         setLoading(true);
         try {
             const eventId = await publishPost(text, {});
@@ -168,6 +175,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
                     : t('compose.publishFailedMessage');
             dialog.alert(t('compose.publishFailed'), message);
         } finally {
+            publishingRef.current = false;
             setLoading(false);
         }
     };
@@ -181,7 +189,14 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
         >
             {/* The grabber and header are the drag handle. Not collapsable: Android drops views that draw
                 nothing, and touches would then land on the sheet behind the handle */}
-            <View collapsable={false} {...panHandlers}>
+            <View
+                collapsable={false}
+                {...panHandlers}
+                accessible
+                accessibilityRole="adjustable"
+                accessibilityLabel={t('compose.dragHandleLabel')}
+                accessibilityHint={t('compose.dragHandleHint')}
+            >
                 <View style={styles.grabberRow} importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
                     <View style={styles.grabber} />
                 </View>

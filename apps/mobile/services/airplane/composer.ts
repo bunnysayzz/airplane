@@ -22,16 +22,16 @@ export interface PublishOpts {
   /**
    * Override for the post's geohash-5 cell. Defaults to the device cell via
    * getLocationCell() - which throws until the real location provider lands
-   * (location track, P2/P3). The override exists for tests/dev.
+   * (TODO(LOC-1)). The override exists for tests/dev.
    */
   geohash5?: string;
 }
 
-// No location provider in the app yet (location track, P2/P3) - real GPS needs
-// a device permissions flow. The old code fell back to hardcoded Bengaluru
-// coords (12.9716, 77.5946); that was worse than honest, so it is gone: a fake
-// location poisons feed scoping and erodes trust in the mesh. Until the
-// provider lands, composing without an explicit cell fails loudly.
+// TODO(LOC-1): no location provider exists in the app yet - real GPS needs a
+// device permissions flow (P2/P3). The old code fell back to hardcoded
+// Bengaluru coords (12.9716, 77.5946); that was worse than honest, so it is
+// gone: a fake location poisons feed scoping and erodes trust in the mesh.
+// Until the provider lands, composing without an explicit cell fails loudly.
 export function getLocationCell(): string {
   throw new Error(
     'getLocationCell: location unavailable - pass geohash5 explicitly until TODO(LOC-1) lands',

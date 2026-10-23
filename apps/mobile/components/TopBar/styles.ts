@@ -24,6 +24,8 @@ export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
         gap: space.sm,
     },
     wordmarkText: {
+        // Intentional override of type.title: the wordmark is one rung
+        // smaller than screen titles so it sits optically centered in the bar.
         fontSize: 22,
         lineHeight: 28,
         color: colors.textPrimary,

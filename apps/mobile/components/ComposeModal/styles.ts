@@ -62,17 +62,11 @@ export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
         paddingBottom: space.xl,
         gap: 14,
     },
-    // Kept mounted but out of the way
-    hidden: {
-        display: 'none',
-    },
     textArea: {
         minHeight: 120,
         paddingHorizontal: 20,
         paddingVertical: 0,
         color: colors.textPrimary,
-        fontSize: 17,
-        lineHeight: 24.5,
         textAlignVertical: 'top',
     },
     toolbar: {
@@ -95,83 +89,5 @@ export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     },
     counterText: {
         fontSize: 13,
-    },
-    // The opt-in World uplink: off means the post stays on the local mesh only
-    uplinkRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: space.md,
-        marginHorizontal: space.lg,
-        paddingVertical: space.sm,
-        paddingHorizontal: space.md,
-        borderRadius: radii.well,
-        backgroundColor: colors.accentSoft,
-    },
-    uplinkText: {
-        flex: 1,
-        gap: 2,
-    },
-    uplinkLabel: {
-        color: colors.textPrimary,
-    },
-    uplinkDetail: {
-        color: colors.textSecondary,
-    },
-
-    /* Bottom sheets */
-    sheetRoot: {
-        flex: 1,
-        justifyContent: 'flex-end',
-    },
-    sheetBackdrop: {
-        position: 'absolute',
-        top: 0,
-        right: 0,
-        bottom: 0,
-        left: 0,
-        backgroundColor: colors.scrim,
-    },
-    pickerSheet: {
-        maxHeight: '75%',
-        paddingHorizontal: space.lg,
-        borderTopLeftRadius: radii.sheet,
-        borderTopRightRadius: radii.sheet,
-        backgroundColor: colors.cardBackground,
-    },
-    pickerTitle: {
-        color: colors.textPrimary,
-        paddingTop: space.md,
-        paddingBottom: space.sm,
-        paddingHorizontal: space.xs,
-    },
-    pickerTitleWithSubtitle: {
-        paddingBottom: 2,
-    },
-    pickerSubtitle: {
-        color: colors.textMuted,
-        paddingBottom: space.sm,
-        paddingHorizontal: space.xs,
-    },
-    option: {
-        minHeight: 52,
-        paddingVertical: 10,
-        paddingHorizontal: space.md,
-        borderRadius: radii.input,
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: space.md,
-    },
-    optionSelected: {
-        backgroundColor: colors.accentSoft,
-    },
-    optionText: {
-        flex: 1,
-        gap: 1,
-    },
-    optionLabel: {
-        color: colors.textPrimary,
-    },
-    optionDescription: {
-        color: colors.textMuted,
     },
 });

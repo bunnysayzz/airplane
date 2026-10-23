@@ -50,6 +50,8 @@ const makeStyles = (colors: ThemeColors) =>
         pill: {
             flexDirection: 'row',
             alignItems: 'center',
+            // On narrow screens the pill yields to the wordmark instead of squeezing it
+            flexShrink: 1,
             gap: space.xs,
             paddingHorizontal: 10,
             paddingVertical: 6,

@@ -71,9 +71,9 @@ export default function RootLayout() {
                 <SettingsProvider>
                     <ReadyGate>
                         {/* Screens draw their own chrome (TopBar / SettingsHeader), so no nav headers.
-                            The real entry is the (tabs) group; index.tsx is the crash-hunt stub,
-                            kept but no longer initial. */}
-                        <Stack initialRouteName="(tabs)" screenOptions={{ headerShown: false }}>
+                            The boot route is index: first launch runs the Setup/onboarding flow,
+                            afterwards it redirects straight to the single feed. */}
+                        <Stack screenOptions={{ headerShown: false }}>
                             <Stack.Screen name="index" />
                             <Stack.Screen name="(tabs)" />
                             <Stack.Screen name="post/[id]" />
