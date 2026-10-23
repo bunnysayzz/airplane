@@ -2,7 +2,7 @@ export { Avatar, AvatarBadge } from './avatar';
 export { Card } from './card';
 export { IconButton } from './iconButton';
 export { PillButton } from './pillButton';
-export { PugMark } from './pugMark';
+export { PugMark, logoSizes } from './pugMark';
 export { SectionLabel } from './sectionLabel';
 export { SegmentedPill } from './segmentedPill';
 export type { SegmentOption } from './segmentedPill';

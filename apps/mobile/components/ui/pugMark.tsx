@@ -8,6 +8,15 @@ interface PugMarkProps {
     size?: number;
 }
 
+// Logo sizing tokens: every PugMark in the app uses one of these, never a magic
+// number, so the mark's rendered size is consistent per context.
+export const logoSizes = {
+    row: 22, // trailing mark in settings rows
+    wordmark: 28, // top-bar wordmark next to the "airplane" text
+    coat: 36, // appearance coat-picker cell (also the component default)
+    hero: 88, // setup boot screen
+} as const;
+
 // Below this size the forehead wrinkle turns into noise, so it's left out
 const WRINKLE_MIN_SIZE = 28;
 
@@ -21,7 +30,12 @@ const FACE = 'M 21 16.5 H 43 Q 51.5 16.5 51.5 25 V 40.5 Q 51.5 44 46 45.3 Q 32 4
 const WRINKLE = 'M 26.2 24.6 q 1.45 -2 2.9 0 t 2.9 0 t 2.9 0 t 2.9 0';
 
 // Pugdom's pug, in a coat's colours. Drawn after the author's pug, who is missing their left eye (on our right).
-export const PugMark: React.FC<PugMarkProps> = ({ coat, size = 36 }) => {
+//
+// Bounded-render contract: the mark always renders as an exact `size` x `size`
+// square (explicit width/height on the Svg plus a fixed viewBox), so it can never
+// overflow its parent - no unbounded dimensions, no missing resize behaviour.
+// Every shape, including stroke widths, fits inside the viewBox.
+export const PugMark: React.FC<PugMarkProps> = ({ coat, size = logoSizes.coat }) => {
     const { isDark } = useTheme();
     const colors = pugMarkColors(coat, isDark);
     // Gradient ids are document-wide, so each mark needs its own

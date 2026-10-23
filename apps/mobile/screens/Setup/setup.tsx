@@ -8,7 +8,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { PillButton, PugMark } from '../../components/ui';
+import { PillButton, PugMark, logoSizes } from '../../components/ui';
 import { useTheme } from '../../src/theme/themeContext';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
 import { useI18n } from '../../src/i18n/i18nContext';
@@ -71,7 +71,7 @@ const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false })
   if (!booted) {
     return (
       <View style={styles.container}>
-        <PugMark coat={coat} size={88} />
+        <PugMark coat={coat} size={logoSizes.hero} />
         <Text accessibilityRole="header" style={[type.title, styles.title]}>
           {t('setup.title')}
         </Text>

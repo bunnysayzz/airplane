@@ -6,7 +6,7 @@ import { useSettings } from '../../src/lib/settingsContext';
 import { useTheme } from '../../src/theme/themeContext';
 import { getCoat } from '../../src/theme/coats';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
-import { Card, PugMark, SectionLabel, ThemedSwitch } from '../../components/ui';
+import { Card, PugMark, SectionLabel, ThemedSwitch, logoSizes } from '../../components/ui';
 import { appVersionLabel } from '../../src/lib/appVersion';
 import Appearance from './appearance';
 import { SettingsHeader } from './header';
@@ -100,7 +100,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
             <Ionicons name="color-palette-outline" size={20} color={colors.accentText} />
             <Text style={[labelStyle, styles.rowText]}>{t('settings.appearance')}</Text>
             <View style={styles.rowTrailing}>
-              <PugMark coat={coat} size={22} />
+              <PugMark coat={coat} size={logoSizes.row} />
               <Text style={[type.meta, styles.rowValue]}>{coatName}</Text>
               <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
             </View>

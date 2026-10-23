@@ -1,7 +1,7 @@
 import React from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { Avatar, Card, PugMark, SectionLabel, SegmentedPill, SegmentOption, ThemedSwitch } from '../../components/ui';
+import { Avatar, Card, PugMark, SectionLabel, SegmentedPill, SegmentOption, ThemedSwitch, logoSizes } from '../../components/ui';
 import { ThemeType, useTheme } from '../../src/theme/themeContext';
 import { COATS, getCoat } from '../../src/theme/coats';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
@@ -81,7 +81,7 @@ const Appearance: React.FC<AppearanceProps> = ({ onBack }) => {
                                 accessibilityState={{ checked: selected }}
                                 style={[styles.coat, selected && styles.coatSelected]}
                             >
-                                <PugMark coat={option.key} />
+                                <PugMark coat={option.key} size={logoSizes.coat} />
                                 <Text style={[type.name, styles.coatName]}>{t(`coats.${option.key}`)}</Text>
                             </Pressable>
                         );

@@ -3,7 +3,7 @@ import { Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../../src/theme/themeContext';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
-import { IconButton, PugMark } from '../ui';
+import { IconButton, PugMark, logoSizes } from '../ui';
 import { MeshStatus } from '../MeshStatus';
 import { makeStyles } from './styles';
 import { useI18n } from '../../src/i18n/i18nContext';
@@ -23,7 +23,7 @@ export const TopBar: React.FC<TopBarProps> = ({ onSettingsPress }) => {
         <SafeAreaView edges={['top']} style={styles.safeArea}>
             <View style={styles.container}>
                 <View style={styles.wordmark} accessible accessibilityRole="header" accessibilityLabel="airplane">
-                    <PugMark coat={coat} size={28} />
+                    <PugMark coat={coat} size={logoSizes.wordmark} />
                     <Text style={[type.title, styles.wordmarkText]}>airplane</Text>
                 </View>
 
