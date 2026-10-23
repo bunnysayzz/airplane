@@ -24,6 +24,35 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Regression guard for the 2026-10-23 startup crash class
+      # (`Cannot find native module 'ExpoLinking'` -> SIGABRT): every package
+      # reachable from the app entry that ships an Android native module must
+      # be listed by expo-modules-autolinking resolve (the exact source the
+      # Gradle build uses). Runs BEFORE Gradle so a dropped module fails the
+      # build instead of dying silently on the device.
+      - name: Check startup-reachable native modules are autolinked
+        run: node scripts/check-native-modules.js
+
+      # Prove the guard is not a tautology: re-run it against a deliberately
+      # broken autolink listing (expo-linking stripped from the real resolve
+      # output) and require it to FAIL naming the missing module.
+      - name: Prove the native-module guard fails on broken input
+        run: |
+          (cd apps/mobile && npx --no-install expo-modules-autolinking resolve -p android --json) > /tmp/autolink-real.json
+          node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('/tmp/autolink-real.json', 'utf8'));
+            const strip = (n) => Array.isArray(n) ? n.filter((m) => !(m && m.packageName === 'expo-linking')).map(strip)
+              : (n && typeof n === 'object' ? Object.fromEntries(Object.entries(n).map(([k, v]) => [k, strip(v)])) : n);
+            fs.writeFileSync('/tmp/autolink-broken.json', JSON.stringify(strip(data)));
+          "
+          if node scripts/check-native-modules.js --autolink-json /tmp/autolink-broken.json; then
+            echo 'GUARD IS BROKEN: it passed on deliberately-broken autolink output' >&2
+            exit 1
+          else
+            echo 'Guard correctly FAILED on the deliberately-broken autolink output.'
+          fi
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:

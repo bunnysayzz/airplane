@@ -23,8 +23,8 @@ export default tseslint.config(
     },
   },
   {
-    // Plain Node config files (not part of the TS program).
-    files: ['**/*.config.js', '**/babel.config.js', '**/jest.config.js'],
+    // Plain Node scripts (CI helpers, not part of the TS program).
+    files: ['**/*.config.js', '**/babel.config.js', '**/jest.config.js', 'scripts/**/*.js'],
     languageOptions: {
       globals: {
         module: 'readonly',
