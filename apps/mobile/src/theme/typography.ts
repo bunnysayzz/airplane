@@ -33,6 +33,8 @@ export function buildType(loaded: boolean) {
     return {
         // Wordmark and screen titles
         title: { ...face(fontFamilies.display, '700', loaded), fontSize: 30, lineHeight: 36 },
+        // Sub-screen headers (SettingsHeader) - one rung below title
+        titleSmall: { ...face(fontFamilies.display, '700', loaded), fontSize: 24, lineHeight: 30 },
         sheetTitle: { ...face(fontFamilies.display, '700', loaded), fontSize: 19, lineHeight: 24 },
         name: { ...face(fontFamilies.extraBold, '800', loaded), fontSize: 15, lineHeight: 20 },
         body: { ...face(fontFamilies.regular, '400', loaded), fontSize: 15.5, lineHeight: 22.5 },

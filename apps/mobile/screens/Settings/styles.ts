@@ -37,15 +37,9 @@ export const makeStyles = (colors: ThemeColors) =>
       flex: 1,
     },
     rowLabel: {
-      fontSize: 15,
       color: colors.textPrimary,
     },
-    rowDetail: {
-      fontSize: 12.5,
-      color: colors.textMuted,
-    },
     rowValue: {
-      fontSize: 14,
       color: colors.textSecondary,
     },
     rowTrailing: {
@@ -89,11 +83,11 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
       gap: space.sm,
     },
     sectionLabel: {
-      marginTop: 10,
+      marginTop: space.md,
       marginHorizontal: space.xs,
     },
     coatHeader: {
-      marginTop: 10,
+      marginTop: space.md,
       marginHorizontal: space.xs,
       flexDirection: 'row',
       alignItems: 'baseline',
@@ -117,7 +111,6 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
       flex: 1,
     },
     previewName: {
-      fontSize: 14.5,
       color: colors.textPrimary,
     },
     previewHandle: {
@@ -150,11 +143,9 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
       paddingHorizontal: space.md,
     },
     pollOption: {
-      fontSize: 13.5,
       color: colors.buttonTextColor,
     },
     pollPercent: {
-      fontSize: 13.5,
       color: colors.textPrimary,
     },
     previewActions: {
@@ -197,11 +188,10 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
       backgroundColor: colors.accentSoft,
     },
     coatName: {
-      fontSize: 13,
       color: colors.textPrimary,
     },
     tintRow: {
-      marginTop: 10,
+      marginTop: space.md,
       flexDirection: 'row',
       alignItems: 'center',
       gap: space.md,

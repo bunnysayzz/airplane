@@ -4,6 +4,6 @@ import Settings from '../../screens/Settings/settings';
 
 export default function SettingsTab() {
     const router = useRouter();
-    // Settings draws its own header with a back button; in the tab bar it returns to Around.
+    // Settings draws its own header with a back button; in the tab bar it returns to the feed.
     return <Settings onBack={() => router.navigate('/(tabs)/feed')} />;
 }

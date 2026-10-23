@@ -2,6 +2,7 @@ import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { IconButton } from '../../components/ui';
 import { useTheme } from '../../src/theme/themeContext';
+import { space } from '../../src/theme/shape';
 
 interface SettingsHeaderProps {
     title: string;
@@ -14,7 +15,7 @@ export const SettingsHeader: React.FC<SettingsHeaderProps> = ({ title, onBack, b
     return (
         <View style={styles.header}>
             <IconButton icon="arrow-back" accessibilityLabel={backLabel} onPress={onBack} size={24} />
-            <Text accessibilityRole="header" style={[type.title, styles.title, { color: colors.textPrimary }]}>
+            <Text accessibilityRole="header" style={[type.titleSmall, { color: colors.textPrimary }]}>
                 {title}
             </Text>
         </View>
@@ -26,11 +27,7 @@ const styles = StyleSheet.create({
         height: 52,
         flexDirection: 'row',
         alignItems: 'center',
-        gap: 4,
-        paddingHorizontal: 12,
-    },
-    title: {
-        fontSize: 24,
-        lineHeight: 30,
+        gap: space.xs,
+        paddingHorizontal: space.md,
     },
 });

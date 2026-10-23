@@ -45,8 +45,8 @@ const Appearance: React.FC<AppearanceProps> = ({ onBack }) => {
                     <View style={styles.pollBar}>
                         <View style={styles.pollFill} />
                         <View style={styles.pollLabels}>
-                            <Text style={[type.name, styles.pollOption]}>{t('appearance.previewPost')}</Text>
-                            <Text style={[type.name, styles.pollPercent]}>64%</Text>
+                            <Text style={[type.meta, styles.pollOption]}>{t('appearance.previewPost')}</Text>
+                            <Text style={[type.meta, styles.pollPercent]}>64%</Text>
                         </View>
                     </View>
                     <View style={styles.previewActions}>
@@ -85,7 +85,7 @@ const Appearance: React.FC<AppearanceProps> = ({ onBack }) => {
                                 style={[styles.coat, selected && styles.coatSelected]}
                             >
                                 <PugMark coat={option.key} size={logoSizes.coat} />
-                                <Text style={[type.name, styles.coatName]}>{t(`coats.${option.key}`)}</Text>
+                                <Text style={[type.meta, styles.coatName]}>{t(`coats.${option.key}`)}</Text>
                             </Pressable>
                         );
                     })}
