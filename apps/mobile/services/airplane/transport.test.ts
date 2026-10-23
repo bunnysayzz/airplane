@@ -3,8 +3,8 @@
 // connections are attempted; NetInfo is the repo's __mocks__ version.
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests } from './transport';
-import { __resetStoreForTests } from './store';
+import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests, __getHybridForTests } from './transport';
+import { getStore, __resetStoreForTests } from './store';
 
 /** Fake WebSocket that never connects - records constructor calls only. */
 class FakeSocket {
@@ -144,5 +144,34 @@ describe('transport manager', () => {
     await expect(fresh.startTransport()).resolves.toBeUndefined();
     await fresh.stopTransport();
     jest.dontMock('@react-native-community/netinfo');
+  });
+
+  test('startTransport survives NetInfo addEventListener throwing', async () => {
+    // Module loads fine, but listener registration blows up (native quirk).
+    netInfoMock.addEventListener.mockImplementation(() => {
+      throw new Error('listener boom');
+    });
+    await expect(startTransport()).resolves.toBeUndefined();
+  });
+
+  test('relay-observed inbound posts are World-confirmed; ble ones are not', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+
+    const relayEvent = makeSignedEvent();
+    const relayId = '07'.repeat(32);
+    hybrid!.ingress(relayEvent, 'nostr');
+    // confirmListener is async: flush the promise chain.
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    const store = getStore();
+    expect(await store.isWorldConfirmed(relayId)).toBe(true);
+
+    const bleEvent = makeSignedEvent();
+    bleEvent.id = new Uint8Array(32).fill(8);
+    hybrid!.ingress(bleEvent, 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(await store.isWorldConfirmed('08'.repeat(32))).toBe(false);
   });
 });

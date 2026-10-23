@@ -162,4 +162,50 @@ describe('WorldSync', () => {
     expect(report2.pushed).toEqual([]);
     expect(nostr.published).toHaveLength(1); // only the first run published
   });
+
+  test('confirmation persists across WorldSync restarts sharing a store', async () => {
+    // The durable store (SQLite on device) outlives the engine: a restart is
+    // a brand-new WorldSync on the same store. Confirmations must survive.
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    const before = new WorldSync(nostr as never, store);
+
+    const id = store.add(makePost('confirmed before restart'));
+    // Confirm via the relay-observed path (what confirmListener calls).
+    await before.markConfirmed(id);
+    expect(await store.isWorldConfirmed(id)).toBe(true);
+
+    // "Restart": drop the engine, build a fresh one on the same store.
+    const after = new WorldSync(nostr as never, store);
+    const report = await after.sync();
+    expect(report.pushed).toEqual([]); // confirmed posts are never re-pushed
+    expect(nostr.published).toHaveLength(0);
+    expect(await store.isWorldConfirmed(id)).toBe(true); // still there
+  });
+
+  test('confirmListener-wrapped handler survives and still forwards events', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    const sync = new WorldSync(nostr as never, store);
+
+    const forwarded: { id: Hex64; source: string }[] = [];
+    const wrapped = sync.confirmListener((event, source) => {
+      forwarded.push({ id: toHex(event.id), source });
+    });
+
+    const event = makePost('relay observed');
+    const id = store.add(event);
+    wrapped(event, 'nostr');
+    // confirmListener is async: flush.
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    expect(await store.isWorldConfirmed(id)).toBe(true);
+    expect(forwarded).toEqual([{ id, source: 'nostr' }]);
+
+    // A second, fresh engine on the same store never re-pushes it.
+    const restarted = new WorldSync(nostr as never, store);
+    const report = await restarted.sync();
+    expect(report.pushed).toEqual([]);
+    expect(nostr.published).toHaveLength(0);
+  });
 });

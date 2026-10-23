@@ -237,3 +237,147 @@ describe('NostrTransport', () => {
     expect(Array.from(raw)).toEqual(Array.from(encodeEvent(event)));
   });
 });
+
+describe('NostrTransport reconnect backoff', () => {
+  /** Socket that never opens on its own; tests drive close() manually. */
+  class ManualSocket implements WebSocketLike {
+    onopen: ((ev: unknown) => void) | null = null;
+    onmessage: ((ev: { data: string }) => void) | null = null;
+    onerror: ((ev: unknown) => void) | null = null;
+    onclose: ((ev: unknown) => void) | null = null;
+    sent: string[] = [];
+    constructor(readonly url: string) {}
+    send(data: string): void {
+      this.sent.push(data);
+    }
+    close(): void {
+      if (this.onclose) this.onclose({});
+    }
+    open(): void {
+      if (this.onopen) this.onopen({});
+    }
+  }
+
+  test('retries use bounded exponential backoff with a cap', () => {
+    jest.useFakeTimers();
+    try {
+      const sockets: ManualSocket[] = [];
+      const connectTimes: number[] = [];
+      const t = new NostrTransport({
+        relays: ['wss://backoff.relay'],
+        reconnectMs: 100,
+        reconnectMaxMs: 300,
+        wsFactory: (url: string) => {
+          const s = new ManualSocket(url);
+          sockets.push(s);
+          connectTimes.push(Date.now());
+          return s;
+        },
+      });
+      void t.start();
+      expect(sockets).toHaveLength(1);
+
+      // Drop the connection repeatedly without ever opening: each close
+      // schedules a reconnect with a growing delay. Step the clock forward
+      // in small increments to measure each close->reconnect gap exactly.
+      const gaps: number[] = [];
+      for (let i = 0; i < 4; i++) {
+        sockets[i].close();
+        const closedAt = Date.now();
+        let guard = 0;
+        while (sockets.length === i + 1 && guard++ < 1000) {
+          jest.advanceTimersByTime(10);
+        }
+        expect(sockets).toHaveLength(i + 2);
+        gaps.push(Date.now() - closedAt);
+      }
+
+      // base 100: [80,120] -> [160,240] -> capped [240,360] -> capped [240,360]
+      expect(gaps[0]).toBeGreaterThanOrEqual(80);
+      expect(gaps[0]).toBeLessThanOrEqual(120);
+      expect(gaps[1]).toBeGreaterThanOrEqual(160);
+      expect(gaps[1]).toBeLessThanOrEqual(240);
+      // Without the 300ms cap, attempt 2 would be [320,480].
+      expect(gaps[2]).toBeGreaterThanOrEqual(240);
+      expect(gaps[2]).toBeLessThanOrEqual(360);
+      expect(gaps[3]).toBeGreaterThanOrEqual(240);
+      expect(gaps[3]).toBeLessThanOrEqual(360);
+
+      void t.stop();
+      jest.clearAllTimers();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a successful open resets the backoff to the base delay', () => {
+    jest.useFakeTimers();
+    try {
+      const sockets: ManualSocket[] = [];
+      const connectTimes: number[] = [];
+      const t = new NostrTransport({
+        relays: ['wss://backoff.relay'],
+        reconnectMs: 100,
+        reconnectMaxMs: 300,
+        wsFactory: (url: string) => {
+          const s = new ManualSocket(url);
+          sockets.push(s);
+          connectTimes.push(Date.now());
+          return s;
+        },
+      });
+      void t.start();
+
+      // Two consecutive drops grow the delay; measure close->reconnect.
+      const measureGap = (socket: ManualSocket): number => {
+        const before = sockets.length;
+        socket.close();
+        const closedAt = Date.now();
+        let guard = 0;
+        while (sockets.length === before && guard++ < 1000) {
+          jest.advanceTimersByTime(10);
+        }
+        expect(sockets.length).toBeGreaterThan(before);
+        return Date.now() - closedAt;
+      };
+      const grownGap = measureGap(sockets[0]);
+      expect(grownGap).toBeGreaterThanOrEqual(80);
+
+      // ...but a successful connection resets the failure count.
+      sockets[1].open();
+      const resetGap = measureGap(sockets[1]);
+      expect(resetGap).toBeGreaterThanOrEqual(80);
+      expect(resetGap).toBeLessThanOrEqual(120);
+
+      void t.stop();
+      jest.clearAllTimers();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('stop() cancels pending reconnects', () => {
+    jest.useFakeTimers();
+    try {
+      const sockets: ManualSocket[] = [];
+      const t = new NostrTransport({
+        relays: ['wss://backoff.relay'],
+        reconnectMs: 100,
+        wsFactory: (url: string) => {
+          const s = new ManualSocket(url);
+          sockets.push(s);
+          return s;
+        },
+      });
+      void t.start();
+      sockets[0].close(); // schedules a reconnect
+      void t.stop();
+      jest.advanceTimersByTime(60_000);
+      // No new socket: the pending reconnect was cancelled.
+      expect(sockets).toHaveLength(1);
+      jest.clearAllTimers();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
