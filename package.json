@@ -26,6 +26,7 @@
     "typescript-eslint": "^8.0.0"
   },
   "overrides": {
-    "react-native-screens": "4.11.1"
+    "react-native-screens": "4.11.1",
+    "expo-linking": "~7.0.5"
   }
 }
