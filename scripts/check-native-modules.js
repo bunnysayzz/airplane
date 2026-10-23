@@ -166,23 +166,27 @@ function autolinkedPackageNames() {
   }
   const data = JSON.parse(raw);
   const names = new Set();
-  const visit = (node) => {
-    if (Array.isArray(node)) return node.forEach(visit);
-    if (node && typeof node === 'object') {
-      if (typeof node.packageName === 'string') {
-        // Prefer android-project-bearing entries when project info exists.
-        const projects = node.projects;
-        if (!Array.isArray(projects)) return void names.add(node.packageName);
-        const hasAndroid = projects.some(
-          (p) => p && (p.platform === 'android' || /android/i.test(p.projectName || ''))
-        );
-        if (hasAndroid) names.add(node.packageName);
-        return;
-      }
-      Object.values(node).forEach(visit);
+  // Real shape of `expo-modules-autolinking resolve -p android --json`
+  // (expo-modules-autolinking/build/index.js, registerResolveCommand):
+  //   { extraDependencies, coreFeatures,
+  //     modules: [{packageName, packageVersion, projects?, plugins?}], ... }
+  // `resolve` already filters to the requested platform, so every entry in
+  // `modules` IS an Android module. NOTE: Android project descriptors are
+  // {name, sourceDir, modules} — they carry NO `platform` field, so do not
+  // filter on one (that bug made the guard parse zero modules).
+  const modules = Array.isArray(data) ? data : data.modules;
+  if (Array.isArray(modules)) {
+    for (const m of modules) {
+      if (m && typeof m.packageName === 'string') names.add(m.packageName);
     }
-  };
-  visit(data);
+  } else {
+    throw new Error('unrecognized expo-modules-autolinking resolve JSON shape (no modules array)');
+  }
+  if (names.size === 0) {
+    // Fail closed and loudly: an empty resolved set would make every native
+    // package look missing. Never evaluate against an empty set.
+    throw new Error('resolve output contained zero modules — refusing to evaluate against an empty set');
+  }
   return names;
 }
 
