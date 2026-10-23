@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Animated, BackHandler, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../src/theme/themeContext';
 import { useI18n } from '../../src/i18n/i18nContext';
 import {
@@ -14,7 +15,7 @@ import {
     updateHost,
 } from '../../src/lib/dialog';
 import { radii, space } from '../../src/theme/shape';
-import { TAB_BAR_CLEARANCE } from '../TabBar/styles';
+import { tabBarClearance } from '../TabBar/styles';
 import { PillButton } from '../ui';
 
 interface DialogHostProps {
@@ -44,6 +45,7 @@ export const DialogHost: React.FC<DialogHostProps> = ({ active = true }) => {
     const { colors, type } = useTheme();
     const { t } = useI18n();
     const { width } = useWindowDimensions();
+    const insets = useSafeAreaInsets();
     // Registered from an effect (not during render), so a render that's thrown away leaves nothing behind
     const [hostId, setHostId] = useState<number | null>(null);
     const state = useSyncExternalStore(subscribeToDialogs, getDialogState, getDialogState);
@@ -134,7 +136,7 @@ export const DialogHost: React.FC<DialogHostProps> = ({ active = true }) => {
                 </>
             )}
             {toast && (
-                <View pointerEvents="none" style={styles.toastRow}>
+                <View pointerEvents="none" style={[styles.toastRow, { bottom: tabBarClearance(insets.bottom) }]}>
                     <View
                         testID="toast"
                         accessibilityLiveRegion="polite"
@@ -184,12 +186,11 @@ const styles = StyleSheet.create({
     buttonStacked: {
         alignSelf: 'stretch',
     },
-    // Above the dock
+    // Above the dock (bottom offset applied by the component - it tracks the dock's live inset)
     toastRow: {
         position: 'absolute',
         left: space.lg,
         right: space.lg,
-        bottom: TAB_BAR_CLEARANCE,
         alignItems: 'center',
     },
     toast: {

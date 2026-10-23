@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { Tabs } from 'expo-router';
 import { TabBar, type TabDef } from '../../components/TabBar/tabBar';
 import ComposeModal from '../../components/ComposeModal/composeModal';
+import { ComposeOpenContext } from '../../components/ComposeModal/composeContext';
 import { useI18n } from '../../src/i18n/i18nContext';
 import { useTheme } from '../../src/theme/themeContext';
 
@@ -39,8 +40,10 @@ export default function TabsLayout() {
     const { t } = useI18n();
     // Compose opens as a modal over whichever tab is active
     const [composeOpen, setComposeOpen] = useState(false);
+    const openCompose = useCallback(() => setComposeOpen(true), []);
 
     return (
+        <ComposeOpenContext.Provider value={openCompose}>
         <View style={[styles.root, { backgroundColor: colors.background }]}>
             <Tabs
                 screenOptions={{ headerShown: false }}
@@ -48,7 +51,7 @@ export default function TabsLayout() {
                     <DockBar
                         activeTab={props.state.routes[props.state.index]?.name ?? 'feed'}
                         onTabPress={key => props.navigation.navigate(key)}
-                        onComposePress={() => setComposeOpen(true)}
+                        onComposePress={openCompose}
                     />
                 )}
             >
@@ -57,6 +60,7 @@ export default function TabsLayout() {
             </Tabs>
             <ComposeModal isOpen={composeOpen} onClose={() => setComposeOpen(false)} />
         </View>
+        </ComposeOpenContext.Provider>
     );
 }
 

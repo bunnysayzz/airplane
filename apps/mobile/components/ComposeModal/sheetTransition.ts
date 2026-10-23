@@ -35,6 +35,11 @@ export const useDragToDismiss = (onDismiss: (cancel: () => void) => void) => {
 
     const springBack = () => Animated.spring(drag, { toValue: 0, bounciness: 4, useNativeDriver: true }).start();
 
+    // Reset after a CONFIRMED dismiss: springBack only runs on cancel, so a
+    // completed swipe-dismiss would otherwise leave drag displaced and the
+    // next open would rest the sheet that far too low.
+    const resetDrag = () => drag.setValue(0);
+
     const panHandlers = useRef(
         PanResponder.create({
             // Claim touches that start on the handle itself: waiting for a move lets a view higher up claim
@@ -56,5 +61,5 @@ export const useDragToDismiss = (onDismiss: (cancel: () => void) => void) => {
         })
     ).current.panHandlers;
 
-    return { drag, panHandlers };
+    return { drag, panHandlers, resetDrag };
 };

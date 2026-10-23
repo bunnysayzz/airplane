@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
     Animated,
+    Easing,
     Keyboard,
     KeyboardAvoidingView,
     Modal,
@@ -31,20 +32,37 @@ export const MAX_POST_LENGTH = 280;
 export const keyboardInset = (windowHeight: number, keyboardTop: number) => Math.max(windowHeight - keyboardTop, 0);
 
 const useKeyboard = (windowHeight: number) => {
-    const [keyboard, setKeyboard] = useState({ visible: false, inset: 0 });
+    const [visible, setVisible] = useState(false);
+    const inset = useRef(new Animated.Value(0)).current;
     useEffect(() => {
-        const show = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', event =>
-            setKeyboard({ visible: true, inset: keyboardInset(windowHeight, event.endCoordinates.screenY) })
+        const glideTo = (toValue: number, duration: number) =>
+            Animated.timing(inset, { toValue, duration, easing: Easing.out(Easing.ease), useNativeDriver: false }).start();
+        const show = Keyboard.addListener(
+            Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+            event => {
+                setVisible(true);
+                const target = keyboardInset(windowHeight, event.endCoordinates.screenY);
+                // Android's DidShow fires AFTER the keyboard has landed, so glide
+                // the sheet instead of jumping; iOS WillShow fires first, so a
+                // snap is fine (and KeyboardAvoidingView does the real work).
+                if (Platform.OS === 'android') glideTo(target, event.duration || 250);
+                else inset.setValue(target);
+            }
         );
-        const hide = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () =>
-            setKeyboard({ visible: false, inset: 0 })
+        const hide = Keyboard.addListener(
+            Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+            event => {
+                setVisible(false);
+                if (Platform.OS === 'android') glideTo(0, event.duration || 250);
+                else inset.setValue(0);
+            }
         );
         return () => {
             show.remove();
             hide.remove();
         };
-    }, [windowHeight]);
-    return keyboard;
+    }, [windowHeight, inset]);
+    return { visible, inset };
 };
 
 // Anything typed means there's a draft to lose
@@ -78,16 +96,45 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
     const initialText = useRef('');
 
     // Swiping the sheet down closes it, asking first if there's a draft
-    const { drag, panHandlers } = useDragToDismiss(cancel => {
+    const { drag, panHandlers, resetDrag } = useDragToDismiss(cancel => {
         if (hasDraft({ text, initialText: initialText.current })) {
             dialog.alert(t('compose.discardTitle'), t('compose.discardMessage'), [
                 { text: t('compose.keepEditing'), style: 'cancel', onPress: () => cancel() },
-                { text: t('compose.discard'), style: 'destructive', onPress: onClose },
+                {
+                    text: t('compose.discard'),
+                    style: 'destructive',
+                    onPress: () => {
+                        resetDrag();
+                        onClose();
+                    },
+                },
             ]);
         } else {
+            resetDrag();
             onClose();
         }
     });
+
+    // Cancel and Android-back go through the same discard check as swipe-down,
+    // so a draft is never lost silently on any exit path.
+    const requestClose = () => {
+        if (hasDraft({ text, initialText: initialText.current })) {
+            dialog.alert(t('compose.discardTitle'), t('compose.discardMessage'), [
+                { text: t('compose.keepEditing'), style: 'cancel' },
+                {
+                    text: t('compose.discard'),
+                    style: 'destructive',
+                    onPress: () => {
+                        resetDrag();
+                        onClose();
+                    },
+                },
+            ]);
+        } else {
+            resetDrag();
+            onClose();
+        }
+    };
 
     // Fresh sheet every time it opens; focus the input once the sheet has slid up
     useEffect(() => {
@@ -113,7 +160,12 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             onClose();
         } catch (error: unknown) {
             console.error('Failed to publish post:', error);
-            const message = error instanceof Error ? error.message : t('compose.publishFailedMessage');
+            // Never surface the raw dev error (e.g. the LOC-1 stub's internal
+            // message): map known failures to user-facing copy instead.
+            const message =
+                error instanceof Error && /location/i.test(error.message)
+                    ? t('compose.locationPaused')
+                    : t('compose.publishFailedMessage');
             dialog.alert(t('compose.publishFailed'), message);
         } finally {
             setLoading(false);
@@ -136,7 +188,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
 
                 <View style={styles.header}>
                     <View style={styles.headerSide}>
-                        <PillButton label={t('common.cancel')} variant="ghost" onPress={onClose} style={styles.cancel} />
+                        <PillButton label={t('common.cancel')} variant="ghost" onPress={requestClose} style={styles.cancel} />
                     </View>
                     <Text accessibilityRole="header" style={[type.sheetTitle, styles.headerTitle]} numberOfLines={1}>
                         {t('compose.newPost')}
@@ -181,7 +233,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
     // (useSheetTransition's `mounted`), instead of staying presented with the sheet parked
     // off-screen - an invisible presented modal would keep swallowing touches.
     return (
-        <Modal visible={mounted} transparent animationType="none" statusBarTranslucent navigationBarTranslucent onRequestClose={onClose}>
+        <Modal visible={mounted} transparent animationType="none" statusBarTranslucent navigationBarTranslucent onRequestClose={requestClose}>
             <View style={styles.root}>
                 <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: colors.scrim, opacity: progress }]} />
                 {/* The app draws edge to edge, so the window doesn't resize for the keyboard. On Android,

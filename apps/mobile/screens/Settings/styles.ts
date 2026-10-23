@@ -1,7 +1,6 @@
 import { StyleSheet } from 'react-native';
 import { ThemeColors } from '../../src/theme/themeContext';
 import { radii, space } from '../../src/theme/shape';
-import { TAB_BAR_CLEARANCE } from '../../components/TabBar/styles';
 
 export const makeStyles = (colors: ThemeColors) =>
   StyleSheet.create({
@@ -12,7 +11,8 @@ export const makeStyles = (colors: ThemeColors) =>
     contentContainer: {
       paddingHorizontal: space.lg,
       paddingTop: 6,
-      paddingBottom: TAB_BAR_CLEARANCE, // the dock floats over Settings
+      // Bottom clearance tracks the floating dock - applied by the screen
+      // (it needs the live safe-area inset). The dock floats over Settings.
       gap: space.sm,
     },
     sectionLabel: {
@@ -84,7 +84,8 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
     content: {
       paddingHorizontal: space.lg,
       paddingTop: 6,
-      paddingBottom: TAB_BAR_CLEARANCE, // the dock floats over Settings
+      // Bottom clearance tracks the floating dock - applied by the screen
+      // (it needs the live safe-area inset). The dock floats over Settings.
       gap: space.sm,
     },
     sectionLabel: {

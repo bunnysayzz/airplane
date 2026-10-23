@@ -2,10 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ActivityIndicator, Pressable, RefreshControl, Text, View } from 'react-native';
 import { FlashList, FlashListRef } from '@shopify/flash-list';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { listFeedPosts, subscribeFeed } from '../../services/airplane/feed';
 import { trackViewability } from '../../services/airplane/viewTracker';
 import type { PostCardModel } from '../../services/airplane/types';
 import { PostCard } from '../../components/PostCard';
+import { PillButton } from '../../components/ui';
+import { tabBarClearance } from '../../components/TabBar/styles';
 import { useTheme } from '../../src/theme/themeContext';
 import { makeStyles } from './styles';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
@@ -25,16 +28,19 @@ interface TimelineProps {
     // TODO: wire to services/airplane - `cells` is a stub data prop for now.
     cells: string[];
     onPostPress?: (eventId: string) => void;
+    // Opens the compose sheet (wired by the tab that hosts the timeline).
+    onComposePress?: () => void;
 }
 
 const PAGE_LIMIT = 50;
 
 // Single-feed timeline: no feed pills, just the unified hybrid feed
 // (BLE mesh + Nostr relays, deduplicated).
-const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress }) => {
+const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress }) => {
     const { colors, type } = useTheme();
     const styles = useThemedStyles(makeStyles);
     const { t, tn } = useI18n();
+    const insets = useSafeAreaInsets();
     const listRef = useRef<FlashListRef<PostCardModel>>(null);
 
     const [posts, setPosts] = useState<PostCardModel[]>([]);
@@ -131,10 +137,21 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress }) => {
         if (loading) return null;
         return (
             <View style={styles.emptyContainer}>
+                <Ionicons name="chatbubble-ellipses-outline" size={40} color={colors.textMuted} />
                 <Text style={styles.emptyText}>{emptyMessage}</Text>
+                {onComposePress ? (
+                    <PillButton label={t('tabs.newPost')} onPress={onComposePress} style={styles.emptyCta} />
+                ) : null}
             </View>
         );
     };
+
+    // Memoized row renderer: without this, every Timeline state change
+    // (pendingCount, refreshing) re-renders every card.
+    const renderItem = useCallback(
+        ({ item }: { item: PostCardModel }) => <PostCard post={item} onPress={onPostPress} />,
+        [onPostPress]
+    );
 
     return (
         <View style={styles.container}>
@@ -169,7 +186,7 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress }) => {
                         ref={listRef}
                         data={posts}
                         keyExtractor={item => item.eventId}
-                        renderItem={({ item }) => <PostCard post={item} onPress={onPostPress} />}
+                        renderItem={renderItem}
                         onEndReached={handleLoadMore}
                         onEndReachedThreshold={0.5}
                         onScroll={event => {
@@ -189,7 +206,12 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress }) => {
                         }
                         ListFooterComponent={renderFooter}
                         ListEmptyComponent={renderEmpty}
-                        contentContainerStyle={styles.listContent}
+                        contentContainerStyle={[
+                            styles.listContent,
+                            // Bottom clearance tracks the floating dock, which
+                            // itself tracks the live safe-area inset.
+                            { paddingBottom: tabBarClearance(insets.bottom) },
+                        ]}
                         showsVerticalScrollIndicator={false}
                     />
                 </View>

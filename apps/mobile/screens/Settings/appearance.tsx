@@ -1,5 +1,6 @@
 import React from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Avatar, Card, PugMark, SectionLabel, SegmentedPill, SegmentOption, ThemedSwitch, logoSizes } from '../../components/ui';
 import { ThemeType, useTheme } from '../../src/theme/themeContext';
@@ -7,6 +8,7 @@ import { COATS, getCoat } from '../../src/theme/coats';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
 import { SettingsHeader } from './header';
 import { makeAppearanceStyles } from './styles';
+import { tabBarClearance } from '../../components/TabBar/styles';
 import { useI18n } from '../../src/i18n/i18nContext';
 
 const MODES: ThemeType[] = ['light', 'dark', 'system'];
@@ -18,6 +20,7 @@ interface AppearanceProps {
 const Appearance: React.FC<AppearanceProps> = ({ onBack }) => {
     const { colors, type, theme, setTheme, coat, setCoat, tint, setTint } = useTheme();
     const styles = useThemedStyles(makeAppearanceStyles);
+    const insets = useSafeAreaInsets();
     const { t } = useI18n();
     const coatName = t(`coats.${getCoat(coat).key}`);
     const modes: SegmentOption<ThemeType>[] = MODES.map(value => ({ value, label: t(`appearance.${value}`) }));
@@ -25,7 +28,7 @@ const Appearance: React.FC<AppearanceProps> = ({ onBack }) => {
     return (
         <>
             <SettingsHeader title={t('appearance.title')} onBack={onBack} backLabel={t('appearance.back')} />
-            <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+            <ScrollView contentContainerStyle={[styles.content, { paddingBottom: tabBarClearance(insets.bottom) }]} showsVerticalScrollIndicator={false}>
                 <SectionLabel style={styles.sectionLabel}>{t('appearance.preview')}</SectionLabel>
                 {/* A sample post drawn with the live tokens; read as one element and not interactive */}
                 <Card style={styles.preview} accessible accessibilityLabel={t('appearance.previewLabel', { coat: coatName })} pointerEvents="none">

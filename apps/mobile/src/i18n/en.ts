@@ -132,6 +132,7 @@ export const en = {
   thread: {
     title: 'Post',
     titleBy: 'Post by {{name}}',
+    notFound: 'This post could not be found.',
   },
   post: {
     readDescription: 'Read the image description',
@@ -242,6 +243,7 @@ export const en = {
     discard: 'Discard',
     publishFailed: 'Publishing failed',
     publishFailedMessage: 'An error occurred while publishing your post.',
+    locationPaused: "Location isn't available yet, so posting is paused.",
     minChoices: 'Add at least 2 choices',
     distinctChoices: 'Choices must be different',
     charactersLeft: '{{count}} characters left',

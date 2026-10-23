@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SplashScreen, Stack } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
 import { ThemeProvider, useTheme } from '../src/theme/themeContext';
 import { I18nProvider, useI18n } from '../src/i18n/i18nContext';
 import { SettingsProvider } from '../src/lib/settingsContext';
@@ -47,6 +48,12 @@ function ReadyGate({ children }: { children: React.ReactNode }) {
     return <>{children}</>;
 }
 
+// Status bar legibility follows the theme (renders inside the ThemeProvider).
+function ThemedStatusBar() {
+    const { isDark } = useTheme();
+    return <StatusBar style={isDark ? 'light' : 'dark'} />;
+}
+
 export default function RootLayout() {
     useEffect(() => {
         // Start hybrid transport (BLE always, Nostr when online) AFTER first
@@ -63,12 +70,15 @@ export default function RootLayout() {
             <I18nProvider>
                 <SettingsProvider>
                     <ReadyGate>
-                        {/* Screens draw their own chrome (TopBar / SettingsHeader), so no nav headers. */}
-                        <Stack screenOptions={{ headerShown: false }}>
+                        {/* Screens draw their own chrome (TopBar / SettingsHeader), so no nav headers.
+                            The real entry is the (tabs) group; index.tsx is the crash-hunt stub,
+                            kept but no longer initial. */}
+                        <Stack initialRouteName="(tabs)" screenOptions={{ headerShown: false }}>
                             <Stack.Screen name="index" />
                             <Stack.Screen name="(tabs)" />
                             <Stack.Screen name="post/[id]" />
                         </Stack>
+                        <ThemedStatusBar />
                         <DialogHost />
                     </ReadyGate>
                 </SettingsProvider>

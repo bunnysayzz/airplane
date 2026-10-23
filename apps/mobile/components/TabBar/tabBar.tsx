@@ -2,8 +2,9 @@ import React from 'react';
 import { Pressable, View } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { BlurView } from 'expo-blur';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../src/theme/themeContext';
-import { makeStyles } from './styles';
+import { makeStyles, dockBottomOffset } from './styles';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
 
 export type TabIconName = React.ComponentProps<typeof Ionicons>['name'];
@@ -31,6 +32,7 @@ interface TabBarProps {
 export const TabBar: React.FC<TabBarProps> = ({ tabs, activeTab, onTabPress, onComposePress, composeLabel }) => {
     const { colors, isDark } = useTheme();
     const styles = useThemedStyles(makeStyles);
+    const insets = useSafeAreaInsets();
 
     const tab = (def: TabDef) => {
         const active = def.key === activeTab;
@@ -57,7 +59,10 @@ export const TabBar: React.FC<TabBarProps> = ({ tabs, activeTab, onTabPress, onC
     const middle = Math.floor(tabs.length / 2);
 
     return (
-        <View style={[styles.dockWrapper, { shadowOpacity: isDark ? 0.5 : 0.14 }]} pointerEvents="box-none">
+        <View
+            style={[styles.dockWrapper, { bottom: dockBottomOffset(insets.bottom), shadowOpacity: isDark ? 0.5 : 0.14 }]}
+            pointerEvents="box-none"
+        >
             <BlurView intensity={isDark ? 30 : 60} tint={isDark ? 'dark' : 'light'} style={styles.dock} accessibilityRole="tablist">
                 {tabs.slice(0, middle).map(tab)}
                 <Pressable

@@ -20,6 +20,11 @@
     "owner": "bunnysayzz",
     "android": {
       "package": "com.bunnysayzz.airplane",
+      // Declared explicitly to match the committed android/ theme, which opts
+      // out of edge-to-edge enforcement (styles.xml). System bars are opaque,
+      // so in-code insets (dock offset, toast, sheet) fall back to fixed
+      // offsets on Android rather than reading gesture-bar insets.
+      "edgeToEdgeEnabled": false,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0A0A0B"

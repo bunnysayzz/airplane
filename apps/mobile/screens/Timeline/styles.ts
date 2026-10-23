@@ -1,7 +1,6 @@
 import { StyleSheet } from 'react-native';
 import { ThemeColors } from '../../src/theme/themeContext';
-import { TAB_BAR_CLEARANCE } from '../../components/TabBar/styles';
-import { radii, space } from '../../src/theme/shape';
+import { MIN_TOUCH, radii, space } from '../../src/theme/shape';
 
 export const FEED_PILL_HEIGHT = 34;
 
@@ -36,7 +35,7 @@ export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
         zIndex: 10,
     },
     newPosts: {
-        minHeight: 40,
+        minHeight: MIN_TOUCH,
         flexDirection: 'row',
         alignItems: 'center',
         gap: space.sm,
@@ -59,7 +58,8 @@ export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     },
     listContent: {
         paddingTop: 8,
-        paddingBottom: TAB_BAR_CLEARANCE,
+        // Bottom clearance is applied by the screen itself (it needs the live
+        // safe-area inset) - see timeline.tsx contentContainerStyle.
     },
     emptyContainer: {
         flex: 1,
@@ -67,11 +67,15 @@ export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
         padding: 40,
         alignItems: 'center',
         justifyContent: 'center',
+        gap: space.sm,
     },
     emptyText: {
         color: colors.textSecondary,
         fontSize: 16,
         textAlign: 'center',
+    },
+    emptyCta: {
+        marginTop: 8,
     },
     errorContainer: {
         flex: 1,
@@ -87,7 +91,7 @@ export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     },
     retryButton: {
         paddingHorizontal: 20,
-        paddingVertical: 10,
+        paddingVertical: 12,
         borderRadius: radii.pill,
         backgroundColor: colors.accentColor,
     },

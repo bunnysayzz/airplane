@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Linking, Pressable, ScrollView, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSettings } from '../../src/lib/settingsContext';
 import { useTheme } from '../../src/theme/themeContext';
@@ -12,6 +12,7 @@ import Appearance from './appearance';
 import { SettingsHeader } from './header';
 import { makeStyles } from './styles';
 import { useI18n } from '../../src/i18n/i18nContext';
+import { tabBarClearance } from '../../components/TabBar/styles';
 import { EXPLAINER_CARDS, ExplainerCard } from '../Setup/explainerCard';
 
 // Deliberately opened in-app instead of a browser link: Airplane is an offline-first,
@@ -30,6 +31,7 @@ interface SettingsProps {
 const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const { colors, type, coat } = useTheme();
   const styles = useThemedStyles(makeStyles);
+  const insets = useSafeAreaInsets();
   const { compactMode, setCompactMode } = useSettings();
   // Appearance and the privacy explainer are second levels inside Settings
   const [page, setPage] = useState<'main' | 'appearance' | 'privacy'>('main');
@@ -53,7 +55,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           backLabel={t('settings.close')}
         />
         <ScrollView
-          contentContainerStyle={styles.contentContainer}
+          contentContainerStyle={[styles.contentContainer, { paddingBottom: tabBarClearance(insets.bottom) }]}
           showsVerticalScrollIndicator={false}
         >
           <Text style={[type.body, styles.privacyLead]}>{t('settings.privacyLead')}</Text>
@@ -86,7 +88,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       <SettingsHeader title={t('settings.title')} onBack={onBack} backLabel={t('settings.close')} />
 
       <ScrollView
-        contentContainerStyle={styles.contentContainer}
+        contentContainerStyle={[styles.contentContainer, { paddingBottom: tabBarClearance(insets.bottom) }]}
         showsVerticalScrollIndicator={false}
       >
         <SectionLabel style={styles.sectionLabel}>{t('settings.preferences')}</SectionLabel>

@@ -4,7 +4,6 @@ import { FlashList } from '@shopify/flash-list';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { IconButton } from '../../components/ui';
 import { space } from '../../src/theme/shape';
-import { TAB_BAR_CLEARANCE } from '../../components/TabBar/styles';
 import type { PostCardModel } from '../../services/airplane/types';
 // TODO(worker2): PostCard is built by another worker - this import resolves when it lands.
 import { PostCard } from '../../components/PostCard';
@@ -34,6 +33,15 @@ export default function Thread({ postId, posts, loading = false, refreshing = fa
     const handleRefresh = useCallback(() => {
         onRefresh?.();
     }, [onRefresh]);
+
+    const renderEmpty = () => {
+        if (loading) return null;
+        return (
+            <View style={styles.notFoundContainer}>
+                <Text style={[type.meta, styles.notFoundText]}>{t('thread.notFound')}</Text>
+            </View>
+        );
+    };
 
     return (
         <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -67,7 +75,10 @@ export default function Thread({ postId, posts, loading = false, refreshing = fa
                 <FlashList
                     data={posts}
                     keyExtractor={item => item.eventId}
-                    contentContainerStyle={styles.listContent}
+                    // The post-detail route shows no tab dock, so the bottom
+                    // clearance is just the safe-area inset plus a gap.
+                    contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + space.lg }]}
+                    ListEmptyComponent={renderEmpty}
                     renderItem={({ item }) => {
                         const isMain = item.eventId === postId;
                         return (
@@ -121,7 +132,16 @@ const styles = StyleSheet.create({
         alignItems: 'center',
     },
     listContent: {
-        paddingBottom: TAB_BAR_CLEARANCE,
+        // Bottom padding is applied by the component (it depends on the
+        // live safe-area inset) - see contentContainerStyle above.
+    },
+    notFoundContainer: {
+        paddingVertical: 80,
+        paddingHorizontal: space.xl,
+        alignItems: 'center',
+    },
+    notFoundText: {
+        textAlign: 'center',
     },
     postContainer: {
         borderBottomWidth: StyleSheet.hairlineWidth,

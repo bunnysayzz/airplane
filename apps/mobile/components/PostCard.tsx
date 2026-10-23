@@ -11,6 +11,7 @@ import { Text } from 'react-native';
 import { Post } from './ui/post';
 import { EyeIcon } from './ui/eyeIcon';
 import { useTheme } from '../src/theme/themeContext';
+import { formatCompact } from '../src/lib/format';
 
 export interface PostCardModel {
   /** hex event hash (stable key) */
@@ -57,7 +58,7 @@ export function timeAgo(createdAtMs: number, nowMs: number = Date.now()): string
   return `${Math.floor(d / 365)}y`;
 }
 
-export function PostCard({ post, onPress }: PostCardProps) {
+export function PostCardInner({ post, onPress }: PostCardProps) {
   const { type } = useTheme();
 
   return (
@@ -84,8 +85,12 @@ export function PostCard({ post, onPress }: PostCardProps) {
       </Post.Header>
       <Post.Body>{post.body}</Post.Body>
       <Post.Footer>
-        <Post.Stat icon={EyeIcon} value={post.views} />
+        <Post.Stat icon={EyeIcon} value={formatCompact(post.views)} />
       </Post.Footer>
     </Post>
   );
 }
+
+// Memoized: the feed re-renders rows on every Timeline state change otherwise.
+export const PostCard = React.memo(PostCardInner);
+PostCard.displayName = 'PostCard';
