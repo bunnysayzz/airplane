@@ -7,23 +7,30 @@
  * What it checks: every package that (a) is reachable from the app entry
  * point via static import/require edges and (b) ships an Android native
  * module (android/build.gradle or an expo-module.config.json declaring the
- * android platform) MUST be listed by
- * `expo-modules-autolinking react-native-config -p android --json` — the
- * exact command `apps/mobile/android/settings.gradle` feeds to
- * `autolinkLibrariesFromCommand` (via `expoAutolinking.rnConfigCommand`).
- * NOTE: the `resolve` subcommand is NOT sufficient ground truth — it only
- * covers expo-module.config.json packages and misses react-native.config.js
- * (RN CLI) modules like react-native-screens. If a package is required at
- * startup but dropped by autolinking (e.g. expo-linking was only a peer dep
- * of expo-router, so filterToProjectDependenciesAsync skipped it), this
- * script fails BEFORE the Gradle build, instead of dying silently on the
- * device.
+ * android platform) MUST be linked by the Gradle build. The build links via
+ * TWO mechanisms (see apps/mobile/android/settings.gradle), so the guard
+ * checks the UNION of both:
+ *   1. `expo-modules-autolinking resolve -p android --json` → `modules[]`
+ *      — expo-module.config.json packages (expo-linking, expo-constants…),
+ *      consumed by the expo-autolinking-settings Gradle plugin
+ *      (generate-package-list → PackageList).
+ *   2. `expo-modules-autolinking react-native-config -p android --json` →
+ *      `dependencies` keys — react-native.config.js (RN CLI) packages
+ *      (react-native-screens, safe-area-context…), consumed via
+ *      `autolinkLibrariesFromCommand(expoAutolinking.rnConfigCommand)`.
+ * Neither subcommand alone is sufficient ground truth (each misses the
+ * other's module kind). If a package is required at startup but dropped by
+ * autolinking (e.g. expo-linking was only a peer dep of expo-router, so
+ * filterToProjectDependenciesAsync skipped it), this script fails BEFORE
+ * the Gradle build, instead of dying silently on the device.
  *
  * Usage:
  *   node scripts/check-native-modules.js [--app-dir apps/mobile]
- *       [--autolink-json <file>]   # override: use a captured
- *                                  # react-native-config JSON instead of
- *                                  # invoking the CLI (fixture mode)
+ *       [--resolve-json <file>]      # override: use a captured `resolve`
+ *                                    # JSON instead of invoking the CLI
+ *       [--rnconfig-json <file>]     # override: use a captured
+ *                                    # `react-native-config` JSON instead of
+ *                                    # invoking the CLI (fixture mode)
  *
  * Exit 0: every startup-reachable native package is autolinked.
  * Exit 1: at least one is missing (names printed); or the check itself failed.
@@ -39,7 +46,8 @@ const opt = (name, def) => {
 };
 const REPO_ROOT = process.cwd();
 const APP_DIR = path.resolve(REPO_ROOT, opt('--app-dir', 'apps/mobile'));
-const AUTOLINK_JSON = opt('--autolink-json', null);
+const RESOLVE_JSON = opt('--resolve-json', null);
+const RNCONFIG_JSON = opt('--rnconfig-json', null);
 
 const IMPORT_RE =
   /(?:import\s+(?:[^'"]*?\sfrom\s+)?|export\s+[^'"]*?\sfrom\s+|require\(\s*|import\(\s*)(['"])([^'"]+)\1/g;
@@ -158,36 +166,61 @@ function shipsAndroidNative(pkgDir) {
   return hasGradle || hasExpoModule;
 }
 
-/** The exact source of truth the Gradle build uses. */
+/** The exact sources of truth the Gradle build uses (union of both linking
+ * mechanisms — see header comment). */
 function autolinkedPackageNames() {
-  let raw;
-  if (AUTOLINK_JSON) {
-    raw = fs.readFileSync(AUTOLINK_JSON, 'utf8');
+  const names = new Set();
+
+  // Source 1: expo modules (expo-module.config.json), consumed by the
+  // expo-autolinking-settings Gradle plugin (generate-package-list).
+  // Shape: { extraDependencies, coreFeatures,
+  //          modules: [{packageName, packageVersion, projects?, plugins?}] }.
+  // `resolve` already filters to the requested platform. NOTE: Android
+  // project descriptors are {name, sourceDir, modules} — NO `platform`
+  // field, so do not filter on one.
+  let resolveRaw;
+  if (RESOLVE_JSON) {
+    resolveRaw = fs.readFileSync(RESOLVE_JSON, 'utf8');
   } else {
-    // This is expoAutolinking.rnConfigCommand — the exact JSON
-    // settings.gradle passes to autolinkLibrariesFromCommand().
-    raw = execFileSync(
+    resolveRaw = execFileSync(
+      'npx',
+      ['--no-install', 'expo-modules-autolinking', 'resolve', '-p', 'android', '--json'],
+      { cwd: APP_DIR, encoding: 'utf8', timeout: 120000, maxBuffer: 64 * 1024 * 1024 }
+    );
+  }
+  const resolveData = JSON.parse(resolveRaw);
+  const modules = Array.isArray(resolveData) ? resolveData : resolveData.modules;
+  if (!Array.isArray(modules)) {
+    throw new Error('unrecognized `resolve` JSON shape (no modules array)');
+  }
+  for (const m of modules) {
+    if (m && typeof m.packageName === 'string') names.add(m.packageName);
+  }
+
+  // Source 2: RN CLI modules (react-native.config.js), consumed via
+  // autolinkLibrariesFromCommand(expoAutolinking.rnConfigCommand).
+  // Shape: { root, reactNativePath, dependencies: {<packageName>: <config>}, project }.
+  let rnRaw;
+  if (RNCONFIG_JSON) {
+    rnRaw = fs.readFileSync(RNCONFIG_JSON, 'utf8');
+  } else {
+    rnRaw = execFileSync(
       'npx',
       ['--no-install', 'expo-modules-autolinking', 'react-native-config', '-p', 'android', '--json'],
       { cwd: APP_DIR, encoding: 'utf8', timeout: 120000, maxBuffer: 64 * 1024 * 1024 }
     );
   }
-  const data = JSON.parse(raw);
-  // Real shape: { root, reactNativePath, dependencies: {<packageName>: <config|null>}, project }.
-  // `dependencies` is keyed by package name and already covers BOTH expo
-  // modules and react-native.config.js (RN CLI) modules for the platform.
-  // (Do NOT use the `resolve` subcommand here: it only lists
-  // expo-module.config.json packages and misses RN-CLI modules like
-  // react-native-screens.)
-  const deps = data && typeof data === 'object' ? data.dependencies : null;
+  const rnData = JSON.parse(rnRaw);
+  const deps = rnData && typeof rnData === 'object' ? rnData.dependencies : null;
   if (!deps || typeof deps !== 'object' || Array.isArray(deps)) {
-    throw new Error('unrecognized react-native-config JSON shape (no dependencies object)');
+    throw new Error('unrecognized `react-native-config` JSON shape (no dependencies object)');
   }
-  const names = new Set(Object.keys(deps));
+  for (const name of Object.keys(deps)) names.add(name);
+
   if (names.size === 0) {
-    // Fail closed and loudly: an empty set would make every native package
-    // look missing. Never evaluate against an empty set.
-    throw new Error('react-native-config listed zero dependencies — refusing to evaluate against an empty set');
+    // Fail closed and loudly: an empty union would make every native
+    // package look missing. Never evaluate against an empty set.
+    throw new Error('both autolink sources listed zero packages — refusing to evaluate against an empty set');
   }
   return names;
 }

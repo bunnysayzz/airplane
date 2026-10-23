@@ -33,23 +33,25 @@ jobs:
       - name: Check startup-reachable native modules are autolinked
         run: node scripts/check-native-modules.js
 
-      # Prove the guard is not a tautology: re-run it against a deliberately
-      # broken autolink listing (expo-linking stripped from the real
-      # react-native-config output) and require it to FAIL naming the
-      # missing module.
+      # Prove the guard is not a tautology: re-run it against deliberately
+      # broken autolink listings (expo-linking stripped from the real
+      # `resolve` output — the source that covers expo modules) and require
+      # it to FAIL naming the missing module.
       - name: Prove the native-module guard fails on broken input
         run: |
-          (cd apps/mobile && npx --no-install expo-modules-autolinking react-native-config -p android --json) > /tmp/autolink-real.json
+          (cd apps/mobile && npx --no-install expo-modules-autolinking resolve -p android --json) > /tmp/resolve-real.json
+          (cd apps/mobile && npx --no-install expo-modules-autolinking react-native-config -p android --json) > /tmp/rnconfig-real.json
           node -e "
             const fs = require('fs');
-            const data = JSON.parse(fs.readFileSync('/tmp/autolink-real.json', 'utf8'));
-            if (!data.dependencies || !data.dependencies['expo-linking']) {
-              console.error('proof setup broken: expo-linking not in real react-native-config output'); process.exit(2);
+            const data = JSON.parse(fs.readFileSync('/tmp/resolve-real.json', 'utf8'));
+            const mods = Array.isArray(data) ? data : data.modules;
+            if (!Array.isArray(mods) || !mods.some((m) => m && m.packageName === 'expo-linking')) {
+              console.error('proof setup broken: expo-linking not in real resolve output'); process.exit(2);
             }
-            delete data.dependencies['expo-linking'];
-            fs.writeFileSync('/tmp/autolink-broken.json', JSON.stringify(data));
+            const stripped = mods.filter((m) => !(m && m.packageName === 'expo-linking'));
+            fs.writeFileSync('/tmp/resolve-broken.json', JSON.stringify({ modules: stripped }));
           "
-          if node scripts/check-native-modules.js --autolink-json /tmp/autolink-broken.json; then
+          if node scripts/check-native-modules.js --resolve-json /tmp/resolve-broken.json --rnconfig-json /tmp/rnconfig-real.json; then
             echo 'GUARD IS BROKEN: it passed on deliberately-broken autolink output' >&2
             exit 1
           else
