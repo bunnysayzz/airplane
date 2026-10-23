@@ -6,7 +6,7 @@ import { ThemeProvider, useTheme } from '../src/theme/themeContext';
 import { I18nProvider, useI18n } from '../src/i18n/i18nContext';
 import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
-import { startTransport, stopTransport } from '../services/airplane';
+import { startTransport } from '../services/airplane';
 
 SplashScreen.preventAutoHideAsync().catch(() => {
     /* splash may already be hidden in tests */
@@ -62,12 +62,7 @@ export default function RootLayout() {
         const task = InteractionManager.runAfterInteractions(() => {
             startTransport().catch(() => {});
         });
-        return () => {
-            task.cancel();
-            // Root unmount is rare on mobile, but if it happens the NetInfo
-            // listener, sync timer and relay sockets must not leak.
-            stopTransport().catch(() => {});
-        };
+        return () => task.cancel();
     }, []);
 
     return (

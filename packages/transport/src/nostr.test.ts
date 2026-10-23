@@ -238,146 +238,174 @@ describe('NostrTransport', () => {
   });
 });
 
-describe('NostrTransport reconnect backoff', () => {
-  /** Socket that never opens on its own; tests drive close() manually. */
-  class ManualSocket implements WebSocketLike {
-    onopen: ((ev: unknown) => void) | null = null;
-    onmessage: ((ev: { data: string }) => void) | null = null;
-    onerror: ((ev: unknown) => void) | null = null;
-    onclose: ((ev: unknown) => void) | null = null;
-    sent: string[] = [];
-    constructor(readonly url: string) {}
-    send(data: string): void {
-      this.sent.push(data);
-    }
-    close(): void {
-      if (this.onclose) this.onclose({});
-    }
-    open(): void {
-      if (this.onopen) this.onopen({});
-    }
-  }
+describe('NostrTransport reconnect', () => {
+  test('unexpected close schedules a reconnect after reconnectMs', async () => {
+    const { t, sockets } = makeTransport(['wss://flaky.relay']);
+    await t.start();
+    await tick(20);
+    expect(t.getRelayState('wss://flaky.relay')).toBe('open');
 
-  test('retries use bounded exponential backoff with a cap', () => {
-    jest.useFakeTimers();
-    try {
-      const sockets: ManualSocket[] = [];
-      const connectTimes: number[] = [];
-      const t = new NostrTransport({
-        relays: ['wss://backoff.relay'],
-        reconnectMs: 100,
-        reconnectMaxMs: 300,
-        wsFactory: (url: string) => {
-          const s = new ManualSocket(url);
-          sockets.push(s);
-          connectTimes.push(Date.now());
-          return s;
-        },
-      });
-      void t.start();
-      expect(sockets).toHaveLength(1);
+    // Simulate the relay dropping the connection.
+    sockets[0].close();
+    expect(t.getRelayState('wss://flaky.relay')).toBe('closed');
+    expect(t.online).toBe(false);
 
-      // Drop the connection repeatedly without ever opening: each close
-      // schedules a reconnect with a growing delay. Step the clock forward
-      // in small increments to measure each close->reconnect gap exactly.
-      const gaps: number[] = [];
-      for (let i = 0; i < 4; i++) {
-        sockets[i].close();
-        const closedAt = Date.now();
-        let guard = 0;
-        while (sockets.length === i + 1 && guard++ < 1000) {
-          jest.advanceTimersByTime(10);
-        }
-        expect(sockets).toHaveLength(i + 2);
-        gaps.push(Date.now() - closedAt);
-      }
-
-      // base 100: [80,120] -> [160,240] -> capped [240,360] -> capped [240,360]
-      expect(gaps[0]).toBeGreaterThanOrEqual(80);
-      expect(gaps[0]).toBeLessThanOrEqual(120);
-      expect(gaps[1]).toBeGreaterThanOrEqual(160);
-      expect(gaps[1]).toBeLessThanOrEqual(240);
-      // Without the 300ms cap, attempt 2 would be [320,480].
-      expect(gaps[2]).toBeGreaterThanOrEqual(240);
-      expect(gaps[2]).toBeLessThanOrEqual(360);
-      expect(gaps[3]).toBeGreaterThanOrEqual(240);
-      expect(gaps[3]).toBeLessThanOrEqual(360);
-
-      void t.stop();
-      jest.clearAllTimers();
-    } finally {
-      jest.useRealTimers();
-    }
+    await tick(40); // reconnectMs is 10; the factory auto-opens
+    expect(sockets).toHaveLength(2); // a fresh socket was created
+    expect(t.getRelayState('wss://flaky.relay')).toBe('open');
+    expect(t.online).toBe(true);
+    await t.stop();
   });
 
-  test('a successful open resets the backoff to the base delay', () => {
-    jest.useFakeTimers();
-    try {
-      const sockets: ManualSocket[] = [];
-      const connectTimes: number[] = [];
-      const t = new NostrTransport({
-        relays: ['wss://backoff.relay'],
-        reconnectMs: 100,
-        reconnectMaxMs: 300,
-        wsFactory: (url: string) => {
-          const s = new ManualSocket(url);
-          sockets.push(s);
-          connectTimes.push(Date.now());
-          return s;
-        },
-      });
-      void t.start();
-
-      // Two consecutive drops grow the delay; measure close->reconnect.
-      const measureGap = (socket: ManualSocket): number => {
-        const before = sockets.length;
-        socket.close();
-        const closedAt = Date.now();
-        let guard = 0;
-        while (sockets.length === before && guard++ < 1000) {
-          jest.advanceTimersByTime(10);
+  test('wsFactory throw on connect is survived; the reconnect heals', async () => {
+    const sockets: FakeSocket[] = [];
+    let failFirst = true;
+    const t = new NostrTransport({
+      relays: ['wss://heal.relay'],
+      reconnectMs: 10,
+      wsFactory: (url: string) => {
+        if (failFirst) {
+          failFirst = false;
+          throw new Error('dial failed');
         }
-        expect(sockets.length).toBeGreaterThan(before);
-        return Date.now() - closedAt;
-      };
-      const grownGap = measureGap(sockets[0]);
-      expect(grownGap).toBeGreaterThanOrEqual(80);
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+    });
+    await t.start();
+    // First dial threw: still connecting, nothing created yet.
+    expect(t.getRelayState('wss://heal.relay')).toBe('connecting');
+    expect(sockets).toHaveLength(0);
 
-      // ...but a successful connection resets the failure count.
-      sockets[1].open();
-      const resetGap = measureGap(sockets[1]);
-      expect(resetGap).toBeGreaterThanOrEqual(80);
-      expect(resetGap).toBeLessThanOrEqual(120);
-
-      void t.stop();
-      jest.clearAllTimers();
-    } finally {
-      jest.useRealTimers();
-    }
+    await tick(40);
+    expect(sockets).toHaveLength(1);
+    expect(t.getRelayState('wss://heal.relay')).toBe('open');
+    expect(t.online).toBe(true);
+    await t.stop();
   });
 
-  test('stop() cancels pending reconnects', () => {
-    jest.useFakeTimers();
-    try {
-      const sockets: ManualSocket[] = [];
-      const t = new NostrTransport({
-        relays: ['wss://backoff.relay'],
-        reconnectMs: 100,
-        wsFactory: (url: string) => {
-          const s = new ManualSocket(url);
-          sockets.push(s);
-          return s;
-        },
-      });
-      void t.start();
-      sockets[0].close(); // schedules a reconnect
-      void t.stop();
-      jest.advanceTimersByTime(60_000);
-      // No new socket: the pending reconnect was cancelled.
-      expect(sockets).toHaveLength(1);
-      jest.clearAllTimers();
-    } finally {
-      jest.useRealTimers();
-    }
+  test('stop cancels a pending reconnect: no socket is created after stop', async () => {
+    const { t, sockets } = makeTransport(['wss://gone.relay']);
+    await t.start();
+    await tick(20);
+    sockets[0].close(); // schedules a reconnect in 10ms
+    await t.stop(); // clears the pending timer
+    await tick(50);
+    expect(sockets).toHaveLength(1); // no reconnect was attempted
+    expect(t.online).toBe(false);
+  });
+
+  test('start is idempotent: no duplicate sockets or subscriptions', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await t.start();
+    await tick(20);
+    expect(sockets).toHaveLength(1);
+    expect(t.online).toBe(true);
+    await t.stop();
+  });
+
+  test('stop before start is a safe no-op', async () => {
+    const { t } = makeTransport();
+    await expect(t.stop()).resolves.toBeUndefined();
+    await t.stop();
+  });
+});
+
+describe('NostrTransport inbound edge cases', () => {
+  test('malformed JSON is dropped without emitting', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    let count = 0;
+    t.onReceive(() => {
+      count++;
+    });
+    sockets[0].onmessage?.({ data: 'not json{{{broken' });
+    await tick(10);
+    expect(count).toBe(0);
+    await t.stop();
+  });
+
+  test('non-EVENT relay messages are ignored', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    let count = 0;
+    t.onReceive(() => {
+      count++;
+    });
+    sockets[0].receive(['EOSE', 'sub1']);
+    sockets[0].receive(['NOTICE', 'bye']);
+    sockets[0].receive(['CLOSED', 'sub1', 'auth-required: we do not do auth']);
+    await tick(10);
+    expect(count).toBe(0);
+    await t.stop();
+  });
+
+  test('EVENT without a payload is ignored', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    let count = 0;
+    t.onReceive(() => {
+      count++;
+    });
+    sockets[0].receive(['EVENT', 'sub1']);
+    await tick(10);
+    expect(count).toBe(0);
+    await t.stop();
+  });
+
+  test('queryByIds with an empty list sends nothing', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    const sentBefore = sockets[0].sent.length;
+    await t.queryByIds([]);
+    await tick(20);
+    expect(sockets[0].sent.length).toBe(sentBefore);
+    await t.stop();
+  });
+
+  test('publish skips relays whose send throws; others still deliver', async () => {
+    const { t, sockets } = makeTransport(['wss://bad.relay', 'wss://good.relay']);
+    await t.start();
+    await tick(20);
+    const bad = sockets.find((s) => s.url === 'wss://bad.relay');
+    expect(bad).toBeDefined();
+    bad!.send = () => {
+      throw new Error('broken pipe');
+    };
+    const urls = await t.publish(makePost('partial delivery'));
+    expect(urls).toEqual(['wss://good.relay']);
+    await t.stop();
+  });
+
+  test('getRelayState is closed for unknown relays', async () => {
+    const { t } = makeTransport();
+    expect(t.getRelayState('wss://never.relay')).toBe('closed');
+    await t.stop();
+  });
+
+  test('handler errors on inbound EVENT do not break the transport', async () => {
+    const { t, sockets } = makeTransport();
+    const keys = generateNostrKeypair();
+    await t.start();
+    await tick(20);
+    t.onReceive(() => {
+      throw new Error('handler boom');
+    });
+    let ok = false;
+    t.onReceive(() => {
+      ok = true;
+    });
+    const wrapped = wrapEvent(makePost('resilient'), keys);
+    expect(() => sockets[0].receive(['EVENT', 'sub1', wrapped])).not.toThrow();
+    await tick(10);
+    expect(ok).toBe(true);
+    await t.stop();
   });
 });

@@ -14,6 +14,21 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
+/** Fake expo-secure-store adapter: a plain Map behind the real interface. */
+function fakeAdapter(): SecureStoreLike & { items: Map<string, string> } {
+  const items = new Map<string, string>();
+  return {
+    items,
+    getItemAsync: async (k: string) => (items.has(k) ? items.get(k)! : null),
+    setItemAsync: async (k: string, v: string) => {
+      items.set(k, v);
+    },
+    deleteItemAsync: async (k: string) => {
+      items.delete(k);
+    },
+  };
+}
+
 describe('MemoryKeyStore', () => {
   test('generateKeypair emits 32-byte pubkey/secretKey', () => {
     const ks = new MemoryKeyStore();
@@ -66,21 +81,6 @@ describe('MemoryKeyStore', () => {
 });
 
 describe('SecureKeyStore', () => {
-  /** Fake expo-secure-store adapter: a plain Map behind the real interface. */
-  function fakeAdapter(): SecureStoreLike & { items: Map<string, string> } {
-    const items = new Map<string, string>();
-    return {
-      items,
-      getItemAsync: async (k: string) => (items.has(k) ? items.get(k)! : null),
-      setItemAsync: async (k: string, v: string) => {
-        items.set(k, v);
-      },
-      deleteItemAsync: async (k: string) => {
-        items.delete(k);
-      },
-    };
-  }
-
   test('round-trips a keypair through the adapter; stable across instances', async () => {
     const adapter = fakeAdapter();
     const before = await loadOrGenerateKeypair(new SecureKeyStore(adapter));
@@ -125,5 +125,106 @@ describe('SecureKeyStore', () => {
       new SecureKeyStore(adapter, { storeOptions: { keychainAccessible: 1 } }),
     );
     expect(seen).toEqual([{ keychainAccessible: 1 }]);
+  });
+});
+
+describe('loadOrGenerateKeypair paths', () => {
+  test('returns the stored keypair WITHOUT minting a new one', async () => {
+    const backing = new Map<string, Uint8Array>();
+    const ks = new MemoryKeyStore(backing);
+    const kp = ks.generateKeypair();
+    await ks.storeKeypair(kp);
+    const before = backing.get('mesh-keypair')!.slice();
+
+    const loaded = await loadOrGenerateKeypair(new MemoryKeyStore(backing));
+    expect(bytesEqual(loaded.publicKey, kp.publicKey)).toBe(true);
+    expect(bytesEqual(loaded.secretKey, kp.secretKey)).toBe(true);
+    // The persisted bytes are untouched: no fresh keypair was generated.
+    expect(bytesEqual(backing.get('mesh-keypair')!, before)).toBe(true);
+  });
+
+  test('generates and persists on first use; second call hits the stored key', async () => {
+    const ks = new MemoryKeyStore();
+    const kp = await loadOrGenerateKeypair(ks);
+    expect(kp.publicKey).toHaveLength(32);
+    const again = await loadOrGenerateKeypair(ks);
+    expect(bytesEqual(again.secretKey, kp.secretKey)).toBe(true);
+  });
+});
+
+describe('key validation edges', () => {
+  test('MemoryKeyStore.storeKeypair rejects a short secretKey', async () => {
+    const ks = new MemoryKeyStore();
+    const kp = ks.generateKeypair();
+    await expect(
+      ks.storeKeypair({ publicKey: kp.publicKey, secretKey: new Uint8Array(31) }),
+    ).rejects.toThrow(/secretKey must be 32 bytes/);
+  });
+
+  test('SecureKeyStore.storeKeypair rejects a short secretKey', async () => {
+    const ks = new SecureKeyStore(fakeAdapter());
+    const kp = ks.generateKeypair();
+    await expect(
+      ks.storeKeypair({ publicKey: kp.publicKey, secretKey: new Uint8Array(31) }),
+    ).rejects.toThrow(/secretKey must be 32 bytes/);
+  });
+
+  test('SecureKeyStore.storeKeypair rejects a non-Uint8Array publicKey', async () => {
+    const ks = new SecureKeyStore(fakeAdapter());
+    const kp = ks.generateKeypair();
+    await expect(
+      ks.storeKeypair({
+        publicKey: Array.from(kp.publicKey) as unknown as Uint8Array,
+        secretKey: kp.secretKey,
+      }),
+    ).rejects.toThrow(/publicKey must be 32 bytes/);
+  });
+
+  test('SecureKeyStore fails closed on 64-char non-hex stored value', async () => {
+    const adapter = fakeAdapter();
+    adapter.items.set('airplane.mesh.identity.v1', 'zz'.repeat(32));
+    await expect(new SecureKeyStore(adapter).loadKeypair()).rejects.toThrow(/valid hex/);
+  });
+
+  test('SecureKeyStore fails closed on wrong-length hex stored value', async () => {
+    const adapter = fakeAdapter();
+    adapter.items.set('airplane.mesh.identity.v1', 'ab'.repeat(31));
+    await expect(new SecureKeyStore(adapter).loadKeypair()).rejects.toThrow(
+      /not 32 bytes hex/,
+    );
+  });
+
+  test('SecureKeyStore tolerates uppercase hex (written by a foreign writer)', async () => {
+    const adapter = fakeAdapter();
+    const ks = new SecureKeyStore(adapter);
+    const kp = ks.generateKeypair();
+    const hex = Array.from(kp.secretKey)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
+    adapter.items.set('airplane.mesh.identity.v1', hex);
+    const loaded = await new SecureKeyStore(adapter).loadKeypair();
+    expect(loaded).not.toBeNull();
+    expect(bytesEqual(loaded!.publicKey, kp.publicKey)).toBe(true);
+  });
+
+  test('SecureKeyStore custom itemKey is honored', async () => {
+    const adapter = fakeAdapter();
+    const ks = new SecureKeyStore(adapter, { itemKey: 'custom.key' });
+    await loadOrGenerateKeypair(ks);
+    expect(adapter.items.has('custom.key')).toBe(true);
+    expect(adapter.items.has('airplane.mesh.identity.v1')).toBe(false);
+  });
+
+  test('SecureKeyStore.wipeKeypair on an empty store does not throw', async () => {
+    const adapter = fakeAdapter();
+    await expect(new SecureKeyStore(adapter).wipeKeypair()).resolves.toBeUndefined();
+    expect(await new SecureKeyStore(adapter).getPublicKey()).toBeNull();
+  });
+
+  test('MemoryKeyStore.sign after wipe is impossible (no keypair stored)', async () => {
+    // MemoryKeyStore has no wipe; emulate by using a fresh empty backing.
+    const ks = new MemoryKeyStore(new Map());
+    await expect(ks.sign(new Uint8Array([1, 2, 3]))).rejects.toThrow(/no keypair/);
   });
 });

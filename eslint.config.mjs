@@ -31,10 +31,29 @@ export default tseslint.config(
         require: 'readonly',
         __dirname: 'readonly',
         process: 'readonly',
+        console: 'readonly',
       },
     },
     rules: {
       '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
+  {
+    // Jest tests written in plain JS (scripts/**/*.test.js): the jest
+    // globals, so no-undef doesn't fire on describe/test/expect.
+    files: ['**/*.test.js'],
+    languageOptions: {
+      globals: {
+        describe: 'readonly',
+        test: 'readonly',
+        it: 'readonly',
+        expect: 'readonly',
+        jest: 'readonly',
+        beforeAll: 'readonly',
+        afterAll: 'readonly',
+        beforeEach: 'readonly',
+        afterEach: 'readonly',
+      },
     },
   },
   {

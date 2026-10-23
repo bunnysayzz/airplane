@@ -158,14 +158,8 @@ export interface NostrTransportOpts {
   wsFactory?: WebSocketFactory;
   /** Nostr keypair for the envelope. Defaults to ephemeral. */
   keys?: NostrKeypair;
-  /**
-   * Base reconnect delay after a drop, ms. Default 5000. Grows
-   * exponentially with each consecutive failure, capped at
-   * `reconnectMaxMs`, with ±20% jitter to avoid thundering herds.
-   */
+  /** Reconnect delay after a drop, ms. Default 5000. */
   reconnectMs?: number;
-  /** Cap for the exponential reconnect backoff, ms. Default 60000. */
-  reconnectMaxMs?: number;
 }
 
 /** Connection state per relay. */
@@ -175,25 +169,20 @@ export type RelayState = 'connecting' | 'open' | 'closed';
  * Nostr relay client. Connects to multiple relays, publishes wrapped events,
  * subscribes to Airplane-kind events. No Google services; plain WebSocket.
  *
- * Reconnection: on unexpected close, reconnects with bounded exponential
- * backoff (base `reconnectMs`, doubling per consecutive failure, capped at
- * `reconnectMaxMs`, ±20% jitter) while `start()`ed. A successful open resets
- * the per-relay failure count. Call `stop()` to disconnect cleanly.
+ * Reconnection: on unexpected close, reconnects after `reconnectMs` while
+ * `start()`ed. Call `stop()` to disconnect cleanly.
  */
 export class NostrTransport {
   private readonly relays: string[];
   private readonly wsFactory: WebSocketFactory;
   private readonly keys: NostrKeypair;
   private readonly reconnectMs: number;
-  private readonly reconnectMaxMs: number;
   private sockets = new Map<string, WebSocketLike>();
   private states = new Map<string, RelayState>();
   private started = false;
   private receiveHandlers = new Set<(event: SignedEvent, relayUrl: string) => void>();
   private subIdCounter = 0;
   private timers = new Set<ReturnType<typeof setTimeout>>();
-  /** Consecutive failed connect attempts per relay; reset on open. */
-  private reconnectAttempts = new Map<string, number>();
 
   constructor(opts: NostrTransportOpts = {}) {
     this.relays = opts.relays ?? DEFAULT_RELAYS;
@@ -205,7 +194,6 @@ export class NostrTransport {
       });
     this.keys = opts.keys ?? generateNostrKeypair();
     this.reconnectMs = opts.reconnectMs ?? 5000;
-    this.reconnectMaxMs = opts.reconnectMaxMs ?? 60000;
   }
 
   /** Relay URLs this transport manages. */
@@ -236,7 +224,6 @@ export class NostrTransport {
     this.started = false;
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
-    this.reconnectAttempts.clear();
     for (const [url, ws] of this.sockets) {
       this.states.set(url, 'closed');
       try {
@@ -261,9 +248,6 @@ export class NostrTransport {
     this.sockets.set(url, ws);
     ws.onopen = () => {
       this.states.set(url, 'open');
-      // A successful connection resets the backoff - the next drop starts
-      // again from the base delay.
-      this.reconnectAttempts.delete(url);
       this.resubscribe(ws);
     };
     ws.onmessage = (ev) => this.handleMessage(url, ev.data);
@@ -279,28 +263,11 @@ export class NostrTransport {
 
   private scheduleReconnect(url: string): void {
     if (!this.started) return;
-    const attempts = this.reconnectAttempts.get(url) ?? 0;
-    this.reconnectAttempts.set(url, attempts + 1);
-    const timer = setTimeout(
-      () => {
-        this.timers.delete(timer);
-        this.connectOne(url);
-      },
-      this.backoffDelayMs(attempts),
-    );
+    const timer = setTimeout(() => {
+      this.timers.delete(timer);
+      this.connectOne(url);
+    }, this.reconnectMs);
     this.timers.add(timer);
-  }
-
-  /**
-   * Bounded exponential backoff: base * 2^attempts, capped at
-   * reconnectMaxMs, with ±20% jitter so many phones don't retry in
-   * lockstep. `attempts` counts consecutive failures (0 = first retry).
-   */
-  private backoffDelayMs(attempts: number): number {
-    const grown = this.reconnectMs * 2 ** attempts;
-    const capped = Math.min(grown, this.reconnectMaxMs);
-    const jitter = 0.8 + Math.random() * 0.4;
-    return Math.max(1, Math.round(capped * jitter));
   }
 
   private sendMsg(url: string, msg: ClientMsg): boolean {

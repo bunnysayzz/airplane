@@ -33,6 +33,11 @@ class FakeBlePort implements TransportPort {
     };
   }
 
+  /** How many receive callbacks are currently registered (lifecycle tests). */
+  get receiverCount(): number {
+    return this.receivers.size;
+  }
+
   /** Simulate an inbound frame from a peer. */
   inject(peerId: string, bytes: Uint8Array): void {
     for (const cb of this.receivers) cb(peerId, bytes);
@@ -266,6 +271,155 @@ describe('HybridTransport with live NostrTransport (mocked socket)', () => {
     // Same event arriving via BLE afterwards is deduped.
     h.ingress(event, 'ble');
     expect(seen).toEqual(['nostr']);
+    await h.stop();
+  });
+});
+
+describe('BleTransport lifecycle', () => {
+  test('start is idempotent: a double start subscribes the port once', async () => {
+    const port = new FakeBlePort();
+    const ble = new BleTransport(port);
+    await ble.start();
+    await ble.start();
+    expect(port.receiverCount).toBe(1);
+
+    // Inbound still decoded and emitted exactly once.
+    let count = 0;
+    ble.onReceive(() => {
+      count++;
+    });
+    port.inject('peer1', encodeEvent(makePost('idempotent start')));
+    await tick();
+    expect(count).toBe(1);
+    await ble.stop();
+  });
+
+  test('stop before start and double stop are safe no-ops', async () => {
+    const port = new FakeBlePort();
+    const ble = new BleTransport(port);
+    await expect(ble.stop()).resolves.toBeUndefined();
+    await ble.start();
+    await ble.stop();
+    expect(port.receiverCount).toBe(0);
+    await expect(ble.stop()).resolves.toBeUndefined();
+  });
+
+  test('restart: start -> stop -> start receives again', async () => {
+    const port = new FakeBlePort();
+    const ble = new BleTransport(port);
+    let count = 0;
+    ble.onReceive(() => {
+      count++;
+    });
+
+    await ble.start();
+    port.inject('peer1', encodeEvent(makePost('first life')));
+    await tick();
+    expect(count).toBe(1);
+
+    await ble.stop();
+    port.inject('peer1', encodeEvent(makePost('while stopped')));
+    await tick();
+    expect(count).toBe(1); // unsubscribed: nothing received while stopped
+
+    await ble.start();
+    port.inject('peer1', encodeEvent(makePost('second life')));
+    await tick();
+    expect(count).toBe(2);
+    await ble.stop();
+  });
+
+  test('broadcast without start still suppresses the echo', async () => {
+    // broadcast() does not require start(); the seen-marking holds anyway.
+    const port = new FakeBlePort();
+    const ble = new BleTransport(port);
+    const event = makePost('unstated broadcast');
+    await ble.broadcast(event, ['peer1']);
+    expect(port.sent).toHaveLength(1);
+    expect(ble.hasSeen(toHex(event.id))).toBe(true);
+  });
+});
+
+describe('HybridTransport lifecycle', () => {
+  function makeLifecycleHybrid() {
+    const port = new FakeBlePort();
+    const ble = new BleTransport(port);
+    // Nostr with no relays configured: never online; ingress driven directly.
+    const h = new HybridTransport(ble, { relays: [] });
+    return { h, port, ble };
+  }
+
+  test('double start is safe: ingress still emits exactly once', async () => {
+    const { h } = makeLifecycleHybrid();
+    await h.start();
+    await h.start();
+
+    const seen: IngressSource[] = [];
+    h.onPost((_e, source) => {
+      seen.push(source);
+    });
+
+    const event = makePost('double start');
+    h.ingress(event, 'ble');
+    h.ingress(event, 'nostr'); // duplicate across the doubled subscriptions
+    expect(seen).toEqual(['ble']);
+    await h.stop();
+  });
+
+  test('stop unsubscribes everything: post-stop frames never ingress', async () => {
+    const { h, port } = makeLifecycleHybrid();
+    await h.start();
+    await h.stop();
+
+    const seen: string[] = [];
+    h.onPost((e) => {
+      seen.push(toHex(e.id));
+    });
+
+    // A raw BLE frame after stop: BleTransport already unsubscribed the port.
+    port.inject('peer1', encodeEvent(makePost('late frame')));
+    await tick();
+    expect(seen).toHaveLength(0);
+
+    // Direct ingress() is transport-independent by design and still works.
+    const direct = makePost('direct');
+    expect(h.ingress(direct, 'local')).toBe(true);
+    expect(seen).toEqual([toHex(direct.id)]);
+
+    await expect(h.stop()).resolves.toBeUndefined(); // double stop safe
+  });
+
+  test('restart works end to end', async () => {
+    const { h } = makeLifecycleHybrid();
+    const seen: IngressSource[] = [];
+    h.onPost((_e, source) => {
+      seen.push(source);
+    });
+
+    await h.start();
+    h.ingress(makePost('first life'), 'ble');
+    await h.stop();
+    await h.start();
+    h.ingress(makePost('second life'), 'nostr');
+    expect(seen).toEqual(['ble', 'nostr']);
+    await h.stop();
+  });
+
+  test('stop before start is a safe no-op', async () => {
+    const { h } = makeLifecycleHybrid();
+    await expect(h.stop()).resolves.toBeUndefined();
+  });
+
+  test('publish without any start still emits locally (no throw)', async () => {
+    const { h, port } = makeLifecycleHybrid();
+    const seen: IngressSource[] = [];
+    h.onPost((_e, source) => {
+      seen.push(source);
+    });
+    const res = await h.publish(makePost('cold publish'), ['peer1']);
+    expect(res.blePeers).toBe(1);
+    expect(port.sent).toHaveLength(1);
+    expect(seen).toEqual(['local']);
     await h.stop();
   });
 });

@@ -86,5 +86,14 @@ module.exports = {
       },
       transformIgnorePatterns: ['node_modules/(?!(cbor-x|@noble/curves|@noble/hashes)/)'],
     },
+    {
+      // CI guard scripts (scripts/**/*.js): black-box spawn tests in plain
+      // JS, no transform needed. Plain JS keeps coverage out of the global
+      // thresholds (child-process coverage isn't collectable) by design.
+      displayName: 'scripts',
+      testEnvironment: 'node',
+      rootDir,
+      testMatch: ['<rootDir>/scripts/**/*.test.js'],
+    },
   ],
 };
