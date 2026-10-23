@@ -18,8 +18,9 @@ export interface ExplainerCardSpec {
 
 // Airplane's onboarding explainer. Card index 1 is the binding privacy truth, so it is
 // also rendered from Settings (in-app, so it works offline) as the compact privacy
-// explainer. Card 0 carries the Bluetooth/location permission rationale inline, where
-// the OS will prompt for it.
+// explainer. Card 0 carries the Bluetooth/location permission rationale inline as the
+// designated pre-prompt copy for when the OS permission dialog is wired (the mesh
+// radio is a P2/P3 roadmap item; no BLE stack or OS prompt exists in v1).
 export const EXPLAINER_CARDS: ExplainerCardSpec[] = [
   {
     key: 'mesh',
