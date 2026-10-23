@@ -10,7 +10,8 @@
 // Payload per fragment: mtu - 11 bytes (458 at the default mtu of 469).
 // See docs/spec/wire-format.md - the spec is the source of truth.
 
-import { decodeEvent } from '../codec/cbor';import {
+import { decodeEvent } from '../codec/cbor';
+import {
   FRAG_HEADER_LEN,
   FRAG_MAGIC,
   FRAG_WIRE_MAX,

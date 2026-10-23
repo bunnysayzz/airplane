@@ -103,7 +103,7 @@ export async function startTransport(): Promise<void> {
 
   const ble = new BleTransport(new NoopBlePort());
   hybrid = new HybridTransport(ble, {
-    // Default public relays; TODO: make configurable in settings.
+    // Default public relays (a settings UI for these is future work).
     relays: [
       'wss://relay.damus.io',
       'wss://nos.lol',

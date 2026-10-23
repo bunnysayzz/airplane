@@ -25,7 +25,8 @@ export const scrollListToTop = async (list: Pick<FlashListRef<PostCardModel>, 's
 };
 
 interface TimelineProps {
-    // TODO: wire to services/airplane - `cells` is a stub data prop for now.
+    // The screen is wired to services/airplane; `cells` is stub data until the
+    // location provider lands (location track, P2/P3).
     cells: string[];
     onPostPress?: (eventId: string) => void;
     // Opens the compose sheet (wired by the tab that hosts the timeline).

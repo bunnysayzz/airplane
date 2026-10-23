@@ -5,16 +5,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { IconButton } from '../../components/ui';
 import { space } from '../../src/theme/shape';
 import type { PostCardModel } from '../../services/airplane/types';
-// TODO(worker2): PostCard is built by another worker - this import resolves when it lands.
 import { PostCard } from '../../components/PostCard';
 import { useTheme } from '../../src/theme/themeContext';
 import { useI18n } from '../../src/i18n/i18nContext';
 
 interface ThreadProps {
     postId: string;
-    // TODO(worker4): wire to services/airplane - the v1 protocol has no replies and the
-    // store has no thread query, so there is no thread data source yet. The screen renders
-    // whatever posts it is given and highlights `postId`; until then it shows the single post.
+    // The v1 protocol has no replies and the store has no thread query: the
+    // screen renders whatever posts it is given and highlights `postId`. The
+    // post-detail route feeds it the matching post from services/airplane.
     posts: PostCardModel[];
     loading?: boolean;
     refreshing?: boolean;
