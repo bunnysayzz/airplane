@@ -106,6 +106,9 @@ const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false })
 
   // Explainer: swipeable cards with pager dots and a single Next/Start button
   const isLast = card === EXPLAINER_CARDS.length - 1;
+  // Guards the async Start press: storage is idempotent, but without this a
+  // rapid double-tap would fire onDone twice with no feedback in between.
+  const [finishing, setFinishing] = useState(false);
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const page = Math.round(event.nativeEvent.contentOffset.x / width);
@@ -117,6 +120,8 @@ const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false })
       scroller.current?.scrollTo({ x: width * (card + 1), animated: true });
       return;
     }
+    if (finishing) return;
+    setFinishing(true);
     try {
       await markOnboardingDone();
     } catch (error) {
@@ -127,20 +132,30 @@ const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false })
   };
 
   return (
-    <View style={[styles.container, styles.explainerContainer]}>
+    <View style={[styles.container, styles.explainerContainer, { paddingTop: insets.top }]}>
       <ScrollView
         ref={scroller}
         horizontal
         pagingEnabled
         showsHorizontalScrollIndicator={false}
         onMomentumScrollEnd={handleScroll}
+        // Live updates too: a slow drag without fling never fires momentum,
+        // which left the dots and the Next/Start label out of sync.
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
         accessibilityLabel={t('setup.onboarding.explainerLabel')}
         style={styles.pager}
       >
         {EXPLAINER_CARDS.map((spec) => (
-          <View key={spec.key} style={[styles.page, { width }]}>
+          // Vertical scroll fallback for short screens: the card centers when
+          // it fits and scrolls when it doesn't (e.g. landscape phones).
+          <ScrollView
+            key={spec.key}
+            contentContainerStyle={[styles.page, { width }]}
+            showsVerticalScrollIndicator={false}
+          >
             <ExplainerCard spec={spec} />
-          </View>
+          </ScrollView>
         ))}
       </ScrollView>
 
@@ -157,6 +172,7 @@ const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false })
       <PillButton
         label={t(isLast ? 'setup.onboarding.start' : 'setup.onboarding.next')}
         onPress={handlePrimary}
+        loading={finishing}
         style={[styles.primary, { marginBottom: Math.max(insets.bottom, 16) }]}
       />
     </View>

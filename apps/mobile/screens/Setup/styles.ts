@@ -52,7 +52,9 @@ export const makeStyles = (colors: ThemeColors) =>
       alignSelf: 'stretch',
     },
     page: {
-      flex: 1,
+      // contentContainerStyle of the per-page vertical ScrollView: centers the
+      // card when it fits, grows (and scrolls) when it doesn't.
+      flexGrow: 1,
       justifyContent: 'center',
       paddingHorizontal: space.xl,
     },
