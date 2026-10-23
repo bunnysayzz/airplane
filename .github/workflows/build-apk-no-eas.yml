@@ -34,17 +34,20 @@ jobs:
         run: node scripts/check-native-modules.js
 
       # Prove the guard is not a tautology: re-run it against a deliberately
-      # broken autolink listing (expo-linking stripped from the real resolve
-      # output) and require it to FAIL naming the missing module.
+      # broken autolink listing (expo-linking stripped from the real
+      # react-native-config output) and require it to FAIL naming the
+      # missing module.
       - name: Prove the native-module guard fails on broken input
         run: |
-          (cd apps/mobile && npx --no-install expo-modules-autolinking resolve -p android --json) > /tmp/autolink-real.json
+          (cd apps/mobile && npx --no-install expo-modules-autolinking react-native-config -p android --json) > /tmp/autolink-real.json
           node -e "
             const fs = require('fs');
             const data = JSON.parse(fs.readFileSync('/tmp/autolink-real.json', 'utf8'));
-            const strip = (n) => Array.isArray(n) ? n.filter((m) => !(m && m.packageName === 'expo-linking')).map(strip)
-              : (n && typeof n === 'object' ? Object.fromEntries(Object.entries(n).map(([k, v]) => [k, strip(v)])) : n);
-            fs.writeFileSync('/tmp/autolink-broken.json', JSON.stringify(strip(data)));
+            if (!data.dependencies || !data.dependencies['expo-linking']) {
+              console.error('proof setup broken: expo-linking not in real react-native-config output'); process.exit(2);
+            }
+            delete data.dependencies['expo-linking'];
+            fs.writeFileSync('/tmp/autolink-broken.json', JSON.stringify(data));
           "
           if node scripts/check-native-modules.js --autolink-json /tmp/autolink-broken.json; then
             echo 'GUARD IS BROKEN: it passed on deliberately-broken autolink output' >&2

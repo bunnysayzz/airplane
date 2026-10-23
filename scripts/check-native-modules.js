@@ -7,17 +7,23 @@
  * What it checks: every package that (a) is reachable from the app entry
  * point via static import/require edges and (b) ships an Android native
  * module (android/build.gradle or an expo-module.config.json declaring the
- * android platform) MUST be listed by `expo-modules-autolinking resolve
- * -p android` — the exact command the Gradle build runs to generate the
- * native package list. If a package is required at startup but dropped by
- * autolinking (e.g. expo-linking was only a peer dep of expo-router, so
- * filterToProjectDependenciesAsync skipped it), this script fails BEFORE
- * the Gradle build, instead of dying silently on the device.
+ * android platform) MUST be listed by
+ * `expo-modules-autolinking react-native-config -p android --json` — the
+ * exact command `apps/mobile/android/settings.gradle` feeds to
+ * `autolinkLibrariesFromCommand` (via `expoAutolinking.rnConfigCommand`).
+ * NOTE: the `resolve` subcommand is NOT sufficient ground truth — it only
+ * covers expo-module.config.json packages and misses react-native.config.js
+ * (RN CLI) modules like react-native-screens. If a package is required at
+ * startup but dropped by autolinking (e.g. expo-linking was only a peer dep
+ * of expo-router, so filterToProjectDependenciesAsync skipped it), this
+ * script fails BEFORE the Gradle build, instead of dying silently on the
+ * device.
  *
  * Usage:
  *   node scripts/check-native-modules.js [--app-dir apps/mobile]
- *       [--autolink-json <file>]   # override: use a captured resolve JSON
- *                                  # instead of invoking the CLI (fixture mode)
+ *       [--autolink-json <file>]   # override: use a captured
+ *                                  # react-native-config JSON instead of
+ *                                  # invoking the CLI (fixture mode)
  *
  * Exit 0: every startup-reachable native package is autolinked.
  * Exit 1: at least one is missing (names printed); or the check itself failed.
@@ -158,34 +164,30 @@ function autolinkedPackageNames() {
   if (AUTOLINK_JSON) {
     raw = fs.readFileSync(AUTOLINK_JSON, 'utf8');
   } else {
+    // This is expoAutolinking.rnConfigCommand — the exact JSON
+    // settings.gradle passes to autolinkLibrariesFromCommand().
     raw = execFileSync(
       'npx',
-      ['--no-install', 'expo-modules-autolinking', 'resolve', '-p', 'android', '--json'],
+      ['--no-install', 'expo-modules-autolinking', 'react-native-config', '-p', 'android', '--json'],
       { cwd: APP_DIR, encoding: 'utf8', timeout: 120000, maxBuffer: 64 * 1024 * 1024 }
     );
   }
   const data = JSON.parse(raw);
-  const names = new Set();
-  // Real shape of `expo-modules-autolinking resolve -p android --json`
-  // (expo-modules-autolinking/build/index.js, registerResolveCommand):
-  //   { extraDependencies, coreFeatures,
-  //     modules: [{packageName, packageVersion, projects?, plugins?}], ... }
-  // `resolve` already filters to the requested platform, so every entry in
-  // `modules` IS an Android module. NOTE: Android project descriptors are
-  // {name, sourceDir, modules} — they carry NO `platform` field, so do not
-  // filter on one (that bug made the guard parse zero modules).
-  const modules = Array.isArray(data) ? data : data.modules;
-  if (Array.isArray(modules)) {
-    for (const m of modules) {
-      if (m && typeof m.packageName === 'string') names.add(m.packageName);
-    }
-  } else {
-    throw new Error('unrecognized expo-modules-autolinking resolve JSON shape (no modules array)');
+  // Real shape: { root, reactNativePath, dependencies: {<packageName>: <config|null>}, project }.
+  // `dependencies` is keyed by package name and already covers BOTH expo
+  // modules and react-native.config.js (RN CLI) modules for the platform.
+  // (Do NOT use the `resolve` subcommand here: it only lists
+  // expo-module.config.json packages and misses RN-CLI modules like
+  // react-native-screens.)
+  const deps = data && typeof data === 'object' ? data.dependencies : null;
+  if (!deps || typeof deps !== 'object' || Array.isArray(deps)) {
+    throw new Error('unrecognized react-native-config JSON shape (no dependencies object)');
   }
+  const names = new Set(Object.keys(deps));
   if (names.size === 0) {
-    // Fail closed and loudly: an empty resolved set would make every native
-    // package look missing. Never evaluate against an empty set.
-    throw new Error('resolve output contained zero modules — refusing to evaluate against an empty set');
+    // Fail closed and loudly: an empty set would make every native package
+    // look missing. Never evaluate against an empty set.
+    throw new Error('react-native-config listed zero dependencies — refusing to evaluate against an empty set');
   }
   return names;
 }

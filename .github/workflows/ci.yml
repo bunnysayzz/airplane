@@ -35,8 +35,8 @@ jobs:
       # Regression guard for the 2026-10-23 startup crash class
       # (`Cannot find native module 'ExpoLinking'` -> SIGABRT): every package
       # reachable from the app entry that ships an Android native module must
-      # be listed by expo-modules-autolinking resolve (the exact source the
-      # Gradle build uses). build-apk-no-eas.yml also runs this step plus a
+      # be listed by `expo-modules-autolinking react-native-config -p android`
+      # (the exact source the Gradle build consumes via rnConfigCommand).
       # fail-on-broken-input proof before the Gradle build.
       - name: Check startup-reachable native modules are autolinked
         run: node scripts/check-native-modules.js
