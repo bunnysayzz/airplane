@@ -106,9 +106,41 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # android-emulator-runner executes its `script:` input LINE BY LINE,
+      # each line in a separate `sh -c` — shell variables do not survive
+      # between lines (run 39985765647: APK=... was lost, so adb install
+      # got an empty path and the step aborted). So the real script is
+      # written to a file here and the action just runs that one file.
       # The smoke script always exits 0: whether the app lives or dies is
       # DATA (verdict.txt + logs + screenshot), not a job failure. Only
       # build/infra failures above fail this job.
+      - name: Write smoke-test script
+        run: |
+          cat > smoke.sh <<'SMOKE_EOF'
+          set +e
+          APK=apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          echo "Installing $APK"
+          adb install -r "$APK"
+          echo "adb install exit code: $?"
+          adb logcat -c
+          adb shell am start -W -n com.bunnysayzz.airplane/.MainActivity
+          echo "am start exit code: $?"
+          sleep 30
+          PID=$(adb shell pidof com.bunnysayzz.airplane | tr -d '\r')
+          if [ -n "$PID" ]; then
+            echo "ALIVE pid=$PID" > verdict.txt
+          else
+            echo "DEAD (no process for com.bunnysayzz.airplane at 30s)" > verdict.txt
+          fi
+          echo "--- dumpsys activity processes excerpt for com.bunnysayzz.airplane ---" >> verdict.txt
+          adb shell dumpsys activity processes | grep -i -B2 -A10 'com.bunnysayzz.airplane' >> verdict.txt
+          adb exec-out screencap -p > screenshot.png
+          adb logcat -b crash -d > crash.log
+          adb logcat -d > logcat-full.log
+          exit 0
+          SMOKE_EOF
+          chmod +x smoke.sh
+
       - name: Install, launch, and observe on emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -118,28 +150,7 @@ jobs:
           profile: pixel_6
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -camera-back none
-          script: |
-            set +e
-            APK=apps/mobile/android/app/build/outputs/apk/release/app-release.apk
-            echo "Installing $APK"
-            adb install -r "$APK"
-            echo "adb install exit code: $?"
-            adb logcat -c
-            adb shell am start -W -n com.bunnysayzz.airplane/.MainActivity
-            echo "am start exit code: $?"
-            sleep 30
-            PID=$(adb shell pidof com.bunnysayzz.airplane | tr -d '\r')
-            if [ -n "$PID" ]; then
-              echo "ALIVE pid=$PID" > verdict.txt
-            else
-              echo "DEAD (no process for com.bunnysayzz.airplane at 30s)" > verdict.txt
-            fi
-            echo "--- dumpsys activity processes excerpt for com.bunnysayzz.airplane ---" >> verdict.txt
-            adb shell dumpsys activity processes | grep -i -B2 -A10 'com.bunnysayzz.airplane' >> verdict.txt
-            adb exec-out screencap -p > screenshot.png
-            adb logcat -b crash -d > crash.log
-            adb logcat -d > logcat-full.log
-            exit 0
+          script: bash smoke.sh
 
       - name: Upload smoke-test evidence
         if: always()
