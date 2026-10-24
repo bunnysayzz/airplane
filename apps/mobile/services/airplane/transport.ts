@@ -74,6 +74,19 @@ let syncTimer: ReturnType<typeof setInterval> | null = null;
 
 const SYNC_INTERVAL_MS = 60_000; // re-check World status every minute when online
 
+function startSyncTimer(): void {
+  if (!syncTimer) {
+    syncTimer = setInterval(() => void runSync(), SYNC_INTERVAL_MS);
+  }
+}
+
+function stopSyncTimer(): void {
+  if (syncTimer) {
+    clearInterval(syncTimer);
+    syncTimer = null;
+  }
+}
+
 async function handleIncoming(event: SignedEvent): Promise<void> {
   const store = getStore();
   // Store the event (deduped by HybridTransport already).
@@ -97,6 +110,10 @@ async function runSync(): Promise<void> {
 /**
  * Start the hybrid transport. Idempotent. Call once at app launch.
  * BLE runs always; Nostr follows connectivity.
+ *
+ * Defensive by design: a transport failure must never take the app down.
+ * A half-started transport is torn down so a later call can retry, and the
+ * feed keeps working offline regardless.
  */
 export async function startTransport(): Promise<void> {
   if (hybrid) return;
@@ -117,12 +134,50 @@ export async function startTransport(): Promise<void> {
     getEvent: (id: Hex64) => getStore().getEvent(id),
   } satisfies WorldConfirmStore);
 
-  hybrid.onPost((event) => {
-    void handleIncoming(event);
-  });
+  // Relay-observed posts are, by definition, on World: confirmListener marks
+  // them confirmed so the feed's globe icon lights up. Inbound posts still
+  // flow through the same store path as before.
+  hybrid.onPost(
+    sync.confirmListener((event) => {
+      void handleIncoming(event);
+    }),
+  );
 
-  await hybrid.start();
+  try {
+    await hybrid.start();
+  } catch {
+    // Never leave a half-started transport behind: reset module state so a
+    // later startTransport() can retry cleanly. The app runs offline-only.
+    hybrid = null;
+    sync = null;
+    throw new Error('transport failed to start; running offline-only');
+  }
 
+  try {
+    wireConnectivity();
+  } catch {
+    // NetInfo listener registration blew up after a successful load:
+    // fall back to offline-only (BLE stub), nostr stays as started.
+    netUnsub?.();
+    netUnsub = null;
+  }
+}
+
+/**
+ * Test seam: the live HybridTransport, or null before startTransport().
+ * Lets tests drive ingress() through the real app wiring (e.g. verify a
+ * relay-observed post gets World-confirmed).
+ */
+export function __getHybridForTests(): HybridTransport | null {
+  return hybrid;
+}
+
+/**
+ * Drive Nostr from connectivity: start relays when online, stop them when
+ * offline, and run the periodic World sync only while online. Separated
+ * from startTransport() so the wiring is independently testable.
+ */
+function wireConnectivity(): void {
   const netInfo = getNetInfo();
   if (!netInfo) {
     // No connectivity module — run offline-only (BLE stub). Nostr stays
@@ -137,24 +192,21 @@ export async function startTransport(): Promise<void> {
       void hybrid?.nostr.start();
       void runSync();
       // Periodic sync while online.
-      if (!syncTimer) {
-        syncTimer = setInterval(() => void runSync(), SYNC_INTERVAL_MS);
-      }
+      startSyncTimer();
     } else {
       void hybrid?.nostr.stop();
-      if (syncTimer) {
-        clearInterval(syncTimer);
-        syncTimer = null;
-      }
+      stopSyncTimer();
     }
   });
 
-  // Initial state check.
-  const initial = await netInfo.fetch();
-  if (initial.isConnected && initial.isInternetReachable) {
-    void runSync();
-    syncTimer = setInterval(() => void runSync(), SYNC_INTERVAL_MS);
-  }
+  // Initial state check (addEventListener also fires on subscribe, but the
+  // explicit fetch covers mocks/listener quirks).
+  void netInfo.fetch().then((initial) => {
+    if (initial.isConnected && initial.isInternetReachable) {
+      void runSync();
+      startSyncTimer();
+    }
+  });
 }
 
 /** Stop the transport. Call on app teardown (rarely needed on mobile). */
