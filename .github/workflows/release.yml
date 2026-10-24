@@ -117,7 +117,7 @@ jobs:
       - run: npm ci
 
       - name: Install EAS CLI
-        run: npm install -g eas-cli@24
+        run: npm install -g eas-cli@24.14.0
 
       # Fail fast with a helpful message if the admin hasn't added EXPO_TOKEN
       # (same pattern as build-android.yml).
