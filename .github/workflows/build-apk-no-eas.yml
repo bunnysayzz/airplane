@@ -58,6 +58,20 @@ jobs:
             echo 'Guard correctly FAILED on the deliberately-broken autolink output.'
           fi
 
+      # Sentry (T1): the pure-JS client reads EXPO_PUBLIC_SENTRY_DSN, which
+      # babel-preset-expo inlines into the JS bundle at bundle time. The DSN
+      # lives in apps/mobile/eas.json (abandoned EAS file, inert) — read it
+      # here and hand it to the Gradle step as an env var only. The value is
+      # NEVER echoed: it goes straight from node into $GITHUB_ENV.
+      - name: Provide Sentry DSN to the JS bundle (from eas.json)
+        run: |
+          DSN=$(node -e "process.stdout.write(require('./apps/mobile/eas.json').build.production.env.EXPO_PUBLIC_SENTRY_DSN || '')")
+          if [ -z "$DSN" ]; then
+            echo '::error::EXPO_PUBLIC_SENTRY_DSN missing from apps/mobile/eas.json (production profile)'
+            exit 1
+          fi
+          printf 'EXPO_PUBLIC_SENTRY_DSN=%s\n' "$DSN" >> "$GITHUB_ENV"
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:

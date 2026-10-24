@@ -212,3 +212,67 @@ describe('concurrency guard and restart persistence', () => {
     expect(after).not.toBe(fixed);
   });
 });
+
+describe('secure-store call-time failure fallback (T1)', () => {
+  /**
+   * The real-device failure class: expo-secure-store RESOLVES at require
+   * time (so defaultKeyStore() picks it) but its native module is broken,
+   * so getItemAsync throws at CALL time. Posting must survive via the
+   * in-memory fallback instead of failing with the generic publish error.
+   */
+  function throwingAdapter() {
+    const adapter = makeAdapter();
+    adapter.getItemAsync = async () => {
+      throw new Error('SecureStore: native module is not available');
+    };
+    return adapter;
+  }
+
+  test('falls back to the in-memory store when the secure store throws at call time', async () => {
+    const adapter = throwingAdapter();
+    const mod = await freshIdentity(() => adapter);
+    const kp = await mod.getDeviceKeypair();
+    expect(kp.publicKey).toHaveLength(32);
+    expect(kp.secretKey).toHaveLength(32);
+    // Nothing was persisted through the broken secure store.
+    expect(adapter.items.has('airplane.mesh.identity.v1')).toBe(false);
+    // Cached: the same object serves the rest of the session.
+    expect(await mod.getDeviceKeypair()).toBe(kp);
+    // A breadcrumb records that the fallback fired (same fresh module
+    // instance identity.ts imported after the registry reset).
+    const sentry = await import('../../src/sentry');
+    expect(sentry.__getBreadcrumbsForTests()).toContainEqual(
+      expect.objectContaining({ message: 'keystore-fallback' }),
+    );
+  });
+
+  test('fallback identity is ephemeral: a fresh module load mints a different keypair', async () => {
+    const adapter = throwingAdapter();
+    const first = await (await freshIdentity(() => adapter)).getDeviceKeypair();
+    const second = await (
+      await freshIdentity(() => adapter)
+    ).getDeviceKeypair();
+    expect(Buffer.from(second.publicKey).toString('hex')).not.toBe(
+      Buffer.from(first.publicKey).toString('hex'),
+    );
+  });
+
+  test('an injected throwing store still fails loud (no fallback for explicit injection)', async () => {
+    const mod = await freshIdentity();
+    const broken: KeyStorePort = {
+      generateKeypair: () => {
+        throw new Error('injected store exploded');
+      },
+      storeKeypair: async () => {},
+      loadKeypair: async () => {
+        throw new Error('injected store exploded');
+      },
+      sign: async () => new Uint8Array(64),
+      getPublicKey: async () => null,
+    };
+    mod.setKeyStore(broken);
+    await expect(mod.getDeviceKeypair()).rejects.toThrow(
+      'injected store exploded',
+    );
+  });
+});

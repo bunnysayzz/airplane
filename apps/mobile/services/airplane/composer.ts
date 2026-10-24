@@ -14,12 +14,34 @@ import {
   EVENT_KIND_POST,
   type EventKind,
 } from '@airplane/protocol';
-import { getDeviceKeypair, crypto } from './identity';
+import { getDeviceKeypair, crypto, type DeviceKeypair } from './identity';
 import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
 import { getLocationCell as resolveLocationCell } from './location';
 
 export { LocationError, type LocationFailureCode } from './location';
+
+/**
+ * Which publishPost stage threw. Attached to the error so the composer catch
+ * can report it (Sentry tag) without changing user-facing copy. Location is
+ * deliberately NOT a stage: location failures stay typed LocationErrors and
+ * propagate unwrapped, so the UI keeps mapping them to location copy.
+ */
+export type PublishStage = 'keypair' | 'sign' | 'save' | 'notify';
+
+/** publishPost failure with its stage attached. `cause` holds the original. */
+export class PublishError extends Error {
+  readonly stage: PublishStage;
+
+  constructor(stage: PublishStage, cause: unknown) {
+    super(
+      `publish failed at stage ${stage}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+    this.name = 'PublishError';
+    this.stage = stage;
+    this.cause = cause;
+  }
+}
 
 export interface PublishOpts {
   /**
@@ -55,20 +77,41 @@ export function tagsForPublish(_opts: PublishOpts): string[][] {
  */
 export async function publishPost(body: string, opts: PublishOpts): Promise<string> {
   const content = normalizeContent(body);
-  const { publicKey, secretKey } = await getDeviceKeypair();
-  const event = signEvent(crypto, secretKey, {
-    pubkey: publicKey,
-    created_at: Math.floor(Date.now() / 1000),
-    kind: EVENT_KIND_POST as EventKind,
-    geohash: opts.geohash5 ?? (await getLocationCell()),
-    tags: tagsForPublish(opts),
-    content,
-  });
-  await getStore().saveEvent(event);
+  let keypair: DeviceKeypair;
+  try {
+    keypair = await getDeviceKeypair();
+  } catch (err) {
+    throw new PublishError('keypair', err);
+  }
+  // Location resolves here, OUTSIDE any stage wrapper: a LocationError must
+  // propagate unwrapped so the UI maps it to location copy, never generic.
+  const geohash = opts.geohash5 ?? (await getLocationCell());
+  let event;
+  try {
+    event = signEvent(crypto, keypair.secretKey, {
+      pubkey: keypair.publicKey,
+      created_at: Math.floor(Date.now() / 1000),
+      kind: EVENT_KIND_POST as EventKind,
+      geohash,
+      tags: tagsForPublish(opts),
+      content,
+    });
+  } catch (err) {
+    throw new PublishError('sign', err);
+  }
+  try {
+    await getStore().saveEvent(event);
+  } catch (err) {
+    throw new PublishError('save', err);
+  }
   // Fan out via hybrid transport (BLE + Nostr when online). Non-blocking;
   // the post is already in the local feed.
   const { publishViaTransport } = await import('./transport');
   publishViaTransport(event).catch(() => {});
-  notifyFeedListeners();
+  try {
+    notifyFeedListeners();
+  } catch (err) {
+    throw new PublishError('notify', err);
+  }
   return toHex(event.id);
 }

@@ -6,4 +6,8 @@
 // app code) evaluates. A startup throw then shows up in logcat tagged
 // [AIRPLANE_FATAL] instead of killing the process silently.
 import './src/fatalShim';
+// Sentry (pure-JS envelope client, no native module): self-inits on import
+// and stays disabled when EXPO_PUBLIC_SENTRY_DSN is absent. Must stay after
+// fatalShim (first import) and before expo-router/entry.
+import './src/sentry';
 import 'expo-router/entry';

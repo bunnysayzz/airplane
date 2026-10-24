@@ -25,6 +25,7 @@ import { makeStyles } from './styles';
 import { useI18n } from '../../src/i18n/i18nContext';
 import { DialogHost } from '../Dialog/dialogHost';
 import { dialog } from '../../src/lib/dialog';
+import { captureError } from '../../src/sentry';
 import { publishPost, LocationError } from '../../services/airplane/composer';
 import {
     getLocationPermissionStatus,
@@ -218,6 +219,11 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             onClose();
         } catch (error: unknown) {
             console.error('Failed to publish post:', error);
+            // Diagnostics only: reports the error name/message + publish
+            // stage to Sentry. Never receives post text, location, pubkeys,
+            // or secrets, and never throws. User-facing copy below is
+            // unchanged.
+            captureError(error);
             // Never surface the raw dev error: map known failures to user-facing
             // copy instead. A denied OS permission gets its own copy (it tells
             // the user what to do); every other location failure pauses

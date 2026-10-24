@@ -35,6 +35,7 @@ import {
   type KeyStorePort,
   type SecureStoreLike,
 } from '@airplane/crypto';
+import { addBreadcrumb } from '../../src/sentry';
 
 export type { DeviceKeypair };
 
@@ -72,6 +73,35 @@ function defaultKeyStore(): KeyStorePort {
   }
 }
 
+/**
+ * Session-scoped fallback keystore (T1 publish fix). When the default secure
+ * store resolves at require time but throws at CALL time on a real device
+ * (native module unlinked/broken — the exact class defaultKeyStore() cannot
+ * see), posting must not die: the device falls back to this in-memory store
+ * for the session. The identity is EPHEMERAL (dies with the process, unlike
+ * the persisted secure-store key), but posting WORKS, and a Sentry breadcrumb
+ * records that the fallback fired. One instance per session so the fallback
+ * identity stays stable across posts until restart.
+ */
+let memoryFallback: MemoryKeyStore | null = null;
+
+/**
+ * Load-or-generate through the default store, falling back to the in-memory
+ * store when the secure store throws at call time. An explicitly injected
+ * store (tests/dev) never falls back — it must fail loud.
+ */
+async function loadDefaultKeypair(): Promise<DeviceKeypair> {
+  try {
+    return await loadOrGenerateKeypair(defaultKeyStore());
+  } catch (err) {
+    memoryFallback ??= new MemoryKeyStore();
+    addBreadcrumb('keystore-fallback', {
+      reason: err instanceof Error ? err.name : 'unknown',
+    });
+    return loadOrGenerateKeypair(memoryFallback);
+  }
+}
+
 let cached: DeviceKeypair | null = null;
 
 /**
@@ -94,7 +124,7 @@ let inflight: Promise<DeviceKeypair> | null = null;
 export async function getDeviceKeypair(): Promise<DeviceKeypair> {
   if (cached) return cached;
   if (inflight) return inflight;
-  const promise = loadOrGenerateKeypair(injected ?? defaultKeyStore());
+  const promise = injected ? loadOrGenerateKeypair(injected) : loadDefaultKeypair();
   inflight = promise;
   try {
     cached = await promise;
@@ -115,4 +145,5 @@ export function __resetDeviceKeypairForTests(): void {
   cached = null;
   injected = null;
   inflight = null;
+  memoryFallback = null;
 }
