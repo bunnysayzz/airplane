@@ -17,25 +17,27 @@ import {
 import { getDeviceKeypair, crypto } from './identity';
 import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
+import { getLocationCell as resolveLocationCell } from './location';
+
+export { LocationError, type LocationFailureCode } from './location';
 
 export interface PublishOpts {
   /**
    * Override for the post's geohash-5 cell. Defaults to the device cell via
-   * getLocationCell() - which throws until the real location provider lands
-   * (TODO(LOC-1)). The override exists for tests/dev.
+   * getLocationCell(). The override exists for tests/dev.
    */
   geohash5?: string;
 }
 
-// TODO(LOC-1): no location provider exists in the app yet - real GPS needs a
-// device permissions flow (P2/P3). The old code fell back to hardcoded
-// Bengaluru coords (12.9716, 77.5946); that was worse than honest, so it is
-// gone: a fake location poisons feed scoping and erodes trust in the mesh.
-// Until the provider lands, composing without an explicit cell fails loudly.
-export function getLocationCell(): string {
-  throw new Error(
-    'getLocationCell: location unavailable - pass geohash5 explicitly until TODO(LOC-1) lands',
-  );
+/**
+ * The device's current geohash-5 cell, resolved through the location
+ * provider (expo-location). Async: resolving a fix may prompt for permission
+ * and wait on GPS. Fails loud with LocationError on permission denied,
+ * disabled services, timeout, or missing native module - never a
+ * fake/default location.
+ */
+export async function getLocationCell(): Promise<string> {
+  return resolveLocationCell();
 }
 
 /** Pure builder seam: which tags a post carries for the given opts. Unit-tested. */
@@ -48,7 +50,8 @@ export function tagsForPublish(_opts: PublishOpts): string[][] {
  * Signed with the STABLE device keypair (identity.ts), so the post's author
  * pubkey is enforceable for tombstones and view receipts across restarts.
  * Throws PayloadError on empty/overlong content (protocol validation), and
- * throws when no geohash5 override is given and location is unavailable.
+ * throws LocationError when no geohash5 override is given and location is
+ * unavailable (permission denied, services off, GPS timeout).
  */
 export async function publishPost(body: string, opts: PublishOpts): Promise<string> {
   const content = normalizeContent(body);
@@ -57,7 +60,7 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
     pubkey: publicKey,
     created_at: Math.floor(Date.now() / 1000),
     kind: EVENT_KIND_POST as EventKind,
-    geohash: opts.geohash5 ?? getLocationCell(),
+    geohash: opts.geohash5 ?? (await getLocationCell()),
     tags: tagsForPublish(opts),
     content,
   });

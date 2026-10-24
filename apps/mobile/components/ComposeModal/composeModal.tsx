@@ -24,7 +24,7 @@ import { makeStyles } from './styles';
 import { useI18n } from '../../src/i18n/i18nContext';
 import { DialogHost } from '../Dialog/dialogHost';
 import { dialog } from '../../src/lib/dialog';
-import { publishPost } from '../../services/airplane/composer';
+import { publishPost, LocationError } from '../../services/airplane/composer';
 
 // Airplane's post length: the protocol normalizes and caps bodies at 280 chars
 export const MAX_POST_LENGTH = 280;
@@ -167,12 +167,18 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             onClose();
         } catch (error: unknown) {
             console.error('Failed to publish post:', error);
-            // Never surface the raw dev error (e.g. the LOC-1 stub's internal
-            // message): map known failures to user-facing copy instead.
+            // Never surface the raw dev error: map known failures to user-facing
+            // copy instead. A denied OS permission gets its own copy (it tells
+            // the user what to do); every other location failure pauses
+            // posting with the generic copy.
             const message =
-                error instanceof Error && /location/i.test(error.message)
-                    ? t('compose.locationPaused')
-                    : t('compose.publishFailedMessage');
+                error instanceof LocationError
+                    ? error.code === 'permission-denied'
+                        ? t('compose.locationPermissionDenied')
+                        : t('compose.locationPaused')
+                    : error instanceof Error && /location/i.test(error.message)
+                      ? t('compose.locationPaused')
+                      : t('compose.publishFailedMessage');
             dialog.alert(t('compose.publishFailed'), message);
         } finally {
             publishingRef.current = false;

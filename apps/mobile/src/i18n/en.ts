@@ -201,6 +201,8 @@ export const en = {
     publishFailed: 'Publishing failed',
     publishFailedMessage: 'An error occurred while publishing your post.',
     locationPaused: "Location isn't available yet, so posting is paused.",
+    locationPermissionDenied:
+      'Location permission is off, so posting is paused. Allow approximate location in Settings to post.',
     dragHandleLabel: 'Drag handle',
     dragHandleHint: 'Swipe down to dismiss the composer',
     charactersLeft: '{{count}} characters left',

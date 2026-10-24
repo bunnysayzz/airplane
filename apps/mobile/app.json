@@ -20,6 +20,13 @@
     "owner": "bunnysayzz",
     "android": {
       "package": "com.bunnysayzz.airplane",
+      // Location (LOC-1, prod-13): foreground approximate location only, for
+      // scoping posts to the device's geohash-5 cell (~4.9 km). No precise
+      // fix is needed, so only ACCESS_COARSE_LOCATION is declared - the OS
+      // offers no "precise" toggle for this app. Mirrored in
+      // android/app/src/main/AndroidManifest.xml because android/ is
+      // committed and no Expo prebuild runs in CI.
+      "permissions": ["ACCESS_COARSE_LOCATION"],
       // Declared explicitly to match the committed android/ theme, which opts
       // out of edge-to-edge enforcement (styles.xml). System bars are opaque,
       // so in-code insets (dock offset, toast, sheet) fall back to fixed
@@ -31,7 +38,10 @@
       }
     },
     "ios": {
-      "bundleIdentifier": "com.bunnysayzz.airplane"
+      "bundleIdentifier": "com.bunnysayzz.airplane",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Airplane needs your approximate location to scope posts to your area of the mesh."
+      }
     },
     "icon": "./assets/icon.png",
     "splash": {

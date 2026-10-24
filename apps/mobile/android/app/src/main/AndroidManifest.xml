@@ -4,6 +4,11 @@
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
   <uses-permission android:name="android.permission.VIBRATE"/>
   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+  <!-- LOC-1 (prod-13): foreground approximate location for post scoping to the
+       device's geohash-5 cell (~4.9 km). Coarse only - no precise fix needed.
+       Declared here (committed manifest; no prebuild in CI) and mirrored in
+       app.json android.permissions. -->
+  <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
   <queries>
     <intent>
       <action android:name="android.intent.action.VIEW"/>

@@ -6,6 +6,7 @@
 import {
   signEvent,
   toHex,
+  encodeGeohash,
   EVENT_KIND_POST,
   type EventKind,
   type FeedPost,
@@ -21,6 +22,12 @@ import {
   __resetFeedListenersForTests,
 } from './feed';
 import { tagsForPublish, publishPost, getLocationCell } from './composer';
+import {
+  locationError,
+  setLocationProviderForTests,
+  __resetLocationProviderForTests,
+  type LocationProvider,
+} from './location';
 import {
   extractNewViewIds,
   emitViewReceipt,
@@ -53,6 +60,7 @@ beforeEach(() => {
   __resetDeviceKeypairForTests();
   __resetViewTrackerForTests();
   __resetFeedListenersForTests();
+  __resetLocationProviderForTests();
 });
 
 // --- mapping ---------------------------------------------------------------
@@ -114,13 +122,61 @@ describe('publishPost', () => {
     await expect(publishPost('x'.repeat(281), { geohash5: 'tdr1v' })).rejects.toThrow();
   });
 
-  it('fails loudly without a cell: getLocationCell is an honest stub (TODO(LOC-1))', async () => {
-    expect(() => getLocationCell()).toThrow(/location unavailable/);
+  it('fails loudly without a cell: permission-denied is typed, nothing is faked', async () => {
+    setLocationProviderForTests({
+      getCurrentCell: async () => {
+        throw locationError('permission-denied');
+      },
+    });
+    await expect(publishPost('no cell', {})).rejects.toMatchObject({
+      code: 'permission-denied',
+    });
     await expect(publishPost('no cell', {})).rejects.toThrow(
-      /location unavailable/,
+      /location\/permission-denied/,
     );
     // No fake coords are ever written: nothing landed in the store.
     expect(await getStore().listFeed({ cells: ['tdr1v'], limit: 10 })).toHaveLength(0);
+  });
+
+  it('fails loudly on a GPS timeout', async () => {
+    setLocationProviderForTests({
+      getCurrentCell: async () => {
+        throw locationError('timeout');
+      },
+    });
+    await expect(publishPost('slow gps', {})).rejects.toMatchObject({
+      code: 'timeout',
+    });
+  });
+
+  it('resolves the cell through the provider and encodes with the real geohash encoder', async () => {
+    // Bengaluru coords: the encoder (not a hardcoded string) decides the cell.
+    const expected = encodeGeohash(12.9716, 77.5946, 5);
+    const provider: LocationProvider = {
+      getCurrentCell: async () => expected,
+    };
+    setLocationProviderForTests(provider);
+    await expect(getLocationCell()).resolves.toBe(expected);
+  });
+
+  it('publish end-to-end: the post event carries the provider cell', async () => {
+    const expected = encodeGeohash(12.9716, 77.5946, 5);
+    setLocationProviderForTests({ getCurrentCell: async () => expected });
+    const id = await publishPost('via provider', {});
+    const saved = await getStore().getEvent(id);
+    expect(saved).not.toBeNull();
+    expect(saved!.geohash).toBe(expected);
+  });
+
+  it('explicit geohash5 still wins over the provider (tests/dev override)', async () => {
+    setLocationProviderForTests({
+      getCurrentCell: async () => {
+        throw locationError('unavailable');
+      },
+    });
+    const id = await publishPost('explicit cell', { geohash5: 'tdr1v' });
+    const saved = await getStore().getEvent(id);
+    expect(saved!.geohash).toBe('tdr1v');
   });
 
   it('notifies feed subscribers after publish', async () => {
