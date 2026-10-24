@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Transport manager: owns the HybridTransport lifecycle.
 //
-// - BLE transport runs always (currently a no-op stub until the P0 radio
-//   spike lands real GATT; the flood engine interface is frozen).
+// - BLE transport runs always (real GATT port on device; fails closed to
+//   inert when the radio, permissions, or native modules are unavailable).
 // - Nostr transport starts/stops with connectivity (NetInfo, no Google
 //   Play Services dependency).
 // - Incoming posts from any source are stored and fed to the UI.
@@ -16,8 +16,12 @@ import {
   type WorldConfirmStore,
 } from '@airplane/transport';
 import type { SignedEvent, TransportPort, Hex64 } from '@airplane/protocol';
+import { toHex } from '@airplane/protocol';
 import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
+import { getDeviceKeypair } from './identity';
+import { GattBlePort, defaultBleDeps, type BleNativeDeps } from './ble/gatt';
+import { ensureBlePermissions } from './ble/permissions';
 
 /**
  * NetInfo is a native module. If it fails to load (not linked, Expo Go,
@@ -50,8 +54,26 @@ function getNetInfo() {
 }
 
 /**
- * No-op BLE port until real GATT lands (P0). Satisfies TransportPort so
- * HybridTransport can start; all methods are inert.
+ * Real BLE GATT port. Constructed defensively: the native libraries are
+ * lazy-required, and every radio failure fails closed (the port's methods
+ * throw descriptive Errors or stay inert; the app keeps running Nostr-only).
+ * RADIO-UNVERIFIED - see services/airplane/ble/gatt.ts.
+ */
+function makeBlePort(): { port: TransportPort; close: () => Promise<void> } {
+  let deps: BleNativeDeps;
+  try {
+    deps = defaultBleDeps(ensureBlePermissions);
+  } catch {
+    // Even building the deps failed: fall back to a fully inert port.
+    return { port: new NoopBlePort(), close: async () => {} };
+  }
+  const port = new GattBlePort(deps);
+  return { port, close: () => port.close().catch(() => {}) };
+}
+
+/**
+ * No-op BLE port: last-resort fallback when even the GATT port cannot be
+ * constructed. Satisfies TransportPort so HybridTransport can start.
  */
 class NoopBlePort implements TransportPort {
   async advertise(): Promise<void> {}
@@ -71,6 +93,8 @@ let hybrid: HybridTransport | null = null;
 let sync: WorldSync | null = null;
 let netUnsub: (() => void) | null = null;
 let syncTimer: ReturnType<typeof setInterval> | null = null;
+let blePort: { port: TransportPort; close: () => Promise<void> } | null = null;
+let bleScanUnsub: (() => void) | null = null;
 
 const SYNC_INTERVAL_MS = 60_000; // re-check World status every minute when online
 
@@ -118,7 +142,8 @@ async function runSync(): Promise<void> {
 export async function startTransport(): Promise<void> {
   if (hybrid) return;
 
-  const ble = new BleTransport(new NoopBlePort());
+  blePort = makeBlePort();
+  const ble = new BleTransport(blePort.port);
   hybrid = new HybridTransport(ble, {
     // Default public relays; TODO: make configurable in settings.
     relays: [
@@ -148,9 +173,34 @@ export async function startTransport(): Promise<void> {
   } catch {
     // Never leave a half-started transport behind: reset module state so a
     // later startTransport() can retry cleanly. The app runs offline-only.
+    await blePort?.close();
+    blePort = null;
     hybrid = null;
     sync = null;
     throw new Error('transport failed to start; running offline-only');
+  }
+
+  // Bring up the BLE radio: advertise our identity, scan for mesh peers.
+  // Any failure here is non-fatal - the mesh simply runs without the radio
+  // (Nostr-only), exactly like the old no-op port behaved.
+  try {
+    const { publicKey } = await getDeviceKeypair();
+    const peerIdHex = toHex(publicKey);
+    await blePort.port.advertise(peerIdHex);
+    bleScanUnsub = await blePort.port.scan(() => {
+      // Peer registry for future UI (MeshStatus); discovery itself drives
+      // the port's auto-connect. Nothing to do per peer in v1.
+    });
+  } catch {
+    // Radio unavailable (no BLE, permissions denied, native lib missing):
+    // tear down whatever half-started and continue Nostr-only.
+    try {
+      bleScanUnsub?.();
+    } catch {
+      // ignore
+    }
+    bleScanUnsub = null;
+    await blePort.port.stopAdvertise().catch(() => {});
   }
 
   try {
@@ -217,7 +267,15 @@ export async function stopTransport(): Promise<void> {
   }
   netUnsub?.();
   netUnsub = null;
+  try {
+    bleScanUnsub?.();
+  } catch {
+    // ignore
+  }
+  bleScanUnsub = null;
   await hybrid?.stop();
+  await blePort?.close();
+  blePort = null;
   hybrid = null;
   sync = null;
 }

@@ -71,6 +71,9 @@ module.exports = {
       moduleNameMapper: {
         '^@airplane/([^/]+)$': path.join(rootDir, 'packages', '$1', 'src'),
         '^@react-native-community/netinfo$': path.join(rootDir, '__mocks__', '@react-native-community', 'netinfo.ts'),
+        // BLE services import Platform/PermissionsAndroid from react-native;
+        // the native runtime is mocked (see __mocks__/react-native.ts).
+        '^react-native$': path.join(rootDir, '__mocks__', 'react-native.ts'),
       },
       transform: {
         '^.+\\.[tj]sx?$': [

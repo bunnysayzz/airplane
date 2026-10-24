@@ -4,11 +4,15 @@
 
 import {
   encodeEvent,
+  fragment,
   toHex,
+  DEFAULT_TTL,
+  FRAG_WIRE_MAX,
   type SignedEvent,
   type TransportPort,
 } from '@airplane/protocol';
-import { makePost } from '../../protocol/src/test-helpers';
+import { makePost, makeSizedEvent } from '../../protocol/src/test-helpers';
+import { decodeEvent } from '@airplane/protocol';
 import { BleTransport, HybridTransport, type IngressSource } from './hybrid';
 
 /** Minimal in-memory TransportPort (loopback between "peers" not needed). */
@@ -46,8 +50,23 @@ class FakeBlePort implements TransportPort {
 
 const tick = (ms = 10) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * Inject a whole event as wire frames (what a real port delivers).
+ * Frames can be shuffled to simulate out-of-order ATT delivery.
+ */
+function injectEvent(
+  port: FakeBlePort,
+  peerId: string,
+  event: SignedEvent,
+  opts?: { mtu?: number; shuffle?: boolean },
+): void {
+  const frames = fragment(encodeEvent(event), DEFAULT_TTL, opts?.mtu ?? FRAG_WIRE_MAX);
+  const ordered = opts?.shuffle ? [...frames].reverse() : frames;
+  for (const frame of ordered) port.inject(peerId, frame);
+}
+
 describe('BleTransport', () => {
-  test('inbound CBOR frame is decoded and emitted once', async () => {
+  test('inbound wire frames reassemble and decode to one event', async () => {
     const port = new FakeBlePort();
     const ble = new BleTransport(port);
     await ble.start();
@@ -58,15 +77,33 @@ describe('BleTransport', () => {
     });
 
     const event = makePost('ble hello');
-    port.inject('peer1', encodeEvent(event));
-    await tick();
+    injectEvent(port, 'peer1', event);
 
     expect(received).toHaveLength(1);
     expect(toHex(received[0].id)).toBe(toHex(event.id));
     await ble.stop();
   });
 
-  test('duplicate inbound frame is suppressed (loop suppression)', async () => {
+  test('fragments arriving out of order still reassemble', async () => {
+    const port = new FakeBlePort();
+    const ble = new BleTransport(port);
+    await ble.start();
+
+    const received: SignedEvent[] = [];
+    ble.onReceive((e) => {
+      received.push(e);
+    });
+
+    // ~2KB event -> several frames at the default wire size.
+    const event = decodeEvent(makeSizedEvent(2000));
+    injectEvent(port, 'peer1', event, { shuffle: true });
+
+    expect(received).toHaveLength(1);
+    expect(toHex(received[0].id)).toBe(toHex(event.id));
+    await ble.stop();
+  });
+
+  test('duplicate inbound event is suppressed (loop suppression)', async () => {
     const port = new FakeBlePort();
     const ble = new BleTransport(port);
     await ble.start();
@@ -76,10 +113,9 @@ describe('BleTransport', () => {
       count++;
     });
 
-    const bytes = encodeEvent(makePost('dup'));
-    port.inject('peer1', bytes);
-    port.inject('peer2', bytes); // same event, different peer
-    await tick();
+    const event = makePost('dup');
+    injectEvent(port, 'peer1', event);
+    injectEvent(port, 'peer2', event); // same event, different peer
 
     expect(count).toBe(1);
     await ble.stop();
@@ -121,6 +157,48 @@ describe('BleTransport', () => {
     expect(count).toBe(0);
     await ble.stop();
   });
+
+  test('broadcast fragments large events to the port frame size (MTU-aware)', async () => {
+    // Port reports a small link MTU: every frame must fit it.
+    class SmallMtuPort extends FakeBlePort {
+      frameSizeFor(): number {
+        return 64;
+      }
+    }
+    const port = new SmallMtuPort();
+    const ble = new BleTransport(port);
+    await ble.start();
+
+    const event = decodeEvent(makeSizedEvent(2000));
+    await ble.broadcast(event, ['p1']);
+    expect(port.sent.length).toBeGreaterThan(1);
+    for (const { bytes } of port.sent) {
+      expect(bytes.length).toBeLessThanOrEqual(64);
+    }
+
+    // A remote BleTransport fed those exact frames reassembles the event.
+    const remotePort = new FakeBlePort();
+    const remote = new BleTransport(remotePort);
+    await remote.start();
+    const got: SignedEvent[] = [];
+    remote.onReceive((e) => got.push(e));
+    for (const { bytes } of port.sent) remotePort.inject('p1', bytes);
+    expect(got).toHaveLength(1);
+    expect(toHex(got[0].id)).toBe(toHex(event.id));
+    await ble.stop();
+    await remote.stop();
+  });
+
+  test('start/stop is idempotent', async () => {
+    const port = new FakeBlePort();
+    const ble = new BleTransport(port);
+    await ble.start();
+    await ble.start(); // second start is a no-op
+    expect(port.receiverCount).toBe(1);
+    await ble.stop();
+    await ble.stop(); // second stop is safe
+    expect(port.receiverCount).toBe(0);
+  });
 });
 
 describe('HybridTransport', () => {
@@ -149,6 +227,27 @@ describe('HybridTransport', () => {
 
     expect(seen).toHaveLength(1);
     expect(seen[0].source).toBe('ble');
+    await h.stop();
+  });
+
+  test('BLE wire path feeds hybrid ingress once; nostr echo of the same event is dropped', async () => {
+    // Full path: event -> fragments -> port -> BleTransport reassembly ->
+    // hybrid ingress, then the same event arriving via nostr is a dup.
+    const { h, port } = makeHybrid();
+    await h.start();
+
+    const seen: { id: string; source: IngressSource }[] = [];
+    h.onPost((e, source) => {
+      seen.push({ id: toHex(e.id), source });
+    });
+
+    const event = decodeEvent(makeSizedEvent(1200)); // multi-frame
+    injectEvent(port, 'peer1', event);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].source).toBe('ble');
+
+    expect(h.ingress(event, 'nostr')).toBe(false);
+    expect(seen).toHaveLength(1);
     await h.stop();
   });
 
@@ -288,7 +387,7 @@ describe('BleTransport lifecycle', () => {
     ble.onReceive(() => {
       count++;
     });
-    port.inject('peer1', encodeEvent(makePost('idempotent start')));
+    injectEvent(port, 'peer1', makePost('idempotent start'));
     await tick();
     expect(count).toBe(1);
     await ble.stop();
@@ -313,17 +412,17 @@ describe('BleTransport lifecycle', () => {
     });
 
     await ble.start();
-    port.inject('peer1', encodeEvent(makePost('first life')));
+    injectEvent(port, 'peer1', makePost('first life'));
     await tick();
     expect(count).toBe(1);
 
     await ble.stop();
-    port.inject('peer1', encodeEvent(makePost('while stopped')));
+    injectEvent(port, 'peer1', makePost('while stopped'));
     await tick();
     expect(count).toBe(1); // unsubscribed: nothing received while stopped
 
     await ble.start();
-    port.inject('peer1', encodeEvent(makePost('second life')));
+    injectEvent(port, 'peer1', makePost('second life'));
     await tick();
     expect(count).toBe(2);
     await ble.stop();
@@ -376,8 +475,9 @@ describe('HybridTransport lifecycle', () => {
       seen.push(toHex(e.id));
     });
 
-    // A raw BLE frame after stop: BleTransport already unsubscribed the port.
-    port.inject('peer1', encodeEvent(makePost('late frame')));
+    // A BLE frame after stop: BleTransport already unsubscribed the port,
+    // so even well-formed frames never ingress.
+    injectEvent(port, 'peer1', makePost('late frame'));
     await tick();
     expect(seen).toHaveLength(0);
 

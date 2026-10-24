@@ -12,6 +12,11 @@ import {
   decodeEvent,
   encodeEvent,
   toHex,
+  DEFAULT_TTL,
+  FRAG_WIRE_MAX,
+  REASSEMBLY_TIMEOUT_MS,
+  fragment,
+  Reassembler,
   type Hex64,
   type SignedEvent,
   type TransportPort,
@@ -24,25 +29,52 @@ export type IngressSource = 'ble' | 'nostr' | 'local';
 /**
  * BLE-side transport. Wraps a TransportPort (real GATT on device,
  * SimTransport in tests) and handles CBOR encode/decode around it.
- * Flood relay decisions (TTL, jitter, seen-cache) stay in the caller's
- * flood loop; this class only moves complete events.
+ *
+ * Wire reality: a port frame carries ONE protocol fragment (11-byte header +
+ * payload, see flood/fragment.ts), never a whole event. broadcast()
+ * fragments each event to the port's per-peer frame size (MTU-aware
+ * chunking); the receive path reassembles fragments back into complete
+ * event bytes before decoding. Flood relay decisions (TTL, jitter,
+ * seen-cache) stay in the caller's flood loop; this class only moves
+ * complete events.
  */
 export class BleTransport {
   private readonly seen = new SeenCache();
   private readonly handlers = new Set<(event: SignedEvent, peerId: string) => void>();
+  private readonly reassembler = new Reassembler();
+  private readonly ttl: number;
   private unsubscribe: (() => void) | null = null;
+  private lastPurgeMs = 0;
 
-  constructor(private readonly port: TransportPort) {}
+  constructor(
+    private readonly port: TransportPort,
+    opts?: { ttl?: number },
+  ) {
+    this.ttl = opts?.ttl ?? DEFAULT_TTL;
+  }
 
   /** Start listening for inbound frames. Idempotent. */
   async start(): Promise<void> {
     if (this.unsubscribe) return;
-    this.unsubscribe = this.port.onReceive((peerId, bytes) => {
+    this.unsubscribe = this.port.onReceive((peerId, frame) => {
+      // Opportunistic reassembly-buffer purge: no timers in this class.
+      const nowMs = Date.now();
+      if (nowMs - this.lastPurgeMs > REASSEMBLY_TIMEOUT_MS) {
+        this.reassembler.purge(nowMs);
+        this.lastPurgeMs = nowMs;
+      }
+      let eventBytes: Uint8Array | null;
+      try {
+        eventBytes = this.reassembler.push(frame, nowMs);
+      } catch {
+        return; // malformed fragment - drop
+      }
+      if (!eventBytes) return; // still waiting on more fragments
       let event: SignedEvent;
       try {
-        event = decodeEvent(bytes);
+        event = decodeEvent(eventBytes);
       } catch {
-        return; // malformed frame - drop
+        return; // malformed event - drop
       }
       const idHex = toHex(event.id);
       if (this.seen.has(idHex)) return; // loop suppression
@@ -66,6 +98,8 @@ export class BleTransport {
 
   /**
    * Broadcast one event to all connected BLE peers.
+   * The event is fragmented to each peer's port frame size (MTU-aware);
+   * every frame goes through port.send() which must fit the link MTU.
    * Marks the id seen so our own broadcast isn't re-emitted on receipt.
    */
   async broadcast(event: SignedEvent, peerIds: string[]): Promise<void> {
@@ -73,9 +107,14 @@ export class BleTransport {
     this.seen.add(toHex(event.id));
     for (const peerId of peerIds) {
       try {
-        await this.port.send(peerId, bytes);
+        const frameSize = this.port.frameSizeFor?.(peerId) ?? FRAG_WIRE_MAX;
+        const frames = fragment(bytes, this.ttl, frameSize);
+        for (const frame of frames) {
+          await this.port.send(peerId, frame);
+        }
       } catch {
-        // per-peer send failures are non-fatal (peer may have dropped)
+        // per-peer send failures are non-fatal (peer may have dropped,
+        // or the port reported an unusable frame size)
       }
     }
   }

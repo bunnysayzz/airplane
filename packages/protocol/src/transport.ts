@@ -36,6 +36,13 @@ export interface TransportPort {
   disconnect(peerId: string): Promise<void>;
   /** Send one raw frame to a connected peer (must fit the link MTU). */
   send(peerId: string, bytes: Uint8Array): Promise<void>;
+  /**
+   * Max bytes this port accepts in a single send() call for the peer.
+   * The mesh layer fragments events so every frame fits this size.
+   * Optional and additive (not a breaking change): when absent the mesh
+   * layer falls back to the protocol default frame size (FRAG_WIRE_MAX).
+   */
+  frameSizeFor?(peerId: string): number;
   /** Subscribe to inbound frames. Returns an unsubscribe function. */
   onReceive(cb: (peerId: string, bytes: Uint8Array) => void): () => void;
 }
