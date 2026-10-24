@@ -20,4 +20,5 @@ export {
 } from './viewTracker';
 export { getDeviceKeypair, setKeyStore, crypto, type DeviceKeypair } from './identity';
 export { getStore } from './store';
+export { getKv } from './kv';
 export { startTransport, stopTransport, publishViaTransport } from './transport';

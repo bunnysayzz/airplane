@@ -15,3 +15,4 @@ export {
 export type { MemoryEventStoreOpts } from './memory';
 export { OpSqliteStore, splitStatements } from './op-sqlite';
 export { MmkvKv } from './mmkv';
+export type { MmkvLike } from './mmkv';

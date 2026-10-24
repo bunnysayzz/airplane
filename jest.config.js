@@ -43,9 +43,9 @@ module.exports = {
     '!**/__tests__/**',
     '!**/__mocks__/**',
     '!**/test-helpers*',
-    // Native stubs: can't run in Node, excluded from coverage.
+    // Native driver: the OpSqliteStore SQL logic runs in Node, but the
+    // driver file itself is excluded from coverage (see op-sqlite.test.ts).
     '!src/op-sqlite.ts',
-    '!src/mmkv.ts',
     // Mobile UI support files: no unit tests (need RN harness).
     '!src/i18n/**',
     '!src/lib/**',

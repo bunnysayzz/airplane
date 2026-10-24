@@ -359,12 +359,37 @@ describe('schema', () => {
   });
 });
 
-describe('MmkvKv stub', () => {
-  test('throws until react-native-mmkv is linked (P2)', async () => {
-    const kv = new MmkvKv();
-    await expect(kv.get('k')).rejects.toThrow(/not linked \(P2\)/);
-    await expect(kv.set('k', 'v')).rejects.toThrow(/not linked \(P2\)/);
-    await expect(kv.del('k')).rejects.toThrow(/not linked \(P2\)/);
+describe('MmkvKv adapter', () => {
+  function makeKv() {
+    const map = new Map<string, string>();
+    const kv = new MmkvKv({
+      getString: (key: string) => map.get(key),
+      set: (key: string, value: string) => {
+        map.set(key, value);
+      },
+      delete: (key: string) => {
+        map.delete(key);
+      },
+    });
+    return { map, kv };
+  }
+
+  test('get/set/del round-trip; missing key returns null', async () => {
+    const { kv } = makeKv();
+    await expect(kv.get('k')).resolves.toBeNull();
+    await kv.set('k', 'v');
+    await expect(kv.get('k')).resolves.toBe('v');
+    await kv.del('k');
+    await expect(kv.get('k')).resolves.toBeNull();
+  });
+
+  test('overwrite replaces the value; del of a missing key is a no-op', async () => {
+    const { map, kv } = makeKv();
+    await kv.set('k', 'v1');
+    await kv.set('k', 'v2');
+    await expect(kv.get('k')).resolves.toBe('v2');
+    await kv.del('missing');
+    expect(map.size).toBe(1);
   });
 });
 
@@ -522,9 +547,7 @@ describe('listFeed tie-break ordering and beforeId cursor', () => {
   test('equal created_at rows order deterministically by id hex descending', async () => {
     const store = new MemoryEventStore();
     for (const seed of [1, 2, 3]) {
-      await store.saveEvent(
-        makeEvent({ seed, createdAt: tieAt, content: `post ${seed}` }),
-      );
+      await store.saveEvent(makeEvent({ seed, createdAt: tieAt, content: `post ${seed}` }));
     }
     const feed = await store.listFeed({
       cells: ['tdr1v'],
@@ -532,19 +555,13 @@ describe('listFeed tie-break ordering and beforeId cursor', () => {
       nowSec: NOW,
     });
     // seed 3 -> '03..' hex sorts above seed 2 ('02..') above seed 1 ('01..').
-    expect(feed.map((p) => p.event.content)).toEqual([
-      'post 3',
-      'post 2',
-      'post 1',
-    ]);
+    expect(feed.map((p) => p.event.content)).toEqual(['post 3', 'post 2', 'post 1']);
   });
 
   test('beforeId pages through ties with no gaps or duplicates', async () => {
     const store = new MemoryEventStore();
     for (const seed of [1, 2, 3]) {
-      await store.saveEvent(
-        makeEvent({ seed, createdAt: tieAt, content: `post ${seed}` }),
-      );
+      await store.saveEvent(makeEvent({ seed, createdAt: tieAt, content: `post ${seed}` }));
     }
     const page1 = await store.listFeed({
       cells: ['tdr1v'],
@@ -567,12 +584,8 @@ describe('listFeed tie-break ordering and beforeId cursor', () => {
 
   test('before-only cursor behavior is unchanged', async () => {
     const store = new MemoryEventStore();
-    await store.saveEvent(
-      makeEvent({ seed: 1, createdAt: NOW - 50, content: 'old' }),
-    );
-    await store.saveEvent(
-      makeEvent({ seed: 2, createdAt: NOW - 10, content: 'new' }),
-    );
+    await store.saveEvent(makeEvent({ seed: 1, createdAt: NOW - 50, content: 'old' }));
+    await store.saveEvent(makeEvent({ seed: 2, createdAt: NOW - 10, content: 'new' }));
     const feed = await store.listFeed({
       cells: ['tdr1v'],
       limit: 10,

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Minimal react-native mock for the mobile-services jest project. Only the
 // surfaces our services touch: Platform, PermissionsAndroid, NativeModules,
-// NativeEventEmitter. Tests override behavior via jest.replaceProperty or
-// the exported __set helpers.
+// NativeEventEmitter, AppState (react-native-mmkv's Jest mock subscribes
+// to memoryWarning on construction). Tests override behavior via
+// jest.replaceProperty or the exported __set helpers.
 
 type Listener = (...args: unknown[]) => void;
 
@@ -64,6 +65,13 @@ export const NativeModules = {
 };
 
 export const NativeEventEmitter = FakeEventEmitter;
+
+export const AppState = {
+  currentState: 'active' as string,
+  addEventListener: (_type: string, _cb: Listener): { remove: () => void } => ({
+    remove: () => {},
+  }),
+};
 
 /** Reset mock state between tests. */
 export function __resetReactNativeMock(): void {
