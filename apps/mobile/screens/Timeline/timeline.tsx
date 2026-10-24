@@ -25,7 +25,9 @@ export const scrollListToTop = async (list: Pick<FlashListRef<PostCardModel>, 's
 };
 
 interface TimelineProps {
-    // TODO: wire to services/airplane - `cells` is a stub data prop for now.
+    // The viewer's in-scope cells (own geohash-5 cell + 8 neighbours),
+    // resolved by the hosting tab without prompting. Empty = no scope yet
+    // (location not granted), so the feed is empty until permission exists.
     cells: string[];
     onPostPress?: (eventId: string) => void;
     // Opens the compose sheet (wired by the tab that hosts the timeline).

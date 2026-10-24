@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Feed scope wiring (0.1.3): the feed tab passed `cells={[]}` to Timeline,
+  and an empty cell set matches no post by construction — so the feed stayed
+  permanently empty even though posts saved fine. The tab now resolves the
+  viewer's geohash-5 cell (permission checked first, never prompting) and
+  passes the cell + 8 neighbours; cells re-resolve on tab focus and on
+  feed-change notifications, so a post published right after granting
+  location appears immediately. Resolution failure keeps the previous cells
+  and logs to Sentry instead of flashing the feed empty.
+
 ### Added
 
 - CI/CD hardening: CodeQL, dependency-review, nightly spec-drift checks,
