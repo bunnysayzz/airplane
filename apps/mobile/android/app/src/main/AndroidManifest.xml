@@ -4,13 +4,11 @@
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
   <uses-permission android:name="android.permission.VIBRATE"/>
   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
-<<<<<<< HEAD
   <!-- LOC-1 (prod-13): foreground approximate location for post scoping to the
        device's geohash-5 cell (~4.9 km). Coarse only - no precise fix needed.
        Declared here (committed manifest; no prebuild in CI) and mirrored in
        app.json android.permissions. -->
   <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-=======
   <!-- BLE mesh radio (prod-15). Declared here because android/ is committed
        and CI builds it directly (no prebuild); keep in sync with the
        android.permissions array in app.json for future prebuilds.
@@ -22,7 +20,6 @@
   <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
   <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"/>
   <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
->>>>>>> 17e1785 (prod-15: real BLE GATT TransportPort over ble-manager + multi-ble-peripheral (radio-unverified))
   <queries>
     <intent>
       <action android:name="android.intent.action.VIEW"/>
