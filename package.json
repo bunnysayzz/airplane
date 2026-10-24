@@ -28,6 +28,7 @@
   "overrides": {
     "react-native-screens": "4.11.1",
     "expo-linking": "~7.0.5",
-    "expo-location": "~18.1.6"
+    "expo-location": "~18.1.6",
+    "postcss": "8.5.23"
   }
 }
