@@ -45,7 +45,7 @@ To stay honest, here is what Airplane does not and cannot give you:
 
 ## What we don't collect
 
-We collect nothing, because there is nothing to collect it with: no accounts, no sign-up, no email or phone number, no analytics events, no advertising identifiers, no location history. The app does request Bluetooth and location permission from your OS — that is only so nearby phones can find each other over Bluetooth Low Energy; your location is not recorded, stored, or sent anywhere.
+We collect nothing, because there is nothing to collect it with: no accounts, no sign-up, no email or phone number, no analytics events, no advertising identifiers, no location history. The app does request Bluetooth and location permission from your OS — that is only so nearby phones can find each other over Bluetooth Low Energy and so your posts can be scoped to your area; your precise location never leaves the phone — only an approximate ~5 km area cell is attached to posts you publish.
 
 ## If you sideload the APK
 
