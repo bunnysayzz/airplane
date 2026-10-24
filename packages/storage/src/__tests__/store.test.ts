@@ -514,3 +514,88 @@ describe('MemoryKv edge cases', () => {
     expect(await kv.get('nope')).toBeNull();
   });
 });
+
+describe('listFeed tie-break ordering and beforeId cursor', () => {
+  // All three posts share one created_at second; id hex decides the order.
+  const tieAt = NOW - 100;
+
+  test('equal created_at rows order deterministically by id hex descending', async () => {
+    const store = new MemoryEventStore();
+    for (const seed of [1, 2, 3]) {
+      await store.saveEvent(
+        makeEvent({ seed, createdAt: tieAt, content: `post ${seed}` }),
+      );
+    }
+    const feed = await store.listFeed({
+      cells: ['tdr1v'],
+      limit: 10,
+      nowSec: NOW,
+    });
+    // seed 3 -> '03..' hex sorts above seed 2 ('02..') above seed 1 ('01..').
+    expect(feed.map((p) => p.event.content)).toEqual([
+      'post 3',
+      'post 2',
+      'post 1',
+    ]);
+  });
+
+  test('beforeId pages through ties with no gaps or duplicates', async () => {
+    const store = new MemoryEventStore();
+    for (const seed of [1, 2, 3]) {
+      await store.saveEvent(
+        makeEvent({ seed, createdAt: tieAt, content: `post ${seed}` }),
+      );
+    }
+    const page1 = await store.listFeed({
+      cells: ['tdr1v'],
+      limit: 2,
+      nowSec: NOW,
+    });
+    expect(page1.map((p) => p.event.content)).toEqual(['post 3', 'post 2']);
+    const last = page1[page1.length - 1];
+    // beforeId is not yet on ListFeedOpts (sibling track adds it); the cast
+    // only documents the upcoming shape.
+    const page2 = await store.listFeed({
+      cells: ['tdr1v'],
+      limit: 2,
+      nowSec: NOW,
+      before: last.event.created_at,
+      beforeId: bytesToHex(last.event.id),
+    } as Parameters<MemoryEventStore['listFeed']>[0]);
+    expect(page2.map((p) => p.event.content)).toEqual(['post 1']);
+  });
+
+  test('before-only cursor behavior is unchanged', async () => {
+    const store = new MemoryEventStore();
+    await store.saveEvent(
+      makeEvent({ seed: 1, createdAt: NOW - 50, content: 'old' }),
+    );
+    await store.saveEvent(
+      makeEvent({ seed: 2, createdAt: NOW - 10, content: 'new' }),
+    );
+    const feed = await store.listFeed({
+      cells: ['tdr1v'],
+      limit: 10,
+      before: NOW - 10,
+      nowSec: NOW,
+    });
+    expect(feed.map((p) => p.event.content)).toEqual(['old']);
+  });
+});
+
+describe('getUnconfirmed expiry exclusion', () => {
+  test('expired posts are never listed as unconfirmed', async () => {
+    const store = new MemoryEventStore({ retentionSec: 3600 });
+    const expired = makeEvent({
+      seed: 40,
+      createdAt: NOW - 7200,
+      content: 'gone',
+    });
+    const fresh = makeEvent({ seed: 41, createdAt: NOW - 100, content: 'live' });
+    await store.saveEvent(expired);
+    await store.saveEvent(fresh);
+    const ids = await store.getUnconfirmed();
+    expect(ids).toContain(bytesToHex(fresh.id));
+    expect(ids).not.toContain(bytesToHex(expired.id));
+  });
+});

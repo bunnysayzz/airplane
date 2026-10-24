@@ -48,6 +48,7 @@ let injected: KeyStorePort | null = null;
 export function setKeyStore(ks: KeyStorePort | null): void {
   injected = ks;
   cached = null;
+  inflight = null;
 }
 
 function defaultKeyStore(): KeyStorePort {
@@ -74,23 +75,44 @@ function defaultKeyStore(): KeyStorePort {
 let cached: DeviceKeypair | null = null;
 
 /**
+ * In-flight load-or-generate promise. DATA-LOSS-CLASS race fix: two
+ * concurrent getDeviceKeypair() calls would both see `cached === null` and
+ * both run loadOrGenerateKeypair, minting TWO keypairs while the keystore
+ * persists only the last write - the two callers then diverge onto different
+ * identities (tombstones/receipts signed by one stop matching the other).
+ * The first caller stores its promise here; concurrent callers await the
+ * SAME promise, so the keypair is minted exactly once per cold start.
+ * (JS is single-threaded, but awaits yield - the check-then-act gap is real.)
+ */
+let inflight: Promise<DeviceKeypair> | null = null;
+
+/**
  * The stable device keypair. Generated once on first launch and persisted
  * in the keystore; identical across restarts. Cached in module scope so a
  * launch never re-reads the keystore per signature.
  */
 export async function getDeviceKeypair(): Promise<DeviceKeypair> {
-  if (!cached) {
-    cached = await loadOrGenerateKeypair(injected ?? defaultKeyStore());
+  if (cached) return cached;
+  if (inflight) return inflight;
+  const promise = loadOrGenerateKeypair(injected ?? defaultKeyStore());
+  inflight = promise;
+  try {
+    cached = await promise;
+    return cached;
+  } finally {
+    // Clear in BOTH paths: on success cached now owns it; on failure the
+    // next caller must retry rather than await a settled rejection forever.
+    inflight = null;
   }
-  return cached;
 }
 
 /**
- * Test seam: drop the cached keypair (and any injected keystore) so the
- * next getDeviceKeypair() load-or-generates fresh - simulating a new
- * device / burned identity.
+ * Test seam: drop the cached keypair (and any injected keystore, plus any
+ * in-flight load) so the next getDeviceKeypair() load-or-generates fresh -
+ * simulating a new device / burned identity.
  */
 export function __resetDeviceKeypairForTests(): void {
   cached = null;
   injected = null;
+  inflight = null;
 }

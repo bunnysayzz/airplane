@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Tests for the identity service's keystore wiring: which keystore becomes
 // the default (expo-secure-store when the native module is linked, in-memory
-// fallback otherwise), the injection seam, and the module-level cache.
+// fallback otherwise), the injection seam, the module-level cache, the
+// concurrency guard on cold start, and restart persistence.
 
+import { MemoryKeyStore } from '@airplane/crypto';
 import type {
   DeviceKeypair,
   KeyStorePort,
@@ -88,6 +90,88 @@ describe('default keystore selection', () => {
 });
 
 describe('injection seam and cache', () => {
+describe('concurrency guard and restart persistence', () => {
+  /**
+   * In-memory keystore with an artificially slow load (50 ms) and a
+   * counted generateKeypair - reproduces the check-then-act window where
+   * N concurrent getDeviceKeypair() calls would previously each mint their
+   * own keypair (split identity, data-loss class).
+   */
+  class SlowCountingKeyStore extends MemoryKeyStore {
+    generations = 0;
+    override generateKeypair(): DeviceKeypair {
+      this.generations += 1;
+      return super.generateKeypair();
+    }
+    override async loadKeypair(): Promise<DeviceKeypair | null> {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return super.loadKeypair();
+    }
+  }
+
+  test('5 concurrent cold-start calls mint exactly one keypair, shared by all', async () => {
+    const mod = await freshIdentity();
+    const ks = new SlowCountingKeyStore();
+    mod.__resetDeviceKeypairForTests();
+    mod.setKeyStore(ks);
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => mod.getDeviceKeypair()),
+    );
+    expect(ks.generations).toBe(1);
+    const pkHex = Buffer.from(results[0].publicKey).toString('hex');
+    for (const kp of results) {
+      expect(Buffer.from(kp.publicKey).toString('hex')).toBe(pkHex);
+    }
+  });
+
+  test('a rejection mid-flight clears inflight so the next call retries', async () => {
+    const mod = await freshIdentity();
+    let attempts = 0;
+    const flaky: KeyStorePort = {
+      generateKeypair: () => {
+        attempts += 1;
+        throw new Error('keystore exploded');
+      },
+      storeKeypair: async () => {},
+      loadKeypair: async () => null,
+      sign: async () => new Uint8Array(64),
+      getPublicKey: async () => null,
+    };
+    mod.__resetDeviceKeypairForTests();
+    mod.setKeyStore(flaky);
+    await expect(mod.getDeviceKeypair()).rejects.toThrow('keystore exploded');
+    // The failed promise must not be cached: this call retries (and fails
+    // again on its own), proving inflight was cleared.
+    await expect(mod.getDeviceKeypair()).rejects.toThrow('keystore exploded');
+    expect(attempts).toBe(2);
+  });
+
+  test('identity persists across a simulated restart with a shared backing store', async () => {
+    const mod = await freshIdentity();
+    const backing = new Map<string, Uint8Array>();
+    mod.setKeyStore(new MemoryKeyStore(backing));
+    const first = await mod.getDeviceKeypair();
+    // "Restart": drop the module cache and re-instantiate the keystore over
+    // the SAME backing map, like a new process would.
+    mod.setKeyStore(new MemoryKeyStore(backing));
+    const second = await mod.getDeviceKeypair();
+    expect(second).not.toBe(first); // re-loaded from the store, not the cache
+    expect(second.publicKey).toEqual(first.publicKey);
+    expect(second.secretKey).toEqual(first.secretKey);
+  });
+
+  test('__resetDeviceKeypairForTests clears an in-flight load too', async () => {
+    const mod = await freshIdentity();
+    mod.setKeyStore(new SlowCountingKeyStore());
+    const pending = mod.getDeviceKeypair(); // starts the slow load
+    mod.__resetDeviceKeypairForTests(); // simulates a burn mid-flight
+    await pending;
+    // The cache still holds the burned identity until the next call, which
+    // must NOT reuse the cleared in-flight promise.
+    const kp = await mod.getDeviceKeypair();
+    expect(kp.publicKey).toHaveLength(32);
+  });
+});
   const fixed: DeviceKeypair = {
     publicKey: new Uint8Array(32).fill(9),
     secretKey: new Uint8Array(32).fill(8),

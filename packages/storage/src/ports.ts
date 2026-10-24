@@ -25,6 +25,12 @@ export interface ListFeedOpts {
    * are returned. Pass the `created_at` of the last post on the previous page.
    */
   before?: number;
+  /**
+   * Tie-break cursor for equal created_at rows: only rows with
+   * (created_at, id) strictly older than (before, beforeId) are returned.
+   * Requires `before`.
+   */
+  beforeId?: Hex64;
   /** Override for "now" (seconds). Defaults to `Date.now() / 1000`. Test seam. */
   nowSec?: UnixSec;
 }
@@ -115,4 +121,9 @@ export interface DatabasePort {
   exec(sql: string, params?: unknown[]): Promise<void>;
   /** Run a query and return rows as plain objects keyed by column name. */
   query<T>(sql: string, params?: unknown[]): Promise<T[]>;
+  /**
+   * Run fn atomically; on throw, roll back. When absent the driver must
+   * emulate with BEGIN IMMEDIATE / COMMIT / ROLLBACK via exec.
+   */
+  transaction?<T>(fn: () => Promise<T>): Promise<T>;
 }

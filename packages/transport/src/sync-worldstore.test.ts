@@ -35,11 +35,19 @@ function makeSync(store: MemoryEventStore, online = true) {
   return { sync, nostr };
 }
 
+/**
+ * Posts with a wall-clock createdAt: getUnconfirmed() excludes expired
+ * posts, and makePost's default createdAt (Nov 2023) is long expired.
+ */
+function freshPost(content: string): SignedEvent {
+  return makePost(content, Math.floor(Date.now() / 1000));
+}
+
 describe('WorldSync over MemoryEventStore', () => {
   test('sync pushes every unconfirmed post held by the real store', async () => {
     const store = new MemoryEventStore();
-    const e1 = makePost('real store 1');
-    const e2 = makePost('real store 2');
+    const e1 = freshPost('real store 1');
+    const e2 = freshPost('real store 2');
     await store.saveEvent(e1);
     await store.saveEvent(e2);
 
@@ -55,7 +63,7 @@ describe('WorldSync over MemoryEventStore', () => {
 
   test('full loop: push -> relay echo via confirmListener -> excluded from next sync', async () => {
     const store = new MemoryEventStore();
-    const event = makePost('round trip');
+    const event = freshPost('round trip');
     await store.saveEvent(event);
     const idHex = toHex(event.id);
     const { sync, nostr } = makeSync(store);
@@ -84,7 +92,7 @@ describe('WorldSync over MemoryEventStore', () => {
 
   test('deleted posts are never pushed', async () => {
     const store = new MemoryEventStore();
-    const event = makePost('doomed');
+    const event = freshPost('doomed');
     await store.saveEvent(event);
     await store.markDeleted(toHex(event.id));
 
@@ -97,7 +105,7 @@ describe('WorldSync over MemoryEventStore', () => {
 
   test('confirmListener leaves BLE-sourced events unconfirmed (still syncable)', async () => {
     const store = new MemoryEventStore();
-    const event = makePost('ble arrival');
+    const event = freshPost('ble arrival');
     await store.saveEvent(event);
     const idHex = toHex(event.id);
     const { sync } = makeSync(store);
@@ -125,7 +133,7 @@ describe('WorldSync over MemoryEventStore', () => {
 
   test('sync while offline touches nothing', async () => {
     const store = new MemoryEventStore();
-    await store.saveEvent(makePost('offline post'));
+    await store.saveEvent(freshPost('offline post'));
     const { sync, nostr } = makeSync(store, false);
     const report = await sync.sync();
     expect(report.pushed).toEqual([]);
@@ -136,7 +144,7 @@ describe('WorldSync over MemoryEventStore', () => {
 
   test('already-confirmed posts are skipped, not re-pushed', async () => {
     const store = new MemoryEventStore();
-    const event = makePost('already out there');
+    const event = freshPost('already out there');
     await store.saveEvent(event);
     const idHex = toHex(event.id);
     await store.markWorldConfirmed(idHex);

@@ -2,7 +2,7 @@
 // @airplane/storage - public surface.
 
 export type { StorePort, KvPort, DatabasePort, ListFeedOpts } from './ports';
-export { MIGRATION_001, MIGRATION_002 } from './schema';
+export { MIGRATION_001, MIGRATION_002, MIGRATION_003 } from './schema';
 export {
   MemoryEventStore,
   MemoryKv,

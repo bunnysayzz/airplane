@@ -154,6 +154,10 @@ export class MemoryEventStore implements StorePort {
   async listFeed(opts: ListFeedOpts): Promise<FeedPost[]> {
     const now = opts.nowSec ?? Math.floor(Date.now() / 1000);
     const cells = new Set(opts.cells);
+    // Tie-break cursor for equal created_at rows. Requires `before`: only
+    // rows with (created_at, id) strictly older than (before, beforeId)
+    // are returned.
+    const beforeIdHex = opts.beforeId?.toLowerCase() ?? null;
     const posts: FeedPost[] = [];
     for (const [idHex, row] of this.events) {
       const e = row.event;
@@ -161,7 +165,16 @@ export class MemoryEventStore implements StorePort {
       if (row.deleted) continue;
       if (row.expiresAt <= now) continue;
       if (!cells.has(e.geohash)) continue;
-      if (opts.before !== undefined && e.created_at >= opts.before) continue;
+      if (opts.before !== undefined) {
+        if (beforeIdHex === null) {
+          // before-only: legacy behavior, unchanged.
+          if (e.created_at >= opts.before) continue;
+        } else {
+          // (created_at, id) strictly older than (before, beforeId).
+          if (e.created_at > opts.before) continue;
+          if (e.created_at === opts.before && idHex >= beforeIdHex) continue;
+        }
+      }
       const views = this.viewCounts.get(idHex) ?? 0;
       const ageHours = Math.max(0, (now - e.created_at) / 3600);
       posts.push({
@@ -171,8 +184,18 @@ export class MemoryEventStore implements StorePort {
         ageHours,
       });
     }
-    // Newest first.
-    posts.sort((a, b) => b.event.created_at - a.event.created_at);
+    // Deterministic newest-first: (created_at desc, id hex desc). The id
+    // tie-break makes pagination by (before, beforeId) stable even when
+    // several posts share a created_at second.
+    posts.sort((a, b) => {
+      if (b.event.created_at !== a.event.created_at) {
+        return b.event.created_at - a.event.created_at;
+      }
+      const aHex = bytesToHex(a.event.id);
+      const bHex = bytesToHex(b.event.id);
+      if (aHex === bHex) return 0;
+      return bHex > aHex ? 1 : -1;
+    });
     return posts.slice(0, Math.max(0, opts.limit));
   }
 
@@ -290,10 +313,12 @@ export class MemoryEventStore implements StorePort {
   }
 
   async getUnconfirmed(): Promise<Hex64[]> {
+    const now = Math.floor(Date.now() / 1000);
     const out: Hex64[] = [];
     for (const [idHex, row] of this.events) {
       if (row.event.kind !== 1) continue;
       if (row.deleted) continue;
+      if (row.expiresAt <= now) continue; // expired posts need no relay push
       if (this.worldConfirmed.has(idHex)) continue;
       out.push(idHex);
     }
