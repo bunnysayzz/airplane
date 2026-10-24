@@ -20,6 +20,7 @@ import { toHex } from '@airplane/protocol';
 import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
 import { getDeviceKeypair } from './identity';
+import { addBreadcrumb } from '../../src/sentry';
 import { GattBlePort, defaultBleDeps, type BleNativeDeps } from './ble/gatt';
 import { ensureBlePermissions, checkBlePermissions, requestBlePermissions } from './ble/permissions';
 
@@ -93,6 +94,13 @@ let hybrid: HybridTransport | null = null;
 let sync: WorldSync | null = null;
 let netUnsub: (() => void) | null = null;
 let syncTimer: ReturnType<typeof setInterval> | null = null;
+/**
+ * Last connectivity state applied to the transport, or null before any
+ * state has been applied. Transitions only (not every listener fire) drive
+ * the transport, so duplicate events are no-ops and each real change gets
+ * exactly one breadcrumb for the device-check log trail.
+ */
+let lastOnline: boolean | null = null;
 let blePort: { port: TransportPort; close: () => Promise<void> } | null = null;
 let bleScanUnsub: (() => void) | null = null;
 /**
@@ -184,6 +192,7 @@ export async function startTransport(): Promise<void> {
     blePort = null;
     hybrid = null;
     sync = null;
+    lastOnline = null;
     throw new Error('transport failed to start; running offline-only');
   }
 
@@ -273,6 +282,37 @@ export function __getHybridForTests(): HybridTransport | null {
 }
 
 /**
+ * Apply one connectivity state to the transport. Single funnel for both
+ * the NetInfo listener and the initial fetch, so both paths behave the
+ * same: online (re)starts the relay sockets, runs a WorldSync pass, and
+ * starts the periodic sync timer; offline stops the sockets and timer.
+ * BLE always runs (mesh works offline — that is the point of the app);
+ * only the Nostr/World side follows connectivity.
+ *
+ * The shared funnel matters: NetInfo reports isInternetReachable: null
+ * until its reachability check lands, so the listener can fire offline
+ * first and the fetch resolve online after. Before this funnel the fetch
+ * path never restarted Nostr — it only ran sync + timer — so after that
+ * race the silent WorldSync uplink stayed dead until the next
+ * connectivity flap. Transitions only: duplicates are no-ops.
+ */
+function applyConnectivity(online: boolean): void {
+  if (online === lastOnline) return;
+  lastOnline = online;
+  if (online) {
+    addBreadcrumb('transport: connectivity online');
+    void hybrid?.nostr.start();
+    void runSync();
+    // Periodic sync while online.
+    startSyncTimer();
+  } else {
+    addBreadcrumb('transport: connectivity offline');
+    void hybrid?.nostr.stop();
+    stopSyncTimer();
+  }
+}
+
+/**
  * Drive Nostr from connectivity: start relays when online, stop them when
  * offline, and run the periodic World sync only while online. Separated
  * from startTransport() so the wiring is independently testable.
@@ -287,26 +327,19 @@ function wireConnectivity(): void {
 
   // React to connectivity changes.
   netUnsub = netInfo.addEventListener((state) => {
-    const online = !!state.isConnected && !!state.isInternetReachable;
-    if (online) {
-      void hybrid?.nostr.start();
-      void runSync();
-      // Periodic sync while online.
-      startSyncTimer();
-    } else {
-      void hybrid?.nostr.stop();
-      stopSyncTimer();
-    }
+    applyConnectivity(!!state.isConnected && !!state.isInternetReachable);
   });
 
   // Initial state check (addEventListener also fires on subscribe, but the
-  // explicit fetch covers mocks/listener quirks).
-  void netInfo.fetch().then((initial) => {
-    if (initial.isConnected && initial.isInternetReachable) {
-      void runSync();
-      startSyncTimer();
-    }
-  });
+  // explicit fetch covers mocks/listener quirks). A fetch rejection must
+  // not surface as an unhandled rejection: the listener already covers
+  // live transitions.
+  void netInfo
+    .fetch()
+    .then((initial) => {
+      applyConnectivity(!!initial.isConnected && !!initial.isInternetReachable);
+    })
+    .catch(() => {});
 }
 
 /** Stop the transport. Call on app teardown (rarely needed on mobile). */
@@ -317,6 +350,7 @@ export async function stopTransport(): Promise<void> {
   }
   netUnsub?.();
   netUnsub = null;
+  lastOnline = null;
   try {
     bleScanUnsub?.();
   } catch {

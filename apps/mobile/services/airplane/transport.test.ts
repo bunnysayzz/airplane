@@ -178,6 +178,51 @@ describe('transport manager', () => {
     setIntervalSpy.mockRestore();
   });
 
+  test('initial fetch resolving online after an offline listener event restarts Nostr', async () => {
+    // NetInfo reports isInternetReachable as not-yet-known until its
+    // reachability check lands, so the listener can fire offline first
+    // and the initial fetch resolve online after. The fetch path must
+    // restart Nostr, not just the sync timer — otherwise the silent
+    // WorldSync uplink stays dead until the next connectivity flap.
+    type NetState = { isConnected: boolean; isInternetReachable: boolean };
+    let resolveFetch: ((s: NetState) => void) | null = null;
+    netInfoMock.fetch.mockImplementation(
+      () =>
+        new Promise<NetState>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    const setIntervalSpy = jest.spyOn(globalThis, 'setInterval');
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const nostrStartSpy = jest.spyOn(hybrid!.nostr, 'start');
+    const listener = netInfoMock.addEventListener.mock.calls[0][0] as (s: NetState) => void;
+    // Listener fires offline first (reachability still unknown).
+    listener({ isConnected: true, isInternetReachable: false });
+    // Then the initial fetch resolves online.
+    resolveFetch!({ isConnected: true, isInternetReachable: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(nostrStartSpy).toHaveBeenCalledTimes(1);
+    expect(setIntervalSpy).toHaveBeenCalled();
+    setIntervalSpy.mockRestore();
+  });
+
+  test('duplicate online events start Nostr only once', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const nostrStartSpy = jest.spyOn(hybrid!.nostr, 'start');
+    const listener = netInfoMock.addEventListener.mock.calls[0][0] as (s: {
+      isConnected: boolean;
+      isInternetReachable: boolean;
+    }) => void;
+    listener({ isConnected: true, isInternetReachable: true });
+    listener({ isConnected: true, isInternetReachable: true }); // duplicate
+    expect(nostrStartSpy).toHaveBeenCalledTimes(1);
+  });
+
 
   test('startTransport survives NetInfo native module load failure', async () => {
     // Simulate a broken/missing native module: require throws.
