@@ -66,7 +66,12 @@ const Appearance: React.FC<AppearanceProps> = ({ onBack }) => {
                 </Card>
 
                 <SectionLabel style={styles.sectionLabel}>{t('appearance.mode')}</SectionLabel>
-                <SegmentedPill options={modes} value={theme} onChange={setTheme} />
+                <SegmentedPill
+                    options={modes}
+                    value={theme}
+                    onChange={setTheme}
+                    accessibilityLabel={t('appearance.mode')}
+                />
 
                 <View style={styles.coatHeader}>
                     <SectionLabel>{t('appearance.coat')}</SectionLabel>

@@ -48,6 +48,19 @@ export const en = {
     offline: 'offline',
     a11y: '{{peers}}, {{status}}',
   },
+  ble: {
+    // One-time permission priming (prod-14): the app's own rationale, shown
+    // before the OS Bluetooth dialog; the dialog fires only on "Enable".
+    primeTitle: 'Find nearby phones',
+    primeMessage:
+      'Airplane uses Bluetooth to find nearby phones and relay posts — no account, no servers, no sign-up. Nothing about you is collected. The system permission dialog only appears if you enable it.',
+    enable: 'Enable Bluetooth',
+    notNow: 'Not now',
+    enabled: 'Bluetooth on — looking for nearby phones',
+    deniedTitle: 'Bluetooth is off',
+    deniedMessage:
+      "Bluetooth permission is off, so nearby phones can't be found. Your posts still travel over the internet when you're online. Allow nearby-device access in Settings to join the mesh.",
+  },
   setup: {
     title: 'Setting things up',
     // Plain status lines shown while first-time boot work runs
@@ -203,6 +216,13 @@ export const en = {
     locationPaused: "Location isn't available yet, so posting is paused.",
     locationPermissionDenied:
       'Location permission is off, so posting is paused. Allow approximate location in Settings to post.',
+    // Permission priming: the app's own rationale, shown before the OS dialog
+    locationPrePromptTitle: 'Location for your post',
+    locationPrePromptMessage:
+      'Airplane needs approximate location to place your post on the feed — just a rough area, never your exact spot. The system dialog only appears if you allow it.',
+    locationAllow: 'Allow location',
+    locationNotNow: 'Not now',
+    locationDeniedTitle: 'Location is off',
     dragHandleLabel: 'Drag handle',
     dragHandleHint: 'Swipe down to dismiss the composer',
     charactersLeft: '{{count}} characters left',
@@ -393,16 +413,17 @@ export const en = {
     preferences: 'Preferences',
     appearance: 'Appearance',
     appearanceLabel: 'Appearance, {{coat}}',
+    appearanceHint: 'Opens appearance settings',
     compactMode: 'Compact Mode',
     about: 'About',
     version: 'App Version',
     privacy: 'Privacy Policy',
+    privacyHint: 'Opens the in-app privacy policy',
     // The in-app privacy page reuses onboarding card 2; full policy is PRIVACY.md in the repo
     privacyLead:
       'The short, honest version. Nobody can identify you here, but nothing you write is hidden.',
     privacyFullPolicy: 'Read the full privacy policy (PRIVACY.md)',
   },
-  // Each language's name in its own language
   appearance: {
     title: 'Appearance',
     back: 'Back to settings',

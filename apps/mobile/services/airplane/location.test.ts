@@ -24,6 +24,8 @@ const Location = require('expo-location') as {
 import {
   ExpoLocationProvider,
   getLocationCell,
+  getLocationPermissionStatus,
+  requestLocationPermission,
   setLocationProviderForTests,
   __resetLocationProviderForTests,
   LocationError,
@@ -182,5 +184,44 @@ describe('getLocationCell seam', () => {
     expect(error.code).toBe('timeout');
     expect(error.message).toMatch(/location\/timeout/);
     expect(error.userMessage.length).toBeGreaterThan(0);
+  });
+});
+
+// Permission priming seams: the composer reads the OS state without
+// prompting, and fires the real OS request only on the user's action.
+describe('permission priming', () => {
+  it('getPermissionStatus maps OS states without prompting', async () => {
+    const provider = new ExpoLocationProvider();
+    Location.getForegroundPermissionsAsync.mockResolvedValue({ status: 'granted' });
+    await expect(provider.getPermissionStatus()).resolves.toBe('granted');
+    expect(Location.requestForegroundPermissionsAsync).not.toHaveBeenCalled();
+
+    Location.getForegroundPermissionsAsync.mockResolvedValue({ status: 'denied' });
+    await expect(provider.getPermissionStatus()).resolves.toBe('denied');
+    expect(Location.requestForegroundPermissionsAsync).not.toHaveBeenCalled();
+
+    Location.getForegroundPermissionsAsync.mockResolvedValue({ status: 'undetermined' });
+    await expect(provider.getPermissionStatus()).resolves.toBe('undetermined');
+    expect(Location.requestForegroundPermissionsAsync).not.toHaveBeenCalled();
+  });
+
+  it('requestPermission fires the OS request once and returns the grant', async () => {
+    const provider = new ExpoLocationProvider();
+    Location.requestForegroundPermissionsAsync.mockResolvedValue({ status: 'granted' });
+    await expect(provider.requestPermission()).resolves.toBe(true);
+    expect(Location.requestForegroundPermissionsAsync).toHaveBeenCalledTimes(1);
+
+    Location.requestForegroundPermissionsAsync.mockResolvedValue({ status: 'denied' });
+    await expect(provider.requestPermission()).resolves.toBe(false);
+  });
+
+  it('module-level helpers share the default expo provider', async () => {
+    Location.getForegroundPermissionsAsync.mockResolvedValue({ status: 'denied' });
+    await expect(getLocationPermissionStatus()).resolves.toBe('denied');
+    expect(Location.requestForegroundPermissionsAsync).not.toHaveBeenCalled();
+
+    Location.requestForegroundPermissionsAsync.mockResolvedValue({ status: 'granted' });
+    await expect(requestLocationPermission()).resolves.toBe(true);
+    expect(Location.requestForegroundPermissionsAsync).toHaveBeenCalledTimes(1);
   });
 });

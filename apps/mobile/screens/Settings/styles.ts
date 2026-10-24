@@ -10,7 +10,7 @@ export const makeStyles = (colors: ThemeColors) =>
     },
     contentContainer: {
       paddingHorizontal: space.lg,
-      paddingTop: 6,
+      paddingTop: space.xs,
       // Bottom clearance tracks the floating dock - applied by the screen
       // (it needs the live safe-area inset). The dock floats over Settings.
       gap: space.sm,
@@ -45,7 +45,7 @@ export const makeStyles = (colors: ThemeColors) =>
     rowTrailing: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 6,
+      gap: space.xs,
     },
     divider: {
       height: StyleSheet.hairlineWidth,
@@ -77,7 +77,7 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
   StyleSheet.create({
     content: {
       paddingHorizontal: space.lg,
-      paddingTop: 6,
+      paddingTop: space.xs,
       // Bottom clearance tracks the floating dock - applied by the screen
       // (it needs the live safe-area inset). The dock floats over Settings.
       gap: space.sm,
@@ -97,15 +97,15 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
       color: colors.textMuted,
     },
     preview: {
-      paddingTop: 14,
+      paddingTop: space.md,
       paddingHorizontal: space.lg,
       paddingBottom: space.sm,
-      gap: 10,
+      gap: space.sm,
     },
     previewAuthor: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 10,
+      gap: space.sm,
     },
     previewNames: {
       flex: 1,
@@ -124,7 +124,7 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
     },
     pollBar: {
       height: 36,
-      borderRadius: 10,
+      borderRadius: radii.input,
       overflow: 'hidden',
       backgroundColor: colors.inputBackground,
       justifyContent: 'center',
@@ -151,13 +151,13 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
     previewActions: {
       flexDirection: 'row',
       justifyContent: 'space-between',
-      paddingRight: 32,
+      paddingRight: space.xl,
     },
     previewAction: {
       height: 32,
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 6,
+      gap: space.xs,
     },
     previewCount: {
       color: colors.textMuted,
@@ -180,7 +180,7 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
       backgroundColor: colors.cardBackground,
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 6,
+      gap: space.xs,
     },
     coatSelected: {
       borderWidth: 2,
@@ -200,7 +200,7 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
     },
     tintText: {
       flex: 1,
-      gap: 2,
+      gap: space.xs,
     },
     tintLabel: {
       color: colors.textPrimary,

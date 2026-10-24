@@ -3,8 +3,13 @@
 // connections are attempted; NetInfo is the repo's __mocks__ version.
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests, __getHybridForTests } from './transport';
+import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests, __getHybridForTests, getBleRadioState } from './transport';
 import { getStore, __resetStoreForTests } from './store';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const RN = require('react-native') as {
+  PermissionsAndroid: { request: jest.Mock; check: jest.Mock };
+};
 
 /** Fake WebSocket that never connects - records constructor calls only. */
 class FakeSocket {
@@ -216,5 +221,29 @@ describe('transport manager', () => {
     hybrid!.ingress(bleEvent, 'ble');
     for (let i = 0; i < 10; i++) await Promise.resolve();
     expect(await store.isWorldConfirmed('08'.repeat(32))).toBe(false);
+  });
+
+  // BLE permission priming (prod-14): the OS dialog must never fire at
+  // startup. startTransport only *checks* the grants; the request happens
+  // later, on the user's explicit action via enableBleRadio().
+  test('BLE radio stays down without prompting when permission is missing', async () => {
+    RN.PermissionsAndroid.check.mockReset();
+    RN.PermissionsAndroid.check.mockResolvedValue(false);
+    RN.PermissionsAndroid.request.mockClear();
+    await startTransport();
+    expect(getBleRadioState()).toBe('permission-blocked');
+    expect(RN.PermissionsAndroid.request).not.toHaveBeenCalled();
+    // Restore the mock default for the remaining tests.
+    RN.PermissionsAndroid.check.mockResolvedValue(true);
+  });
+
+  test('BLE radio bring-up is silent when permission is already granted', async () => {
+    RN.PermissionsAndroid.check.mockReset();
+    RN.PermissionsAndroid.check.mockResolvedValue(true);
+    await startTransport();
+    // No native BLE stack in jest: advertise fails closed to 'unavailable'.
+    // The point is the check-first path ran without wedging the transport.
+    expect(getBleRadioState()).toBe('unavailable');
+    expect(__getHybridForTests()).not.toBeNull();
   });
 });

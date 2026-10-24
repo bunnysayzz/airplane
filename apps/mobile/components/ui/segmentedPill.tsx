@@ -14,11 +14,13 @@ interface SegmentedPillProps<T extends string> {
     onChange: (value: T) => void;
     // "segmented" switches views (feeds); "chips" filters a list; "underline" is tabs under a header
     variant?: 'segmented' | 'chips' | 'underline';
+    // Screen-reader label for the tablist group (unlabeled otherwise)
+    accessibilityLabel?: string;
 }
 
 const CHIP_HEIGHT = 34;
 
-export function SegmentedPill<T extends string>({ options, value, onChange, variant = 'segmented' }: SegmentedPillProps<T>) {
+export function SegmentedPill<T extends string>({ options, value, onChange, variant = 'segmented', accessibilityLabel }: SegmentedPillProps<T>) {
     const { colors, type } = useTheme();
 
     if (variant === 'chips') {
@@ -52,7 +54,7 @@ export function SegmentedPill<T extends string>({ options, value, onChange, vari
 
     if (variant === 'underline') {
         return (
-            <View accessibilityRole="tablist" style={[styles.underlineRow, { borderBottomColor: colors.borderColor }]}>
+            <View accessibilityRole="tablist" accessibilityLabel={accessibilityLabel} style={[styles.underlineRow, { borderBottomColor: colors.borderColor }]}>
                 {options.map(option => {
                     const selected = option.value === value;
                     return (
@@ -74,7 +76,7 @@ export function SegmentedPill<T extends string>({ options, value, onChange, vari
     }
 
     return (
-        <View accessibilityRole="tablist" style={[styles.track, { backgroundColor: colors.inputBackground }]}>
+        <View accessibilityRole="tablist" accessibilityLabel={accessibilityLabel} style={[styles.track, { backgroundColor: colors.inputBackground }]}>
             {options.map(option => {
                 const selected = option.value === value;
                 return (

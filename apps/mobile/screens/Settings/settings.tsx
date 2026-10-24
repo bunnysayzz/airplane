@@ -52,7 +52,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
         <SettingsHeader
           title={t('settings.privacy')}
           onBack={() => setPage('main')}
-          backLabel={t('settings.close')}
+          backLabel={t('appearance.back')}
         />
         <ScrollView
           contentContainerStyle={[styles.contentContainer, { paddingBottom: tabBarClearance(insets.bottom) }]}
@@ -98,6 +98,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
             onPress={() => setPage('appearance')}
             accessibilityRole="button"
             accessibilityLabel={t('settings.appearanceLabel', { coat: coatName })}
+            accessibilityHint={t('settings.appearanceHint')}
           >
             <Ionicons name="color-palette-outline" size={20} color={colors.accentText} />
             <Text style={[labelStyle, styles.rowText]}>{t('settings.appearance')}</Text>
@@ -132,6 +133,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
             onPress={() => setPage('privacy')}
             accessibilityRole="button"
             accessibilityLabel={t('settings.privacy')}
+            accessibilityHint={t('settings.privacyHint')}
           >
             <Ionicons name="shield-checkmark-outline" size={20} color={colors.accentText} />
             <Text style={[labelStyle, styles.rowText]}>{t('settings.privacy')}</Text>

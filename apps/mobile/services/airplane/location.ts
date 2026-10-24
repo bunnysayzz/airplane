@@ -77,6 +77,9 @@ interface ExpoProviderOpts {
  * keeps expo-location out of the startup native-module guard's import graph,
  * matching how expo-secure-store / NetInfo are treated.
  */
+/** The OS foreground-location permission state, read without prompting. */
+export type LocationPermissionState = 'granted' | 'denied' | 'undetermined';
+
 export class ExpoLocationProvider implements LocationProvider {
   private readonly timeoutMs: number;
   private readonly maxAgeMs: number;
@@ -110,6 +113,31 @@ export class ExpoLocationProvider implements LocationProvider {
     if (status !== 'granted') {
       throw locationError('permission-denied', `status=${status}`);
     }
+  }
+
+  /**
+   * The foreground-location permission state WITHOUT prompting the OS.
+   * The UI layer uses this for permission priming: it shows the app's own
+   * rationale first and fires the real OS dialog only on the user's action
+   * (via requestPermission()). `ensurePermission()` above stays the
+   * fail-loud backstop on the publish path.
+   */
+  async getPermissionStatus(): Promise<LocationPermissionState> {
+    const Location = this.loadLocation();
+    const status = (await Location.getForegroundPermissionsAsync()).status;
+    if (status === 'granted') return 'granted';
+    if (status === 'denied') return 'denied';
+    return 'undetermined';
+  }
+
+  /**
+   * Fire the one real OS permission request. Call only from a user action
+   * (e.g. after the user accepts the in-app pre-prompt). Returns true when
+   * the grant came through.
+   */
+  async requestPermission(): Promise<boolean> {
+    const Location = this.loadLocation();
+    return (await Location.requestForegroundPermissionsAsync()).status === 'granted';
   }
 
   private async freshFix(
@@ -216,6 +244,7 @@ function withTimeout<T>(
 // --- provider seam ---------------------------------------------------------
 
 let defaultProvider: LocationProvider | null = null;
+let defaultExpoProvider: ExpoLocationProvider | null = null;
 let providerOverride: LocationProvider | null = null;
 
 /** Tests (and dev tooling) inject a fake provider here. */
@@ -228,6 +257,28 @@ export function setLocationProviderForTests(
 export function __resetLocationProviderForTests(): void {
   providerOverride = null;
   defaultProvider = null;
+  defaultExpoProvider = null;
+}
+
+/**
+ * The OS foreground-location state, read without prompting. UI-only seam for
+ * permission priming; the publish path still goes through getLocationCell()
+ * (whose ensurePermission() stays the fail-loud backstop).
+ */
+export function getLocationPermissionStatus(): Promise<LocationPermissionState> {
+  const provider =
+    defaultExpoProvider ?? (defaultExpoProvider = new ExpoLocationProvider());
+  return provider.getPermissionStatus();
+}
+
+/**
+ * Fire the real OS permission request. Call ONLY from a user action — the
+ * composer asks this after the user accepts the in-app pre-prompt.
+ */
+export function requestLocationPermission(): Promise<boolean> {
+  const provider =
+    defaultExpoProvider ?? (defaultExpoProvider = new ExpoLocationProvider());
+  return provider.requestPermission();
 }
 
 /**

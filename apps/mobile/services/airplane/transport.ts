@@ -21,7 +21,7 @@ import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
 import { getDeviceKeypair } from './identity';
 import { GattBlePort, defaultBleDeps, type BleNativeDeps } from './ble/gatt';
-import { ensureBlePermissions } from './ble/permissions';
+import { ensureBlePermissions, checkBlePermissions, requestBlePermissions } from './ble/permissions';
 
 /**
  * NetInfo is a native module. If it fails to load (not linked, Expo Go,
@@ -95,6 +95,13 @@ let netUnsub: (() => void) | null = null;
 let syncTimer: ReturnType<typeof setInterval> | null = null;
 let blePort: { port: TransportPort; close: () => Promise<void> } | null = null;
 let bleScanUnsub: (() => void) | null = null;
+/**
+ * BLE radio state. 'permission-blocked' means the OS grants are missing and
+ * the priming UI (BlePrime) owns the request; 'unavailable' means the radio
+ * failed for another reason (no BLE hardware, native lib missing).
+ */
+export type BleRadioState = 'starting' | 'on' | 'permission-blocked' | 'unavailable';
+let bleRadioState: BleRadioState = 'starting';
 
 const SYNC_INTERVAL_MS = 60_000; // re-check World status every minute when online
 
@@ -180,27 +187,24 @@ export async function startTransport(): Promise<void> {
     throw new Error('transport failed to start; running offline-only');
   }
 
-  // Bring up the BLE radio: advertise our identity, scan for mesh peers.
-  // Any failure here is non-fatal - the mesh simply runs without the radio
-  // (Nostr-only), exactly like the old no-op port behaved.
-  try {
-    const { publicKey } = await getDeviceKeypair();
-    const peerIdHex = toHex(publicKey);
-    await blePort.port.advertise(peerIdHex);
-    bleScanUnsub = await blePort.port.scan(() => {
-      // Peer registry for future UI (MeshStatus); discovery itself drives
-      // the port's auto-connect. Nothing to do per peer in v1.
-    });
-  } catch {
-    // Radio unavailable (no BLE, permissions denied, native lib missing):
-    // tear down whatever half-started and continue Nostr-only.
+  // Bring up the BLE radio only when the OS grants are already in place.
+  // The OS permission dialog NEVER fires here: permission priming (the app's
+  // own rationale UI first, OS request only on the user's action) is owned
+  // by the BlePrime UI. A missing grant just leaves the radio down — the
+  // mesh runs Nostr-only, exactly like the old no-op port behaved.
+  if (await checkBlePermissions().catch(() => false)) {
     try {
-      bleScanUnsub?.();
+      const { publicKey } = await getDeviceKeypair();
+      await bringUpBleRadio(toHex(publicKey));
+      bleRadioState = 'on';
     } catch {
-      // ignore
+      // Radio unavailable (no BLE, native lib missing): tear down whatever
+      // half-started and continue Nostr-only.
+      await tearDownBleRadio();
+      bleRadioState = 'unavailable';
     }
-    bleScanUnsub = null;
-    await blePort.port.stopAdvertise().catch(() => {});
+  } else {
+    bleRadioState = 'permission-blocked';
   }
 
   try {
@@ -210,6 +214,52 @@ export async function startTransport(): Promise<void> {
     // fall back to offline-only (BLE stub), nostr stays as started.
     netUnsub?.();
     netUnsub = null;
+  }
+}
+
+/** Advertise our identity and scan for mesh peers. Throws on radio failure. */
+async function bringUpBleRadio(peerIdHex: string): Promise<void> {
+  if (!blePort) throw new Error('ble: port not constructed');
+  await blePort.port.advertise(peerIdHex);
+  bleScanUnsub = await blePort.port.scan(() => {
+    // Peer registry for future UI (MeshStatus); discovery itself drives
+    // the port's auto-connect. Nothing to do per peer in v1.
+  });
+}
+
+/** Tear down whatever half of the radio bring-up succeeded. Never throws. */
+async function tearDownBleRadio(): Promise<void> {
+  try {
+    bleScanUnsub?.();
+  } catch {
+    // ignore
+  }
+  bleScanUnsub = null;
+  await blePort?.port.stopAdvertise().catch(() => {});
+}
+
+/** The BLE radio state for the priming UI. */
+export function getBleRadioState(): BleRadioState {
+  return bleRadioState;
+}
+
+/**
+ * Priming-aware radio enable. Call ONLY from the user's explicit action
+ * (the BlePrime dialog's Enable button): fires the real OS permission
+ * request, then brings up the radio on grant. Returns true when the radio
+ * is up. Never throws.
+ */
+export async function enableBleRadio(): Promise<boolean> {
+  if (bleRadioState === 'on') return true;
+  try {
+    if (!(await requestBlePermissions())) return false;
+    const { publicKey } = await getDeviceKeypair();
+    await bringUpBleRadio(toHex(publicKey));
+    bleRadioState = 'on';
+    return true;
+  } catch {
+    bleRadioState = 'unavailable';
+    return false;
   }
 }
 
@@ -278,6 +328,7 @@ export async function stopTransport(): Promise<void> {
   blePort = null;
   hybrid = null;
   sync = null;
+  bleRadioState = 'unavailable';
 }
 
 /** Publish a local event through all available transports. */

@@ -4,6 +4,7 @@ import {
     Easing,
     Keyboard,
     KeyboardAvoidingView,
+    Linking,
     Modal,
     Platform,
     ScrollView,
@@ -25,6 +26,10 @@ import { useI18n } from '../../src/i18n/i18nContext';
 import { DialogHost } from '../Dialog/dialogHost';
 import { dialog } from '../../src/lib/dialog';
 import { publishPost, LocationError } from '../../services/airplane/composer';
+import {
+    getLocationPermissionStatus,
+    requestLocationPermission,
+} from '../../services/airplane/location';
 
 // Airplane's post length: the protocol normalizes and caps bodies at 280 chars
 export const MAX_POST_LENGTH = 280;
@@ -156,11 +161,57 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
     // so two taps in one frame could both pass the `loading` check.
     const publishingRef = useRef(false);
 
+    // Permission priming: the OS dialog only ever fires on the user's
+    // explicit action. Our own rationale goes first; a denied grant gets
+    // clear copy and a one-tap path to Settings — never a dead end, never a
+    // repeated OS nag.
+    const showLocationDeniedDialog = () => {
+        dialog.alert(t('compose.locationDeniedTitle'), t('compose.locationPermissionDenied'), [
+            { text: t('common.cancel'), style: 'cancel' },
+            {
+                text: t('common.settings'),
+                onPress: () => Linking.openSettings(),
+            },
+        ]);
+    };
+
     const handlePublish = async () => {
         if (isPublishDisabled || loading || publishingRef.current) return;
         publishingRef.current = true;
         setLoading(true);
         try {
+            const status = await getLocationPermissionStatus();
+            if (status === 'denied') {
+                // Already denied: re-firing the OS dialog is a no-op (and on
+                // Android a repeated nag), so go straight to the Settings path.
+                showLocationDeniedDialog();
+                return;
+            }
+            if (status === 'undetermined') {
+                const accepted = await new Promise<boolean>((resolve) => {
+                    dialog.alert(
+                        t('compose.locationPrePromptTitle'),
+                        t('compose.locationPrePromptMessage'),
+                        [
+                            {
+                                text: t('compose.locationNotNow'),
+                                style: 'cancel',
+                                onPress: () => resolve(false),
+                            },
+                            {
+                                text: t('compose.locationAllow'),
+                                onPress: () => resolve(true),
+                            },
+                        ],
+                    );
+                });
+                if (!accepted) return;
+                if (!(await requestLocationPermission())) {
+                    // Denied at the OS dialog: same graceful exit, no re-ask.
+                    showLocationDeniedDialog();
+                    return;
+                }
+            }
             const eventId = await publishPost(text, {});
             dialog.toast(t('compose.posted'));
             onPublished?.(eventId);

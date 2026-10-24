@@ -34,17 +34,24 @@ interface SetupProps {
 // Two phases: the boot splash (device identity load-or-generate, store init)
 // first, then 2-3 swipeable anonymous-onboarding cards ending in a single Start
 // button. There is no login, no account, no permissions begging - the
-// Bluetooth/location rationale lives inline on card 1 as the designated
-// pre-prompt copy for when the OS permission dialog is wired (the mesh radio
-// is a P2/P3 roadmap item; no BLE stack or OS prompt exists in v1, so nothing
-// here may claim the OS prompts on this screen). The index route decides when
-// to show Setup and uses onboardingStatus to show it once.
+// Bluetooth/location rationale lives inline on card 1 as the pre-prompt copy
+// for the real permission flows: location is primed on the publish path
+// (composeModal asks first, the OS dialog only fires on the user's action),
+// and the BLE stack is still a no-op in v1 (P2/P3 roadmap), so nothing here
+// may claim the OS prompts on this screen. The index route decides when to
+// show Setup and uses onboardingStatus to show it once.
 const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false }) => {
   const { type, coat } = useTheme();
   const { t, dict } = useI18n();
   const styles = useThemedStyles(makeStyles);
   const [booted, setBooted] = useState(false);
   const [card, setCard] = useState(0);
+  // Guards the async Start press: storage is idempotent, but without this a
+  // rapid double-tap would fire onDone twice with no feedback in between.
+  // Declared above the `if (!booted)` early return on purpose: hooks must run
+  // in the same order on every render (a conditional useState after an early
+  // return throws "Rendered more hooks than during the previous render").
+  const [finishing, setFinishing] = useState(false);
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const scroller = useRef<ScrollView>(null);
@@ -106,9 +113,6 @@ const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false })
 
   // Explainer: swipeable cards with pager dots and a single Next/Start button
   const isLast = card === EXPLAINER_CARDS.length - 1;
-  // Guards the async Start press: storage is idempotent, but without this a
-  // rapid double-tap would fire onDone twice with no feedback in between.
-  const [finishing, setFinishing] = useState(false);
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const page = Math.round(event.nativeEvent.contentOffset.x / width);

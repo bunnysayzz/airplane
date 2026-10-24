@@ -67,7 +67,12 @@ module.exports = {
       displayName: 'mobile-services',
       testEnvironment: 'node',
       rootDir: path.join(rootDir, 'apps', 'mobile'),
-      testMatch: ['<rootDir>/services/**/*.test.ts'],
+      testMatch: [
+        '<rootDir>/services/**/*.test.ts',
+        // First-launch onboarding gating is UI-adjacent but pure async
+        // storage; it runs in the node harness with AsyncStorage mocked.
+        '<rootDir>/screens/Setup/*.test.ts',
+      ],
       moduleNameMapper: {
         '^@airplane/([^/]+)$': path.join(rootDir, 'packages', '$1', 'src'),
         '^@react-native-community/netinfo$': path.join(rootDir, '__mocks__', '@react-native-community', 'netinfo.ts'),
