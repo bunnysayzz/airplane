@@ -61,7 +61,7 @@ Sideload-first — the threat model includes store takedowns, so stores are not 
 
 **Android:** install the APK from [GitHub Releases](https://github.com/bunnysayzz/airplane/releases). Current known-good build:
 
-- **v0.1.7-prod** — [`airplane-v0.1.7-prod-gradle-test.apk`](https://github.com/bunnysayzz/airplane/releases/download/v0.1.7-prod/airplane-v0.1.7-prod-gradle-test.apk)
+- **v0.1.7** — [`airplane-v0.1.7.apk`](https://github.com/bunnysayzz/airplane/releases/download/v0.1.7/airplane-v0.1.7.apk)
 
 Android will warn about unknown sources; that is expected for a sideloaded app. Import the releases page in [Obtainium](https://obtainium.imranr98.com/) for updates. Install only from the official releases page — never from forwarded files or mirrors you cannot verify.
 
