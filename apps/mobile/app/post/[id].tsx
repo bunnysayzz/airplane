@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { router, useLocalSearchParams } from 'expo-router';
 import Thread from '../../screens/Thread/thread';
-import { listFeedPosts } from '../../services/airplane/feed';
+import { getPostCardById } from '../../services/airplane/feed';
 import type { PostCardModel } from '../../services/airplane/types';
 
 export default function PostScreen() {
@@ -11,13 +11,15 @@ export default function PostScreen() {
 
     useEffect(() => {
         let alive = true;
-        // v1 has no thread query (no replies in the protocol): load recent posts and
-        // hand Thread the one that matches. Thread highlights postId; until replies
-        // exist it shows the single post.
-        listFeedPosts({ cells: [], limit: 200 })
-            .then(all => {
+        // v1 has no thread query (no replies in the protocol): load the tapped
+        // post directly by id. A cell-scoped feed query must NOT be used here:
+        // both stores match `cells` as a set, so the old `cells: []` query
+        // matched nothing and every tap rendered "This post could not be
+        // found" even though the post was in the store.
+        getPostCardById(id ?? '')
+            .then(card => {
                 if (alive) {
-                    setPosts(all.filter(post => post.eventId === id));
+                    setPosts(card ? [card] : []);
                     setLoading(false);
                 }
             })

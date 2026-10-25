@@ -6,8 +6,8 @@
 // PostCardModel the card UI consumes. Relative-time formatting stays in the
 // card; this layer keeps the raw `createdAtMs` timestamp.
 
-import { toHex, type FeedPost } from '@airplane/protocol';
-import type { ListFeedOpts } from '@airplane/storage';
+import { EVENT_KIND_POST, toHex, type FeedPost } from '@airplane/protocol';
+import { DEFAULT_RETENTION_SEC, rankScore, type ListFeedOpts } from '@airplane/storage';
 import type { PostCardModel } from './types';
 import { getStore } from './store';
 
@@ -70,6 +70,41 @@ export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[
     }),
   );
   return cards;
+}
+
+/**
+ * Detail-screen lookup: fetch one post card by event id hex, with NO cell
+ * scoping. This is what the post-detail route must use — never a cell-scoped
+ * feed query. The v0.1.3 feed fix taught this the hard way: both stores
+ * match `cells` as a set, so an empty cell list matches NOTHING, and the
+ * old detail route passed `cells: []`, which turned every tap into
+ * "This post could not be found" even though the post was in the store.
+ * A tapped post was visible in the feed a moment ago, so its cell is
+ * irrelevant here; looking it up directly also keeps tap-to-read working
+ * when location permission/GPS flakes at tap time.
+ *
+ * Returns null for a malformed id, an unknown id, a non-post event, or an
+ * expired post (same retention window the stores apply). Tombstone caveat:
+ * getEvent does not surface the store's deleted flag, so a post whose
+ * tombstone arrived after it left the feed can still resolve here once;
+ * the feed itself hides it on next load. That staleness window is accepted
+ * over the previous behaviour (no tap ever resolving).
+ */
+export async function getPostCardById(eventId: string): Promise<PostCardModel | null> {
+  if (!/^[0-9a-fA-F]{64}$/.test(eventId)) return null;
+  const id = eventId.toLowerCase();
+  const store = getStore();
+  const event = await store.getEvent(id);
+  if (!event || event.kind !== EVENT_KIND_POST) return null;
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (event.created_at + DEFAULT_RETENTION_SEC <= nowSec) return null;
+  const views = await store.countViews(id);
+  const ageHours = Math.max(0, (nowSec - event.created_at) / 3600);
+  const worldConfirmed = await store.isWorldConfirmed(id);
+  return toPostCardModel(
+    { event, views, score: rankScore(views, ageHours), ageHours },
+    worldConfirmed,
+  );
 }
 
 // --- feed change notifications --------------------------------------------
