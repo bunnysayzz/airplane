@@ -55,6 +55,7 @@ export default function FeedTab() {
                 cells={cells}
                 onPostPress={eventId => router.push(`/post/${eventId}`)}
                 onComposePress={openCompose}
+                onMessage={authorPubkeyHex => router.push(`/dm/${authorPubkeyHex}`)}
             />
         </View>
     );

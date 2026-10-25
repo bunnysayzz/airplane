@@ -19,6 +19,8 @@ export interface PostCardModel {
   score: number;
   /** True when the post's event ID has been confirmed on a Nostr relay. */
   worldConfirmed: boolean;
+  /** Author mesh pubkey hex (DM address). Absent for synthetic/test cards. */
+  authorPubkeyHex?: string;
   // --- STAR MVP (delimited; merge-safe: additive fields only) ---
   /** Distinct starrers seen for this post (per-node partial view). */
   stars: number;

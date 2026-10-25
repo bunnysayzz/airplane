@@ -7,7 +7,7 @@
 // count. Views are the hero stat - this product ranks by views, so there are
 // deliberately no hearts, reposts, bookmarks or follow buttons.
 import React from 'react';
-import { Text } from 'react-native';
+import { Pressable, Text } from 'react-native';
 import { Post } from './ui/post';
 import { EyeIcon } from './ui/eyeIcon';
 import { useTheme } from '../src/theme/themeContext';
@@ -30,6 +30,8 @@ export interface PostCardModel {
   score: number;
   /** true when confirmed on a Nostr relay (World) */
   worldConfirmed: boolean;
+  /** Author mesh pubkey hex (DM address). Absent for synthetic/test cards. */
+  authorPubkeyHex?: string;
   // --- STAR MVP (delimited; merge-safe: additive fields only) ---
   /** Distinct starrers seen for this post (per-node partial view). */
   stars?: number;
@@ -44,6 +46,8 @@ export interface PostCardProps {
   onPress?: (eventId: string) => void;
   /** STAR MVP: fired when the star button is tapped (feed/detail wire it). */
   onStar?: (eventId: string) => void;
+  /** DM P1: open a DM with the post author. Only rendered when the author key is known. */
+  onMessage?: (authorPubkeyHex: string) => void;
 }
 
 /**
@@ -67,8 +71,8 @@ export function timeAgo(createdAtMs: number, nowMs: number = Date.now()): string
   return `${Math.floor(d / 365)}y`;
 }
 
-export function PostCardInner({ post, onPress, onStar }: PostCardProps) {
-  const { type } = useTheme();
+export function PostCardInner({ post, onPress, onStar, onMessage }: PostCardProps) {
+  const { type, colors } = useTheme();
 
   return (
     <Post
@@ -95,6 +99,15 @@ export function PostCardInner({ post, onPress, onStar }: PostCardProps) {
       <Post.Body>{post.body}</Post.Body>
       <Post.Footer>
         <Post.Stat icon={EyeIcon} value={formatCompact(post.views)} />
+        {onMessage && post.authorPubkeyHex ? (
+          <Pressable
+            onPress={() => onMessage(post.authorPubkeyHex as string)}
+            accessibilityRole="button"
+            accessibilityLabel={`Message ${post.authorLabel}`}
+          >
+            <Text style={[type.meta, { color: colors.accentText }]}>Message</Text>
+          </Pressable>
+        ) : null}
         {/* --- STAR MVP (delimited) --- */}
         <Post.Stat
           active={post.starredByMe ?? false}

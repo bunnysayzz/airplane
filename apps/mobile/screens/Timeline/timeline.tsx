@@ -33,13 +33,15 @@ interface TimelineProps {
     onPostPress?: (eventId: string) => void;
     // Opens the compose sheet (wired by the tab that hosts the timeline).
     onComposePress?: () => void;
+    // DM P1: open a DM with a post author.
+    onMessage?: (authorPubkeyHex: string) => void;
 }
 
 const PAGE_LIMIT = 50;
 
 // Single-feed timeline: no feed pills, just the unified hybrid feed
 // (BLE mesh + Nostr relays, deduplicated).
-const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress }) => {
+const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress, onMessage }) => {
     const { colors, type } = useTheme();
     const styles = useThemedStyles(makeStyles);
     const { t, tn } = useI18n();
@@ -161,9 +163,9 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress 
     // (pendingCount, refreshing) re-renders every card.
     const renderItem = useCallback(
         ({ item }: { item: PostCardModel }) => (
-            <PostCard post={item} onPress={onPostPress} onStar={handleStar} />
+            <PostCard post={item} onPress={onPostPress} onStar={handleStar} onMessage={onMessage} />
         ),
-        [onPostPress, handleStar]
+        [onPostPress, handleStar, onMessage]
     );
 
     return (

@@ -52,6 +52,7 @@ export default function PostScreen() {
             onBack={goBack}
             onPostPress={eventId => router.push(`/post/${eventId}`)}
             onStar={handleStar}
+            onMessage={authorPubkeyHex => router.push(`/dm/${authorPubkeyHex}`)}
         />
     );
 }

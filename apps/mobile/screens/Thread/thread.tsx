@@ -23,9 +23,10 @@ interface ThreadProps {
     onPostPress?: (eventId: string) => void;
     /** STAR MVP: fired when a card's star button is tapped. */
     onStar?: (eventId: string) => void;
+    onMessage?: (authorPubkeyHex: string) => void;
 }
 
-export default function Thread({ postId, posts, loading = false, refreshing = false, onRefresh, onBack, onPostPress, onStar }: ThreadProps) {
+export default function Thread({ postId, posts, loading = false, refreshing = false, onRefresh, onBack, onPostPress, onStar, onMessage }: ThreadProps) {
     const { colors, type } = useTheme();
     const insets = useSafeAreaInsets();
     const { t } = useI18n();
@@ -95,7 +96,7 @@ export default function Thread({ postId, posts, loading = false, refreshing = fa
                                     },
                                 ]}
                             >
-                                <PostCard post={item} onPress={onPostPress} onStar={onStar} />
+                                <PostCard post={item} onPress={onPostPress} onStar={onStar} onMessage={onMessage} />
                             </View>
                         );
                     }}

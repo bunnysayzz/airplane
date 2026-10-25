@@ -86,6 +86,7 @@ export function toPostCardModel(
     eventId: toHex(post.event.id),
     createdAtMs: post.event.created_at * 1000,
     authorLabel: authorLabelFor(post.event.pubkey),
+    authorPubkeyHex: toHex(post.event.pubkey),
     body: post.event.content,
     geohash: post.event.geohash,
     views: post.views,
