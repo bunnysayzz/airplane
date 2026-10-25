@@ -1,4 +1,9 @@
-name: Publish test APK to Release
+# Clean-release publisher (Phase 0+1): attaches the APK (+ AAB when the build
+# run produced one) plus SHA256SUMS.txt to an EXISTING release. The release
+# itself must be created first with title "Airplane vX.Y.Z" and a real body —
+# `gh release upload` cannot set those. AAB is optional per run (older build
+# runs have no AAB artifact) and is skipped silently when absent.
+name: Publish release files
 
 on:
   workflow_dispatch:
@@ -28,13 +33,28 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: apk
 
-      - name: Upload APK to release
+      - name: Upload release files + checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
           ls -la apk
           APK=$(find apk -name '*.apk' | head -1)
-          echo "Found: $APK"
+          echo "Found APK: $APK"
           cp "$APK" "airplane-${TAG}.apk"
-          gh release upload "$TAG" "airplane-${TAG}.apk" --clobber --repo "${{ github.repository }}"
+          # AAB is optional: older build runs have no airplane-release-aab artifact.
+          gh run download "${{ inputs.run_id }}" -n airplane-release-aab -D aab --repo "${{ github.repository }}" || echo "No AAB artifact in this run, skipping."
+          if [ -d aab ] && AAB=$(find aab -name '*.aab' | head -1) && [ -n "$AAB" ]; then
+            echo "Found AAB: $AAB"
+            cp "$AAB" "airplane-${TAG}.aab"
+          fi
+          FILES="airplane-${TAG}.apk"
+          if [ -f "airplane-${TAG}.aab" ]; then FILES="$FILES airplane-${TAG}.aab"; fi
+          # Intentional word-splitting on the file list.
+          # shellcheck disable=SC2086
+          sha256sum $FILES > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          # shellcheck disable=SC2086
+          gh release upload "$TAG" $FILES SHA256SUMS.txt --clobber --repo "${{ github.repository }}"
+
+SHA: 0edb20cfebecec15b22db7bb9f7629d7bf2ce54e
