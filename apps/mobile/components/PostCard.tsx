@@ -30,11 +30,20 @@ export interface PostCardModel {
   score: number;
   /** true when confirmed on a Nostr relay (World) */
   worldConfirmed: boolean;
+  // --- STAR MVP (delimited; merge-safe: additive fields only) ---
+  /** Distinct starrers seen for this post (per-node partial view). */
+  stars?: number;
+  /** Partial-count label: "N+" when stars > 0, "" when none seen. */
+  starLabel?: string;
+  /** True when the device's own latest star state for this post is "star". */
+  starredByMe?: boolean;
 }
 
 export interface PostCardProps {
   post: PostCardModel;
   onPress?: (eventId: string) => void;
+  /** STAR MVP: fired when the star button is tapped (feed/detail wire it). */
+  onStar?: (eventId: string) => void;
 }
 
 /**
@@ -58,7 +67,7 @@ export function timeAgo(createdAtMs: number, nowMs: number = Date.now()): string
   return `${Math.floor(d / 365)}y`;
 }
 
-export function PostCardInner({ post, onPress }: PostCardProps) {
+export function PostCardInner({ post, onPress, onStar }: PostCardProps) {
   const { type } = useTheme();
 
   return (
@@ -86,6 +95,20 @@ export function PostCardInner({ post, onPress }: PostCardProps) {
       <Post.Body>{post.body}</Post.Body>
       <Post.Footer>
         <Post.Stat icon={EyeIcon} value={formatCompact(post.views)} />
+        {/* --- STAR MVP (delimited) --- */}
+        <Post.Stat
+          active={post.starredByMe ?? false}
+          tone="like"
+          value={post.starLabel ? post.starLabel : undefined}
+          onPress={onStar ? () => onStar(post.eventId) : undefined}
+          accessibilityLabel={
+            post.starredByMe ? 'Unstar this post' : 'Star this post'
+          }
+        >
+          <Text style={[type.meta, { fontSize: 14 }]}>
+            {post.starredByMe ? '★' : '☆'}
+          </Text>
+        </Post.Stat>
       </Post.Footer>
     </Post>
   );

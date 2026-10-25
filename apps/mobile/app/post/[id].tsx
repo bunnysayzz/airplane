@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { router, useLocalSearchParams } from 'expo-router';
 import Thread from '../../screens/Thread/thread';
 import { getPostCardById } from '../../services/airplane/feed';
+import { toggleStar } from '../../services/airplane/stars';
 import type { PostCardModel } from '../../services/airplane/types';
 
 export default function PostScreen() {
@@ -36,6 +37,13 @@ export default function PostScreen() {
         else router.replace('/(tabs)/feed');
     };
 
+    // STAR MVP (delimited): post-detail star button uses the same toggle.
+    const handleStar = (eventId: string) => {
+        const post = posts.find(p => p.eventId === eventId);
+        if (!post) return;
+        void toggleStar(eventId, post.geohash).catch(() => {});
+    };
+
     return (
         <Thread
             postId={id ?? ''}
@@ -43,6 +51,7 @@ export default function PostScreen() {
             loading={loading}
             onBack={goBack}
             onPostPress={eventId => router.push(`/post/${eventId}`)}
+            onStar={handleStar}
         />
     );
 }

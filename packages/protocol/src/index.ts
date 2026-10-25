@@ -6,6 +6,8 @@ export * from './events/types';
 export * from './codec/cbor';
 export * from './sign/ed25519';
 export * from './payloads/posts';
+export * from './payloads/stars';
+export * from './stars/counter';
 export * from './flood/engine';
 export * from './flood/fragment';
 export * from './transport';

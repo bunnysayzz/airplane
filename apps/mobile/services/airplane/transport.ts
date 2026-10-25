@@ -18,6 +18,8 @@ import {
 import type { SignedEvent, TransportPort, Hex64 } from '@airplane/protocol';
 import { toHex, verifyEvent } from '@airplane/protocol';
 import { getStore } from './store';
+import { EVENT_KIND_POST, EVENT_KIND_STAR } from '@airplane/protocol';
+import { applyIncomingStar, markStarPostKnown } from './stars';
 import { notifyFeedListeners } from './feed';
 import { getDeviceKeypair, crypto } from './identity';
 import { loadRelayUrls } from '../../src/lib/relays';
@@ -128,10 +130,19 @@ function stopSyncTimer(): void {
 }
 
 async function handleIncoming(event: SignedEvent): Promise<void> {
+  // STAR MVP: kind-4 events never reach the events table — its schema
+  // CHECKs kind IN (1,2,3). They go to the in-memory star counter instead
+  // (same BLE + Nostr ingress path, same event-id dedup upstream).
+  if (event.kind === EVENT_KIND_STAR) {
+    if (applyIncomingStar(event)) notifyFeedListeners();
+    return;
+  }
   const store = getStore();
   // Store the event (deduped by HybridTransport already).
   // saveEvent is idempotent.
   await store.saveEvent(event);
+  // A post arriving may release stars held pending for it.
+  if (event.kind === EVENT_KIND_POST) markStarPostKnown(toHex(event.id));
   notifyFeedListeners();
 }
 

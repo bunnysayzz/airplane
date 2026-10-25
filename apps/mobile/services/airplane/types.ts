@@ -19,4 +19,11 @@ export interface PostCardModel {
   score: number;
   /** True when the post's event ID has been confirmed on a Nostr relay. */
   worldConfirmed: boolean;
+  // --- STAR MVP (delimited; merge-safe: additive fields only) ---
+  /** Distinct starrers seen for this post (per-node partial view). */
+  stars: number;
+  /** Partial-count label: "N+" when stars > 0, "" when none seen. */
+  starLabel: string;
+  /** True when the device's own latest star state for this post is "star". */
+  starredByMe: boolean;
 }

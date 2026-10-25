@@ -9,6 +9,7 @@
 import { EVENT_KIND_POST, toHex, type FeedPost } from '@airplane/protocol';
 import { DEFAULT_RETENTION_SEC, rankScore, type ListFeedOpts } from '@airplane/storage';
 import type { PostCardModel } from './types';
+import { markStarPostKnown, resolveOwnPubkeyHex, starViewFor } from './stars';
 import { getStore } from './store';
 
 export interface FeedQueryOpts {
@@ -76,7 +77,11 @@ export function authorLabelFor(pubkey: Uint8Array): string {
 
 /** Pure mapping: protocol FeedPost -> card view-model. Unit-tested.
  * worldConfirmed is looked up from storage (not in the signed payload). */
-export function toPostCardModel(post: FeedPost, worldConfirmed = false): PostCardModel {
+export function toPostCardModel(
+  post: FeedPost,
+  worldConfirmed = false,
+  star?: { stars: number; starLabel: string; starredByMe: boolean },
+): PostCardModel {
   return {
     eventId: toHex(post.event.id),
     createdAtMs: post.event.created_at * 1000,
@@ -86,6 +91,10 @@ export function toPostCardModel(post: FeedPost, worldConfirmed = false): PostCar
     views: post.views,
     score: post.score,
     worldConfirmed,
+    // STAR MVP: display-only; ranking (score) is computed from views alone.
+    stars: star?.stars ?? 0,
+    starLabel: star?.starLabel ?? '',
+    starredByMe: star?.starredByMe ?? false,
   };
 }
 
@@ -105,12 +114,20 @@ export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[
   const store = getStore();
   const posts = await store.listFeed(storeOpts);
   const ranked = [...posts].sort((a, b) => b.score - a.score);
+  // STAR MVP: every listed post is known, so pending stars flush here too.
+  const ownHex = await resolveOwnPubkeyHex();
   // Look up World confirmation status for each post (client-side tracking).
   const cards = await Promise.all(
     ranked.map(async (p) => {
       const eventId = toHex(p.event.id);
+      markStarPostKnown(eventId);
       const worldConfirmed = await store.isWorldConfirmed(eventId);
-      return toPostCardModel(p, worldConfirmed);
+      const star = starViewFor(eventId, ownHex);
+      return toPostCardModel(p, worldConfirmed, {
+        stars: star.count,
+        starLabel: star.label,
+        starredByMe: star.starredByMe,
+      });
     }),
   );
   return cards;
@@ -145,9 +162,13 @@ export async function getPostCardById(eventId: string): Promise<PostCardModel | 
   const views = await store.countViews(id);
   const ageHours = Math.max(0, (nowSec - event.created_at) / 3600);
   const worldConfirmed = await store.isWorldConfirmed(id);
+  markStarPostKnown(id);
+  const ownHex = await resolveOwnPubkeyHex();
+  const star = starViewFor(id, ownHex);
   return toPostCardModel(
     { event, views, score: rankScore(views, ageHours), ageHours },
     worldConfirmed,
+    { stars: star.count, starLabel: star.label, starredByMe: star.starredByMe },
   );
 }
 

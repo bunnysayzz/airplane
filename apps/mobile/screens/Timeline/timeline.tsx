@@ -4,6 +4,7 @@ import { FlashList, FlashListRef } from '@shopify/flash-list';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { listFeedPosts, subscribeFeed } from '../../services/airplane/feed';
+import { toggleStar } from '../../services/airplane/stars';
 import { trackViewability } from '../../services/airplane/viewTracker';
 import type { PostCardModel } from '../../services/airplane/types';
 import { PostCard } from '../../components/PostCard';
@@ -148,11 +149,21 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress 
         );
     };
 
+    // STAR MVP (delimited): tapping a card's star toggles it; the toggle
+    // notifies feed listeners, so the list reloads with the new count.
+    const handleStar = useCallback((eventId: string) => {
+        const post = postsRef.current.find(p => p.eventId === eventId);
+        if (!post) return;
+        void toggleStar(eventId, post.geohash).catch(() => {});
+    }, []);
+
     // Memoized row renderer: without this, every Timeline state change
     // (pendingCount, refreshing) re-renders every card.
     const renderItem = useCallback(
-        ({ item }: { item: PostCardModel }) => <PostCard post={item} onPress={onPostPress} />,
-        [onPostPress]
+        ({ item }: { item: PostCardModel }) => (
+            <PostCard post={item} onPress={onPostPress} onStar={handleStar} />
+        ),
+        [onPostPress, handleStar]
     );
 
     return (

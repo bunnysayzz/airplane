@@ -9,6 +9,8 @@ export const PROTO_VER = 1;
 export const EVENT_KIND_POST = 1;
 export const EVENT_KIND_RECEIPT = 2;
 export const EVENT_KIND_TOMBSTONE = 3;
+/** STAR MVP: public endorsement interaction (new kind; old clients ignore it). */
+export const EVENT_KIND_STAR = 4;
 
 /** Default flood TTL (hops). */
 export const DEFAULT_TTL = 7;
@@ -57,7 +59,7 @@ export type Hex64 = string;
 export type UnixSec = number;
 
 /** Event kind discriminant. */
-export type EventKind = 1 | 2 | 3;
+export type EventKind = 1 | 2 | 3 | 4;
 
 /**
  * A signed protocol event. Wire encoding is the 8-position CBOR array:
@@ -71,7 +73,7 @@ export interface SignedEvent {
   pubkey: Uint8Array;
   /** Creation time, seconds since epoch. */
   created_at: UnixSec;
-  /** 1 = post, 2 = view receipt, 3 = tombstone. */
+  /** 1 = post, 2 = view receipt, 3 = tombstone, 4 = star/unstar. */
   kind: EventKind;
   /** Geohash cell at precision 5. */
   geohash: string;

@@ -13,6 +13,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import {
   EVENT_KIND_POST,
   EVENT_KIND_RECEIPT,
+  EVENT_KIND_STAR,
   EVENT_KIND_TOMBSTONE,
   GEOHASH_PRECISION,
   MAX_CONTENT_CHARS,
@@ -33,7 +34,12 @@ export class CodecError extends Error {
 }
 
 function isEventKind(n: unknown): n is EventKind {
-  return n === EVENT_KIND_POST || n === EVENT_KIND_RECEIPT || n === EVENT_KIND_TOMBSTONE;
+  return (
+    n === EVENT_KIND_POST ||
+    n === EVENT_KIND_RECEIPT ||
+    n === EVENT_KIND_TOMBSTONE ||
+    n === EVENT_KIND_STAR
+  );
 }
 
 function validGeohash(g: unknown): g is string {
@@ -112,7 +118,7 @@ export function decodeEvent(bytes: Uint8Array): SignedEvent {
     throw new CodecError('created_at must be a non-negative integer');
   }
   if (!isEventKind(kind)) {
-    throw new CodecError(`kind must be 1, 2 or 3, got ${String(kind)}`);
+    throw new CodecError(`kind must be 1, 2, 3 or 4, got ${String(kind)}`);
   }
   if (!validGeohash(geohash)) {
     throw new CodecError(`geohash must be ${GEOHASH_PRECISION} base32 chars, got ${String(geohash)}`);
