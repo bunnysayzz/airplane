@@ -17,6 +17,10 @@ const RELAY_ICON: Record<RelayState, React.ComponentProps<typeof Ionicons>['name
 // Pugdon's pill language (hairline border, soft fill, meta type). The numbers are
 // honest — peersNearby counts established BLE connections via useMeshStatus,
 // and relayState reflects whether Nostr is online (not the old hardcoded stub).
+// The pill renders dot + peer count + relay icon only: the icon (radio / cloud /
+// cloud-offline) already encodes the relay state, so the relay-state text was
+// redundant header length. The full text is preserved in the accessibilityLabel,
+// so screen-reader users lose nothing.
 export const MeshStatus: React.FC = () => {
     const { colors, type } = useTheme();
     const styles = useThemedStyles(makeStyles);
@@ -39,9 +43,6 @@ export const MeshStatus: React.FC = () => {
                 {peersLabel}
             </Text>
             <Ionicons name={RELAY_ICON[relayState]} size={13} color={colors.textSecondary} />
-            <Text style={[type.meta, styles.status]} numberOfLines={1}>
-                {relayLabel}
-            </Text>
         </View>
     );
 };
@@ -68,8 +69,5 @@ const makeStyles = (colors: ThemeColors) =>
         },
         peers: {
             color: colors.textSecondary,
-        },
-        status: {
-            color: colors.textMuted,
         },
     });
