@@ -57,4 +57,3 @@ jobs:
           # shellcheck disable=SC2086
           gh release upload "$TAG" $FILES SHA256SUMS.txt --clobber --repo "${{ github.repository }}"
 
-SHA: 0edb20cfebecec15b22db7bb9f7629d7bf2ce54e
