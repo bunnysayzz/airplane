@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Linking, Pressable, ScrollView, Text, View } from 'react-native';
+import { Linking, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSettings } from '../../src/lib/settingsContext';
@@ -8,6 +8,8 @@ import { getCoat } from '../../src/theme/coats';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
 import { Card, PugMark, SectionLabel, ThemedSwitch, logoSizes } from '../../components/ui';
 import { appVersionLabel } from '../../src/lib/appVersion';
+import { checkForUpdateFromSettings } from '../../src/lib/updateCheck';
+import { dialog } from '../../src/lib/dialog';
 import Appearance from './appearance';
 import { SettingsHeader } from './header';
 import { makeStyles } from './styles';
@@ -37,6 +39,45 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const [page, setPage] = useState<'main' | 'appearance' | 'privacy'>('main');
   const { t } = useI18n();
   const coatName = t(`coats.${getCoat(coat).key}`);
+  // T14: manual update check. Android only — a sideloaded iOS app cannot
+  // install itself, so no iOS updater is offered (see updateCheck.ts).
+  const [updateStatus, setUpdateStatus] = useState<
+    'idle' | 'checking' | 'uptodate' | 'available' | 'failed'
+  >('idle');
+  const [updateVersion, setUpdateVersion] = useState<string | null>(null);
+
+  const onCheckForUpdates = () => {
+    if (updateStatus === 'checking') return;
+    setUpdateStatus('checking');
+    checkForUpdateFromSettings()
+      .then((result) => {
+        if (result.available && result.update) {
+          // The prompt itself is shown by the check; the row just remembers it.
+          setUpdateVersion(result.update.version);
+          setUpdateStatus('available');
+        } else if (result.error) {
+          setUpdateStatus('failed');
+          dialog.toast(t('settings.updateCheckFailed'));
+        } else {
+          setUpdateStatus('uptodate');
+        }
+      })
+      .catch(() => {
+        setUpdateStatus('failed');
+        dialog.toast(t('settings.updateCheckFailed'));
+      });
+  };
+
+  const updateRowText =
+    updateStatus === 'checking'
+      ? t('settings.updateChecking')
+      : updateStatus === 'available' && updateVersion
+        ? t('settings.updateAvailable', { version: updateVersion })
+        : updateStatus === 'uptodate'
+          ? t('settings.updateUpToDate')
+          : updateStatus === 'failed'
+            ? t('settings.updateCheckFailed')
+            : '';
 
   if (page === 'appearance') {
     return (
@@ -55,7 +96,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           backLabel={t('appearance.back')}
         />
         <ScrollView
-          contentContainerStyle={[styles.contentContainer, { paddingBottom: tabBarClearance(insets.bottom) }]}
+          contentContainerStyle={[
+            styles.contentContainer,
+            { paddingBottom: tabBarClearance(insets.bottom) },
+          ]}
           showsVerticalScrollIndicator={false}
         >
           <Text style={[type.body, styles.privacyLead]}>{t('settings.privacyLead')}</Text>
@@ -88,7 +132,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       <SettingsHeader title={t('settings.title')} onBack={onBack} backLabel={t('settings.close')} />
 
       <ScrollView
-        contentContainerStyle={[styles.contentContainer, { paddingBottom: tabBarClearance(insets.bottom) }]}
+        contentContainerStyle={[
+          styles.contentContainer,
+          { paddingBottom: tabBarClearance(insets.bottom) },
+        ]}
         showsVerticalScrollIndicator={false}
       >
         <SectionLabel style={styles.sectionLabel}>{t('settings.preferences')}</SectionLabel>
@@ -127,6 +174,25 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
             <Text style={[labelStyle, styles.rowText]}>{t('settings.version')}</Text>
             <Text style={[type.meta, styles.rowValue]}>{appVersionLabel()}</Text>
           </View>
+          {Platform.OS === 'android' && (
+            <>
+              <View style={styles.divider} />
+              <Pressable
+                style={styles.row}
+                onPress={onCheckForUpdates}
+                accessibilityRole="button"
+                accessibilityLabel={t('settings.updateCheck')}
+              >
+                <Ionicons name="arrow-down-circle-outline" size={20} color={colors.accentText} />
+                <Text style={[labelStyle, styles.rowText]}>{t('settings.updateCheck')}</Text>
+                {updateRowText ? (
+                  <Text style={[type.meta, styles.rowValue]}>{updateRowText}</Text>
+                ) : (
+                  <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+                )}
+              </Pressable>
+            </>
+          )}
           <View style={styles.divider} />
           <Pressable
             style={styles.row}

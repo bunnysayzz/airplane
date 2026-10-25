@@ -28,7 +28,15 @@
       // committed and no Expo prebuild runs in CI.
       // BLE mesh radio (prod-15): SCAN/ADVERTISE/CONNECT runtime permissions;
       // runtime flow in services/airplane/ble/permissions.ts.
+      // T14 (in-app update, preparatory only): REQUEST_INSTALL_PACKAGES is
+      // the permission an in-app ACTION_INSTALL_PACKAGE flow needs, so it is
+      // declared here and mirrored in the committed AndroidManifest.xml.
+      // Declaring it installs nothing on its own — the download-to-cache +
+      // FileProvider + install-intent wiring is still pending device
+      // verification (see src/lib/updateCheck.ts), and until then the
+      // Download button hands the APK to the system downloader instead.
       "permissions": [
+        "android.permission.REQUEST_INSTALL_PACKAGES",
         "ACCESS_COARSE_LOCATION",
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_ADVERTISE",

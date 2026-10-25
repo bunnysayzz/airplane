@@ -417,6 +417,17 @@ export const en = {
     compactMode: 'Compact Mode',
     about: 'About',
     version: 'App Version',
+    updateCheck: 'Check for updates',
+    updateChecking: 'Checking…',
+    updateUpToDate: 'Up to date',
+    updateCheckFailed: 'Check failed',
+    updateAvailable: 'Update {{version}} available',
+    updateTitle: 'Update available',
+    updateMessage:
+      'Airplane {{version}} is available. Downloading opens the new APK — nothing installs automatically, and you can install it when you are ready.',
+    updateDownload: 'Download',
+    updateLater: 'Later',
+    updateOpenFailed: 'Could not open the download',
     privacy: 'Privacy Policy',
     privacyHint: 'Opens the in-app privacy policy',
     // The in-app privacy page reuses onboarding card 2; full policy is PRIVACY.md in the repo

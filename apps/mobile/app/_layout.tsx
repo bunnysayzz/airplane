@@ -7,6 +7,7 @@ import { I18nProvider, useI18n } from '../src/i18n/i18nContext';
 import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
 import { startTransport, stopTransport } from '../services/airplane';
+import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
 
 SplashScreen.preventAutoHideAsync().catch(() => {
     /* splash may already be hidden in tests */
@@ -62,8 +63,15 @@ export default function RootLayout() {
         const task = InteractionManager.runAfterInteractions(() => {
             startTransport().catch(() => {});
         });
+        // T14: update check, same deal — after first paint, fire-and-forget.
+        // A failed check, no network, or a bad response never breaks launch;
+        // the updater module resolves those to "no update" instead of throwing.
+        const updateTask = InteractionManager.runAfterInteractions(() => {
+            checkForUpdateOnLaunch().catch(() => {});
+        });
         return () => {
             task.cancel();
+            updateTask.cancel();
             // Root unmount is rare on mobile, but if it happens the NetInfo
             // listener, sync timer and relay sockets must not leak.
             stopTransport().catch(() => {});
