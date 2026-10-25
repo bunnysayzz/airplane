@@ -33,10 +33,10 @@ const Appearance: React.FC<AppearanceProps> = ({ onBack }) => {
                 {/* A sample post drawn with the live tokens; read as one element and not interactive */}
                 <Card style={styles.preview} accessible accessibilityLabel={t('appearance.previewLabel', { coat: coatName })} pointerEvents="none">
                     <View style={styles.previewAuthor}>
-                        <Avatar name="anon·a3f9" size={38} />
+                        <Avatar name="quiet fox·a3f9" size={38} />
                         <View style={styles.previewNames}>
-                            <Text style={[type.name, styles.previewName]}>anon·a3f9</Text>
-                            <Text style={[type.meta, styles.previewHandle]}>anon·a3f9</Text>
+                            <Text style={[type.name, styles.previewName]}>quiet fox·a3f9</Text>
+                            <Text style={[type.meta, styles.previewHandle]}>quiet fox·a3f9</Text>
                         </View>
                     </View>
                     <Text style={[type.body, styles.previewBody]}>

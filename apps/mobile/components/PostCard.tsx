@@ -16,7 +16,7 @@ import { formatCompact } from '../src/lib/format';
 export interface PostCardModel {
   /** hex event hash (stable key) */
   eventId: string;
-  /** e.g. "anon·a3f9" - short pseudonym, NEVER a real name/handle */
+  /** e.g. "quiet fox·a3f9" - short pseudonym, NEVER a real name/handle */
   authorLabel: string;
   /** post text */
   body: string;
