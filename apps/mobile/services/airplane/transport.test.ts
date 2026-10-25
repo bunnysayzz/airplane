@@ -1,10 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 // Transport manager lifecycle tests. WebSocket is stubbed so no real relay
 // connections are attempted; NetInfo is the repo's __mocks__ version.
+// AsyncStorage is mocked so the relay list startTransport() reads is fully
+// under test control (empty store = defaults, seeded store = custom list).
+
+jest.mock('@react-native-async-storage/async-storage', () => {
+  const store = new Map<string, string>();
+  return {
+    __esModule: true,
+    default: {
+      getItem: jest.fn(async (key: string) => (store.has(key) ? (store.get(key) as string) : null)),
+      setItem: jest.fn(async (key: string, value: string) => {
+        store.set(key, value);
+      }),
+      removeItem: jest.fn(async (key: string) => {
+        store.delete(key);
+      }),
+      // Test-only seams.
+      __clear: () => store.clear(),
+      __setRaw: (key: string, value: string) => store.set(key, value),
+    },
+  };
+});
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const AsyncStorageMock = require('@react-native-async-storage/async-storage').default as {
+  __clear: () => void;
+  __setRaw: (key: string, value: string) => void;
+};
 
 import NetInfo from '@react-native-community/netinfo';
 import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests, __getHybridForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus } from './transport';
 import { getStore, __resetStoreForTests } from './store';
+import { DEFAULT_RELAYS, RELAYS_KEY } from '../../src/lib/relays';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const RN = require('react-native') as {
@@ -59,6 +87,7 @@ describe('transport manager', () => {
     netInfoMock.addEventListener.mockReturnValue(jest.fn());
     __resetStoreForTests();
     __resetNetInfoForTests();
+    AsyncStorageMock.__clear();
     jest.useFakeTimers();
   });
 
@@ -76,6 +105,25 @@ describe('transport manager', () => {
     await startTransport();
     expect(netInfoMock.addEventListener).toHaveBeenCalledTimes(1);
     expect(typeof netInfoMock.addEventListener.mock.calls[0][0]).toBe('function');
+  });
+
+  test('startTransport connects to the default relays when nothing is customized', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    expect(hybrid!.nostr.relayUrls).toEqual(DEFAULT_RELAYS);
+    expect(FakeSocket.instances.map((s) => s.url)).toEqual(DEFAULT_RELAYS);
+  });
+
+  test('startTransport uses a persisted custom relay list for the World uplink', async () => {
+    AsyncStorageMock.__setRaw(RELAYS_KEY, JSON.stringify(['wss://custom.relay']));
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    // The Nostr client itself was built with the custom list, so publish /
+    // WorldSync traffic goes to the custom relay, not the defaults.
+    expect(hybrid!.nostr.relayUrls).toEqual(['wss://custom.relay']);
+    expect(FakeSocket.instances.map((s) => s.url)).toEqual(['wss://custom.relay']);
   });
 
   test('startTransport is idempotent - second call is a no-op', async () => {

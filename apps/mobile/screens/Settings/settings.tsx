@@ -11,6 +11,7 @@ import { appVersionLabel } from '../../src/lib/appVersion';
 import { checkForUpdateFromSettings } from '../../src/lib/updateCheck';
 import { dialog } from '../../src/lib/dialog';
 import Appearance from './appearance';
+import Relays from './relays';
 import { SettingsHeader } from './header';
 import { makeStyles } from './styles';
 import { useI18n } from '../../src/i18n/i18nContext';
@@ -35,8 +36,8 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const styles = useThemedStyles(makeStyles);
   const insets = useSafeAreaInsets();
   const { compactMode, setCompactMode } = useSettings();
-  // Appearance and the privacy explainer are second levels inside Settings
-  const [page, setPage] = useState<'main' | 'appearance' | 'privacy'>('main');
+  // Appearance, Relays and the privacy explainer are second levels inside Settings
+  const [page, setPage] = useState<'main' | 'appearance' | 'relays' | 'privacy'>('main');
   const { t } = useI18n();
   const coatName = t(`coats.${getCoat(coat).key}`);
   // T14: manual update check. Android only — a sideloaded iOS app cannot
@@ -83,6 +84,14 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     return (
       <SafeAreaView style={styles.safeArea}>
         <Appearance onBack={() => setPage('main')} />
+      </SafeAreaView>
+    );
+  }
+
+  if (page === 'relays') {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <Relays onBack={() => setPage('main')} />
       </SafeAreaView>
     );
   }
@@ -154,6 +163,18 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
               <Text style={[type.meta, styles.rowValue]}>{coatName}</Text>
               <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
             </View>
+          </Pressable>
+          <View style={styles.divider} />
+          <Pressable
+            style={styles.row}
+            onPress={() => setPage('relays')}
+            accessibilityRole="button"
+            accessibilityLabel={t('settings.relaysTitle')}
+            accessibilityHint={t('settings.relaysHint')}
+          >
+            <Ionicons name="globe-outline" size={20} color={colors.accentText} />
+            <Text style={[labelStyle, styles.rowText]}>{t('settings.relaysTitle')}</Text>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
           </Pressable>
           <View style={styles.divider} />
           <View style={styles.row}>

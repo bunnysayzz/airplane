@@ -20,6 +20,7 @@ import { toHex } from '@airplane/protocol';
 import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
 import { getDeviceKeypair } from './identity';
+import { loadRelayUrls } from '../../src/lib/relays';
 import { addBreadcrumb } from '../../src/sentry';
 import { GattBlePort, defaultBleDeps, type BleNativeDeps } from './ble/gatt';
 import { ensureBlePermissions, checkBlePermissions, requestBlePermissions } from './ble/permissions';
@@ -159,13 +160,12 @@ export async function startTransport(): Promise<void> {
 
   blePort = makeBlePort();
   const ble = new BleTransport(blePort.port);
+  // Relay list is user-configurable in Settings > Relays and persisted in
+  // AsyncStorage (src/lib/relays.ts). loadRelayUrls() already falls back to
+  // the default public relays when nothing is stored — and never throws —
+  // so a storage failure here just means the defaults, never a dead uplink.
   hybrid = new HybridTransport(ble, {
-    // Default public relays; TODO: make configurable in settings.
-    relays: [
-      'wss://relay.damus.io',
-      'wss://nos.lol',
-      'wss://relay.nostr.band',
-    ],
+    relays: await loadRelayUrls(),
   });
   sync = new WorldSync(hybrid.nostr, {
     markWorldConfirmed: (id: Hex64) => getStore().markWorldConfirmed(id),

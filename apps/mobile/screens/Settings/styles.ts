@@ -209,3 +209,87 @@ export const makeAppearanceStyles = (colors: ThemeColors) =>
       color: colors.textMuted,
     },
   });
+
+export const makeRelayStyles = (colors: ThemeColors) =>
+  StyleSheet.create({
+    content: {
+      paddingHorizontal: space.lg,
+      paddingTop: space.xs,
+      gap: space.sm,
+    },
+    sectionLabel: {
+      marginTop: space.md,
+      marginHorizontal: space.xs,
+    },
+    lead: {
+      color: colors.textSecondary,
+      marginTop: space.md,
+      marginHorizontal: space.xs,
+    },
+    restartNote: {
+      color: colors.textMuted,
+      marginHorizontal: space.xs,
+    },
+    group: {
+      overflow: 'hidden',
+    },
+    row: {
+      minHeight: 54,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: space.md,
+      paddingVertical: 10,
+      paddingHorizontal: space.lg,
+    },
+    rowText: {
+      flex: 1,
+      color: colors.textPrimary,
+    },
+    divider: {
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: colors.borderColor,
+      marginHorizontal: space.lg,
+    },
+    empty: {
+      color: colors.textMuted,
+      padding: space.lg,
+    },
+    addRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: space.md,
+      padding: space.md,
+    },
+    input: {
+      flex: 1,
+      color: colors.textPrimary,
+      backgroundColor: colors.inputBackground,
+      borderRadius: radii.input,
+      paddingHorizontal: space.md,
+      paddingVertical: space.md,
+    },
+    addButton: {
+      backgroundColor: colors.accentColor,
+      borderRadius: radii.input,
+      paddingHorizontal: space.lg,
+      paddingVertical: space.md,
+    },
+    addButtonDisabled: {
+      opacity: 0.5,
+    },
+    addButtonText: {
+      color: colors.buttonTextColor,
+    },
+    error: {
+      color: colors.dangerColor,
+      paddingHorizontal: space.lg,
+      paddingBottom: space.md,
+    },
+    resetRow: {
+      alignItems: 'center',
+      paddingVertical: space.md,
+    },
+    resetText: {
+      color: colors.accentText,
+    },
+  });

@@ -434,6 +434,18 @@ export const en = {
     privacyLead:
       'The short, honest version. Nobody can identify you here, but nothing you write is hidden.',
     privacyFullPolicy: 'Read the full privacy policy (PRIVACY.md)',
+    relaysTitle: 'Relays',
+    relaysHint: 'Opens relay settings',
+    relaysLead:
+      'Relays carry your posts to the wider network. These are the ones Airplane publishes to when you are online.',
+    relaysRestartNote: 'Changes apply the next time the app starts.',
+    relaysList: 'Relay list',
+    relaysEmpty: 'No relays. Your posts will not reach the wider network until you add one.',
+    relaysAdd: 'Add relay',
+    relaysPlaceholder: 'wss://relay.example.com',
+    relaysInvalid: 'Enter a valid relay URL starting with wss://, or one already in the list.',
+    relaysRemove: 'Remove {{url}}',
+    relaysReset: 'Reset to default relays',
   },
   appearance: {
     title: 'Appearance',

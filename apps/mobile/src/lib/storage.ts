@@ -19,3 +19,7 @@ export async function getStringSetting(key: string, defaultValue: string): Promi
     const val = await AsyncStorage.getItem(key);
     return val !== null ? val : defaultValue;
 }
+
+export async function removeSetting(key: string) {
+    await AsyncStorage.removeItem(key);
+}
