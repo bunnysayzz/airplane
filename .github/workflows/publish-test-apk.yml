@@ -36,5 +36,5 @@ jobs:
           ls -la apk
           APK=$(find apk -name '*.apk' | head -1)
           echo "Found: $APK"
-          cp "$APK" "airplane-${TAG}-gradle-test.apk"
-          gh release upload "$TAG" "airplane-${TAG}-gradle-test.apk" --clobber --repo "${{ github.repository }}"
+          cp "$APK" "airplane-${TAG}.apk"
+          gh release upload "$TAG" "airplane-${TAG}.apk" --clobber --repo "${{ github.repository }}"
