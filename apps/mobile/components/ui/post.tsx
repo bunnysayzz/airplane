@@ -47,7 +47,7 @@
  * ```tsx
  * <Post>
  *   <Post.Header>
- *     <Post.Author name="anon·a3f9" handle="#tdr1v" timestamp="3m" />
+ *     <Post.Author name="quiet fox·a3f9" handle="#tdr1v" timestamp="3m" />
  *     <Post.Action><Text>🌍 world</Text></Post.Action>
  *   </Post.Header>
  *   <Post.Body>mesh post body, #hashtags highlighted</Post.Body>
@@ -309,7 +309,7 @@ function isType(child: ReactNode, type: unknown): boolean {
 
 export interface PostAuthorProps extends Omit<ViewProps, 'children' | 'style'> {
   style?: StyleProp<ViewStyle>;
-  /** Display name - in Airplane, a short pseudonym like "anon·a3f9". */
+  /** Display name - in Airplane, a short pseudonym like "quiet fox·a3f9". */
   name: string;
   /** Origin tag, e.g. "#tdr1v". Shown under the name in `feed`. */
   handle?: string;

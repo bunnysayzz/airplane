@@ -85,7 +85,7 @@ export const en = {
       card2Title: 'Public posts. Anonymous people.',
       card2Body: 'Everyone nearby can read what you post. Nobody knows it’s you.',
       card2Identity:
-        'There are no accounts, no names, no phone numbers - just a random tag like anon·a3f9 that marks posts as yours.',
+        'There are no accounts, no names, no phone numbers - just a memorable tag like quiet fox·a3f9 that marks posts as yours.',
       card2World: 'Posts may reach the wider network through other phones. A tiny globe marks posts that made it out.',
       card3Title: 'Views decide what rises',
       card3Body: 'No likes. No followers. The more a post is seen, the higher it climbs the feed.',

@@ -71,7 +71,8 @@ describe('toPostCardModel', () => {
     const card = toPostCardModel(feedPostOf(e, 7, 0.123));
     expect(card.eventId).toBe(toHex(e.id));
     expect(card.createdAtMs).toBe(e.created_at * 1000);
-    expect(card.authorLabel).toBe('anon·' + toHex(e.pubkey).slice(0, 4));
+    expect(card.authorLabel).toBe(authorLabelFor(e.pubkey));
+    expect(card.authorLabel).toMatch(/^[a-z]+ [a-z]+·[0-9a-f]{4}$/);
     expect(card.body).toBe('mesh post');
     expect(card.geohash).toBe('tdr1v');
     expect(card.views).toBe(7);
@@ -87,10 +88,36 @@ describe('toPostCardModel', () => {
 });
 
 describe('authorLabelFor', () => {
-  it('is anon + first 4 hex chars', () => {
+  it('is "<adjective> <noun>·<first 4 hex of pubkey>"', () => {
     const kp = crypto.generateKeypair();
-    expect(authorLabelFor(kp.publicKey)).toBe('anon·' + toHex(kp.publicKey).slice(0, 4));
-    expect(authorLabelFor(kp.publicKey)).toMatch(/^anon·[0-9a-f]{4}$/);
+    const label = authorLabelFor(kp.publicKey);
+    expect(label).toMatch(/^[a-z]+ [a-z]+·[0-9a-f]{4}$/);
+    expect(label.endsWith('·' + toHex(kp.publicKey).slice(0, 4))).toBe(true);
+  });
+
+  it('is stable: the same identity always maps to the same name', () => {
+    const kp = crypto.generateKeypair();
+    expect(authorLabelFor(kp.publicKey)).toBe(authorLabelFor(kp.publicKey));
+    // Re-deriving from the same bytes (e.g. after reload) gives the same label.
+    expect(authorLabelFor(new Uint8Array(kp.publicKey))).toBe(
+      authorLabelFor(kp.publicKey),
+    );
+  });
+
+  it('is distinctive: random identities map to distinct names', () => {
+    const labels = new Set<string>();
+    for (let i = 0; i < 200; i++) {
+      labels.add(authorLabelFor(crypto.generateKeypair().publicKey));
+    }
+    expect(labels.size).toBe(200);
+  });
+
+  it('keeps the suffix recognizable across the old scheme', () => {
+    // The old "anon·xxxx" suffix was the pubkey prefix; the new scheme keeps
+    // exactly that suffix, so an author known as anon·a3f9 is still ·a3f9.
+    const kp = crypto.generateKeypair();
+    const oldSuffix = toHex(kp.publicKey).slice(0, 4);
+    expect(authorLabelFor(kp.publicKey)).toContain('·' + oldSuffix);
   });
 });
 
@@ -206,7 +233,7 @@ describe('listFeedPosts', () => {
     expect(cards.map((c) => c.eventId)).toEqual([a, b]);
     expect(cards[0].views).toBeGreaterThanOrEqual(1);
     expect(cards[1].worldConfirmed).toBe(false);
-    expect(cards[0].authorLabel).toMatch(/^anon·[0-9a-f]{4}$/);
+    expect(cards[0].authorLabel).toMatch(/^[a-z]+ [a-z]+·[0-9a-f]{4}$/);
   });
 
   it('scopes by cell and applies the before cursor', async () => {

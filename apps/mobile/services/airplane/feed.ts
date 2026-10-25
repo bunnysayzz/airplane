@@ -25,9 +25,53 @@ export interface FeedQueryOpts {
 
 const DEFAULT_LIMIT = 50;
 
-/** "anon·" + first 4 hex chars of the author pubkey. */
+/**
+ * Anonymous author display names: "<adjective> <noun>·<4 hex>", e.g.
+ * "quiet fox·a3f9". Display-only: the author identity stays the pubkey
+ * (event.pubkey / event id are untouched) and nothing ever parses the
+ * label back into an identity.
+ *
+ * Why this shape: the old "anon·xxxx" carried only 4 hex chars (16 bits,
+ * ~65k combinations), so collisions were routine in any real feed and every
+ * avatar initial was "A". The words come from pubkey bytes 2 and 3 while
+ * the suffix keeps the pubkey's first 4 hex chars (the same suffix as
+ * before, so an author stays recognizable across the change) — that gives
+ * 64 x 64 x 65536 = ~268M combinations, and the words make authors
+ * memorable while the suffix still disambiguates word collisions.
+ *
+ * Anonymity: the label is a deterministic function of the already-public
+ * pubkey (every event carries it), so it reveals nothing beyond the
+ * pubkey itself. Ed25519 pubkeys are effectively uniform random, and 256
+ * is divisible by 64, so the word picks are unbiased. Same pubkey always
+ * maps to the same label, so repeat authors stay recognizable.
+ */
+const NAME_ADJECTIVES = [
+  'amber', 'arctic', 'autumn', 'azure', 'bold', 'brave', 'bright', 'calm',
+  'cedar', 'clever', 'cobalt', 'copper', 'coral', 'crimson', 'crisp', 'daring',
+  'dawn', 'deep', 'dusky', 'eager', 'ember', 'emerald', 'faint', 'fierce',
+  'fleet', 'frosty', 'gentle', 'golden', 'granite', 'happy', 'hazy', 'hidden',
+  'hollow', 'honest', 'ivory', 'jade', 'joyful', 'keen', 'kind', 'leafy',
+  'lively', 'lone', 'lucid', 'lunar', 'mellow', 'merry', 'misty', 'moonlit',
+  'nimble', 'noble', 'ocean', 'opal', 'pastel', 'patient', 'pearl', 'pine',
+  'placid', 'proud', 'quiet', 'rapid', 'regal', 'river', 'rocky', 'royal',
+];
+
+const NAME_NOUNS = [
+  'fox', 'wolf', 'owl', 'bear', 'deer', 'hawk', 'otter', 'badger',
+  'raven', 'falcon', 'heron', 'moose', 'bison', 'coyote', 'lynx', 'panda',
+  'koala', 'tiger', 'eagle', 'sparrow', 'robin', 'wren', 'finch', 'crow',
+  'dove', 'goose', 'swan', 'duck', 'crane', 'elk', 'hare', 'mole',
+  'vole', 'shrew', 'bat', 'mouse', 'rabbit', 'squirrel', 'chipmunk', 'beaver',
+  'mink', 'weasel', 'ferret', 'stoat', 'marten', 'sable', 'jaguar', 'leopard',
+  'cheetah', 'panther', 'cougar', 'bobcat', 'ocelot', 'yak', 'ibex', 'chamois',
+  'oryx', 'gazelle', 'zebra', 'lion', 'camel', 'donkey', 'goat', 'sheep',
+];
+
+/** Stable, anonymous display name for an author pubkey. */
 export function authorLabelFor(pubkey: Uint8Array): string {
-  return 'anon·' + toHex(pubkey).slice(0, 4);
+  const adjective = NAME_ADJECTIVES[(pubkey[2] ?? 0) % NAME_ADJECTIVES.length];
+  const noun = NAME_NOUNS[(pubkey[3] ?? 0) % NAME_NOUNS.length];
+  return `${adjective} ${noun}·${toHex(pubkey).slice(0, 4)}`;
 }
 
 /** Pure mapping: protocol FeedPost -> card view-model. Unit-tested.

@@ -24,7 +24,7 @@ Treat every post like a flyer pinned to a public noticeboard: assume the content
 
 ## What is protected
 
-- **Your identity.** There are no accounts. Your posts carry only a random pseudonym (like `anon·a3f9`) — no name, no phone number, no device identifier you can recognize.
+- **Your identity.** There are no accounts. Your posts carry only a random pseudonym (like `quiet fox·a3f9`) — no name, no phone number, no device identifier you can recognize.
 - **No surveillance surface.** No analytics, no crash-reporting with identifiers, no ads, no trackers, no server logs about you — because there is no Airplane server to log on.
 - **No silent uplink.** The World feed is per-post and opt-in. A post never goes global unless you flip the switch on that post. The default is local mesh only.
 
