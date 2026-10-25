@@ -158,4 +158,3 @@ jobs:
           path: apps/mobile/android/app/build/outputs/bundle/release/app-release.aab
           if-no-files-found: error
 
-SHA: f52f643bdf5b5f9e704756add8a3cc744bb6b070
