@@ -20,5 +20,15 @@ export {
 } from './viewTracker';
 export { getDeviceKeypair, setKeyStore, crypto, type DeviceKeypair } from './identity';
 export { getStore } from './store';
+// --- RESHARE (delimited) ---
+export {
+  recordReshareEvent,
+  markResharePostKnown,
+  getReshareCluster,
+  resharerLabelFor,
+  toggleReshare,
+  getMyPubkeyHex,
+  reshareViewFor,
+} from './reshares';
 export { getKv } from './kv';
 export { startTransport, stopTransport, publishViaTransport } from './transport';

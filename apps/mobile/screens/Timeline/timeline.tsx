@@ -3,7 +3,8 @@ import { ActivityIndicator, Pressable, RefreshControl, Text, View } from 'react-
 import { FlashList, FlashListRef } from '@shopify/flash-list';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { listFeedPosts, subscribeFeed } from '../../services/airplane/feed';
+import { listFeedPosts, notifyFeedListeners, subscribeFeed } from '../../services/airplane/feed';
+import { toggleReshare } from '../../services/airplane/reshares';
 import { toggleStar } from '../../services/airplane/stars';
 import { trackViewability } from '../../services/airplane/viewTracker';
 import type { PostCardModel } from '../../services/airplane/types';
@@ -163,7 +164,9 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
     // (pendingCount, refreshing) re-renders every card.
     const renderItem = useCallback(
         ({ item }: { item: PostCardModel }) => (
-            <PostCard post={item} onPress={onPostPress} onStar={handleStar} onMessage={onMessage} />
+            <PostCard post={item} onPress={onPostPress} onStar={handleStar} onMessage={onMessage} onReshare={() => {
+                void toggleReshare(item).then(() => notifyFeedListeners());
+            }} />
         ),
         [onPostPress, handleStar, onMessage]
     );

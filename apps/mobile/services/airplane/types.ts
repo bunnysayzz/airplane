@@ -21,6 +21,14 @@ export interface PostCardModel {
   worldConfirmed: boolean;
   /** Author mesh pubkey hex (DM address). Absent for synthetic/test cards. */
   authorPubkeyHex?: string;
+  // --- RESHARE (delimited) ---
+  /** partial, lower-bound reshare count seen by this device */
+  reshares: number;
+  /** true when this device's key currently reshares this post */
+  resharedByMe: boolean;
+  /** memorable anonymous label of the most recent resharer, if any */
+  latestResharerLabel?: string;
+  // --- RESHARE (delimited end) ---
   // --- STAR MVP (delimited; merge-safe: additive fields only) ---
   /** Distinct starrers seen for this post (per-node partial view). */
   stars: number;

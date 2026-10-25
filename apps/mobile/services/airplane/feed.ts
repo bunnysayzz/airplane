@@ -10,6 +10,7 @@ import { EVENT_KIND_POST, toHex, type FeedPost } from '@airplane/protocol';
 import { DEFAULT_RETENTION_SEC, rankScore, type ListFeedOpts } from '@airplane/storage';
 import type { PostCardModel } from './types';
 import { markStarPostKnown, resolveOwnPubkeyHex, starViewFor } from './stars';
+import { markResharePostKnown, reshareViewFor } from './reshares';
 import { getStore } from './store';
 
 export interface FeedQueryOpts {
@@ -46,41 +47,19 @@ const DEFAULT_LIMIT = 50;
  * is divisible by 64, so the word picks are unbiased. Same pubkey always
  * maps to the same label, so repeat authors stay recognizable.
  */
-const NAME_ADJECTIVES = [
-  'amber', 'arctic', 'autumn', 'azure', 'bold', 'brave', 'bright', 'calm',
-  'cedar', 'clever', 'cobalt', 'copper', 'coral', 'crimson', 'crisp', 'daring',
-  'dawn', 'deep', 'dusky', 'eager', 'ember', 'emerald', 'faint', 'fierce',
-  'fleet', 'frosty', 'gentle', 'golden', 'granite', 'happy', 'hazy', 'hidden',
-  'hollow', 'honest', 'ivory', 'jade', 'joyful', 'keen', 'kind', 'leafy',
-  'lively', 'lone', 'lucid', 'lunar', 'mellow', 'merry', 'misty', 'moonlit',
-  'nimble', 'noble', 'ocean', 'opal', 'pastel', 'patient', 'pearl', 'pine',
-  'placid', 'proud', 'quiet', 'rapid', 'regal', 'river', 'rocky', 'royal',
-];
-
-const NAME_NOUNS = [
-  'fox', 'wolf', 'owl', 'bear', 'deer', 'hawk', 'otter', 'badger',
-  'raven', 'falcon', 'heron', 'moose', 'bison', 'coyote', 'lynx', 'panda',
-  'koala', 'tiger', 'eagle', 'sparrow', 'robin', 'wren', 'finch', 'crow',
-  'dove', 'goose', 'swan', 'duck', 'crane', 'elk', 'hare', 'mole',
-  'vole', 'shrew', 'bat', 'mouse', 'rabbit', 'squirrel', 'chipmunk', 'beaver',
-  'mink', 'weasel', 'ferret', 'stoat', 'marten', 'sable', 'jaguar', 'leopard',
-  'cheetah', 'panther', 'cougar', 'bobcat', 'ocelot', 'yak', 'ibex', 'chamois',
-  'oryx', 'gazelle', 'zebra', 'lion', 'camel', 'donkey', 'goat', 'sheep',
-];
-
-/** Stable, anonymous display name for an author pubkey. */
-export function authorLabelFor(pubkey: Uint8Array): string {
-  const adjective = NAME_ADJECTIVES[(pubkey[2] ?? 0) % NAME_ADJECTIVES.length];
-  const noun = NAME_NOUNS[(pubkey[3] ?? 0) % NAME_NOUNS.length];
-  return `${adjective} ${noun}·${toHex(pubkey).slice(0, 4)}`;
-}
+import { authorLabelFor } from './names';
+export { authorLabelFor };
 
 /** Pure mapping: protocol FeedPost -> card view-model. Unit-tested.
- * worldConfirmed is looked up from storage (not in the signed payload). */
+ * worldConfirmed is looked up from storage (not in the signed payload).
+ * --- RESHARE: reshareView carries the collapsed cluster (count + latest
+ * resharer + self state) for the ORIGINAL card; a reshare never adds a card,
+ * and ranking (score) is untouched by reshares. */
 export function toPostCardModel(
   post: FeedPost,
   worldConfirmed = false,
   star?: { stars: number; starLabel: string; starredByMe: boolean },
+  reshareView?: Pick<PostCardModel, 'reshares' | 'resharedByMe' | 'latestResharerLabel'>,
 ): PostCardModel {
   return {
     eventId: toHex(post.event.id),
@@ -96,6 +75,9 @@ export function toPostCardModel(
     stars: star?.stars ?? 0,
     starLabel: star?.starLabel ?? '',
     starredByMe: star?.starredByMe ?? false,
+    reshares: reshareView?.reshares ?? 0,
+    resharedByMe: reshareView?.resharedByMe ?? false,
+    latestResharerLabel: reshareView?.latestResharerLabel,
   };
 }
 
@@ -116,19 +98,22 @@ export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[
   const posts = await store.listFeed(storeOpts);
   const ranked = [...posts].sort((a, b) => b.score - a.score);
   // STAR MVP: every listed post is known, so pending stars flush here too.
+  // --- RESHARE: every listed post is marked known, so pending reshares for
+  // it apply; the cluster is then read onto its (single, original) card.
   const ownHex = await resolveOwnPubkeyHex();
   // Look up World confirmation status for each post (client-side tracking).
   const cards = await Promise.all(
     ranked.map(async (p) => {
       const eventId = toHex(p.event.id);
       markStarPostKnown(eventId);
+      markResharePostKnown(eventId);
       const worldConfirmed = await store.isWorldConfirmed(eventId);
       const star = starViewFor(eventId, ownHex);
       return toPostCardModel(p, worldConfirmed, {
         stars: star.count,
         starLabel: star.label,
         starredByMe: star.starredByMe,
-      });
+      }, reshareViewFor(eventId, ownHex ?? undefined));
     }),
   );
   return cards;
@@ -166,10 +151,13 @@ export async function getPostCardById(eventId: string): Promise<PostCardModel | 
   markStarPostKnown(id);
   const ownHex = await resolveOwnPubkeyHex();
   const star = starViewFor(id, ownHex);
+  // --- RESHARE: same collapsed-cluster mapping as the feed path.
+  markResharePostKnown(id);
   return toPostCardModel(
     { event, views, score: rankScore(views, ageHours), ageHours },
     worldConfirmed,
     { stars: star.count, starLabel: star.label, starredByMe: star.starredByMe },
+    reshareViewFor(id, ownHex ?? undefined),
   );
 }
 

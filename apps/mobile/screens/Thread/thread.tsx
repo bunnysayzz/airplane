@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { IconButton } from '../../components/ui';
 import { space } from '../../src/theme/shape';
 import type { PostCardModel } from '../../services/airplane/types';
+import { toggleReshare } from '../../services/airplane/reshares';
 import { PostCard } from '../../components/PostCard';
 import { useTheme } from '../../src/theme/themeContext';
 import { useI18n } from '../../src/i18n/i18nContext';
@@ -96,7 +97,9 @@ export default function Thread({ postId, posts, loading = false, refreshing = fa
                                     },
                                 ]}
                             >
-                                <PostCard post={item} onPress={onPostPress} onStar={onStar} onMessage={onMessage} />
+                                <PostCard post={item} onPress={onPostPress} onStar={onStar} onMessage={onMessage} onReshare={() => {
+                                    void toggleReshare(item).then(() => onRefresh?.());
+                                }} />
                             </View>
                         );
                     }}

@@ -14,6 +14,7 @@ import {
   EVENT_KIND_POST,
   EVENT_KIND_RECEIPT,
   EVENT_KIND_STAR,
+  EVENT_KIND_RESHARE,
   EVENT_KIND_TOMBSTONE,
   GEOHASH_PRECISION,
   MAX_CONTENT_CHARS,
@@ -38,7 +39,8 @@ function isEventKind(n: unknown): n is EventKind {
     n === EVENT_KIND_POST ||
     n === EVENT_KIND_RECEIPT ||
     n === EVENT_KIND_TOMBSTONE ||
-    n === EVENT_KIND_STAR
+    n === EVENT_KIND_STAR ||
+    n === EVENT_KIND_RESHARE
   );
 }
 
@@ -118,7 +120,7 @@ export function decodeEvent(bytes: Uint8Array): SignedEvent {
     throw new CodecError('created_at must be a non-negative integer');
   }
   if (!isEventKind(kind)) {
-    throw new CodecError(`kind must be 1, 2, 3 or 4, got ${String(kind)}`);
+    throw new CodecError(`kind must be 1, 2, 3, 4 or 5, got ${String(kind)}`);
   }
   if (!validGeohash(geohash)) {
     throw new CodecError(`geohash must be ${GEOHASH_PRECISION} base32 chars, got ${String(geohash)}`);

@@ -8,6 +8,7 @@
 // deliberately no hearts, reposts, bookmarks or follow buttons.
 import React from 'react';
 import { Pressable, Text } from 'react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Post } from './ui/post';
 import { EyeIcon } from './ui/eyeIcon';
 import { useTheme } from '../src/theme/themeContext';
@@ -32,6 +33,14 @@ export interface PostCardModel {
   worldConfirmed: boolean;
   /** Author mesh pubkey hex (DM address). Absent for synthetic/test cards. */
   authorPubkeyHex?: string;
+  // --- RESHARE (delimited) ---
+  /** partial, lower-bound reshare count seen by this device */
+  reshares: number;
+  /** true when this device's key currently reshares this post */
+  resharedByMe: boolean;
+  /** memorable anonymous label of the most recent resharer, if any */
+  latestResharerLabel?: string;
+  // --- RESHARE (delimited end) ---
   // --- STAR MVP (delimited; merge-safe: additive fields only) ---
   /** Distinct starrers seen for this post (per-node partial view). */
   stars?: number;
@@ -48,6 +57,8 @@ export interface PostCardProps {
   onStar?: (eventId: string) => void;
   /** DM P1: open a DM with the post author. Only rendered when the author key is known. */
   onMessage?: (authorPubkeyHex: string) => void;
+  /** RESHARE: called with the ORIGINAL post id when the reshare stat is tapped */
+  onReshare?: (eventId: string) => void;
 }
 
 /**
@@ -71,13 +82,18 @@ export function timeAgo(createdAtMs: number, nowMs: number = Date.now()): string
   return `${Math.floor(d / 365)}y`;
 }
 
-export function PostCardInner({ post, onPress, onStar, onMessage }: PostCardProps) {
+// --- RESHARE (delimited): reshare glyph honouring the Post.Stat icon contract.
+export function ReshareIcon({ size = 17, color }: { size?: number; color?: string; filled?: boolean }) {
+  return <Ionicons name="repeat" size={size} color={color} />;
+}
+
+export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: PostCardProps) {
   const { type, colors } = useTheme();
 
   return (
     <Post
       onPress={onPress ? () => onPress(post.eventId) : undefined}
-      accessibilityLabel={`Post by ${post.authorLabel}, ${post.views} views`}
+      accessibilityLabel={`Post by ${post.authorLabel}, ${post.views} views, ${post.reshares} reshares`}
     >
       <Post.Header>
         <Post.Author
@@ -108,6 +124,27 @@ export function PostCardInner({ post, onPress, onStar, onMessage }: PostCardProp
             <Text style={[type.meta, { color: colors.accentText }]}>Message</Text>
           </Pressable>
         ) : null}
+        {/* --- RESHARE (delimited): collapsed cluster on the ORIGINAL card.
+            No second card is ever created for a reshare; the count + latest
+            resharer attribution live here. Count is a partial lower bound. */}
+        <Post.Stat
+          icon={ReshareIcon}
+          value={formatCompact(post.reshares)}
+          tone="repost"
+          active={post.resharedByMe}
+          onPress={onReshare ? () => onReshare(post.eventId) : undefined}
+          accessibilityLabel={
+            post.resharedByMe
+              ? 'You reshared this post. Tap to unreshare.'
+              : `Reshare this post. ${post.reshares} reshares seen.`
+          }
+        />
+        {post.latestResharerLabel ? (
+          <Text style={[type.meta, { fontSize: 10, opacity: 0.6 }]}>
+            ↻ {post.latestResharerLabel}
+          </Text>
+        ) : null}
+        {/* --- RESHARE (delimited end) --- */}
         {/* --- STAR MVP (delimited) --- */}
         <Post.Stat
           active={post.starredByMe ?? false}
