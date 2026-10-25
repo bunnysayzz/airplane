@@ -132,6 +132,40 @@ describe('ExpoLocationProvider', () => {
     expect(Location.getCurrentPositionAsync).not.toHaveBeenCalled();
   });
 
+  it('disabled services fail loud even with a warm cache (T10 hardening)', async () => {
+    // The services probe runs before the cache: switching services off
+    // must surface services-disabled, never silently post a stale cell.
+    const now = 1_000_000;
+    grantPermission();
+    enableServices();
+    fixAt();
+    const provider = new ExpoLocationProvider({ now: () => now });
+    await expect(provider.getCurrentCell()).resolves.toBe(BLR_CELL);
+    Location.hasServicesEnabledAsync.mockResolvedValue(false);
+    await expect(provider.getCurrentCell()).rejects.toMatchObject({
+      code: 'services-disabled',
+    });
+    expect(Location.getCurrentPositionAsync).toHaveBeenCalledTimes(1);
+    // Services back on: the warm cache serves again without a new fix.
+    enableServices();
+    await expect(provider.getCurrentCell()).resolves.toBe(BLR_CELL);
+    expect(Location.getCurrentPositionAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failing services probe falls through to the warm cache', async () => {
+    // Non-Android / unexpected probe failure must not break posting when
+    // a fresh cached cell exists; the probe failure is not a LocationError.
+    const now = 1_000_000;
+    grantPermission();
+    enableServices();
+    fixAt();
+    const provider = new ExpoLocationProvider({ now: () => now });
+    await expect(provider.getCurrentCell()).resolves.toBe(BLR_CELL);
+    Location.hasServicesEnabledAsync.mockRejectedValue(new Error('not implemented'));
+    await expect(provider.getCurrentCell()).resolves.toBe(BLR_CELL);
+    expect(Location.getCurrentPositionAsync).toHaveBeenCalledTimes(1);
+  });
+
   it('GPS timeout fails loud (timeout)', async () => {
     grantPermission();
     enableServices();
@@ -184,6 +218,21 @@ describe('getLocationCell seam', () => {
     expect(error.code).toBe('timeout');
     expect(error.message).toMatch(/location\/timeout/);
     expect(error.userMessage.length).toBeGreaterThan(0);
+  });
+
+  it('every failure code carries distinct actionable user copy (T10)', () => {
+    // The composer shows userMessage for non-denied failures, so each path
+    // must say something different and actionable — not one generic line.
+    const copy = {
+      'permission-denied': locationError('permission-denied').userMessage,
+      'services-disabled': locationError('services-disabled').userMessage,
+      timeout: locationError('timeout').userMessage,
+      unavailable: locationError('unavailable').userMessage,
+    };
+    expect(new Set(Object.values(copy)).size).toBe(4);
+    expect(copy['services-disabled']).toMatch(/services are off/i);
+    expect(copy.timeout).toMatch(/in time|try again/i);
+    expect(copy.unavailable).toMatch(/try again/i);
   });
 });
 

@@ -43,14 +43,28 @@ export class BleTransport {
   private readonly handlers = new Set<(event: SignedEvent, peerId: string) => void>();
   private readonly reassembler = new Reassembler();
   private readonly ttl: number;
+  private readonly verify: ((event: SignedEvent) => boolean) | undefined;
   private unsubscribe: (() => void) | null = null;
   private lastPurgeMs = 0;
 
   constructor(
     private readonly port: TransportPort,
-    opts?: { ttl?: number },
+    opts?: {
+      ttl?: number;
+      /**
+       * Event authenticity check (T11 §23.6: the BLE ingress path must
+       * reject tampered/wrong-key signatures, matching the Nostr path
+       * which already verifies). When supplied, an event failing the
+       * check — or a check that throws — is dropped silently, never
+       * delivered to handlers. Absent, decoding alone gates delivery
+       * (legacy behavior, kept for tests that construct unsigned
+       * fixtures); the app always wires verifyEvent.
+       */
+      verify?: (event: SignedEvent) => boolean;
+    },
   ) {
     this.ttl = opts?.ttl ?? DEFAULT_TTL;
+    this.verify = opts?.verify;
   }
 
   /** Start listening for inbound frames. Idempotent. */
@@ -75,6 +89,15 @@ export class BleTransport {
         event = decodeEvent(eventBytes);
       } catch {
         return; // malformed event - drop
+      }
+      if (this.verify) {
+        let ok = false;
+        try {
+          ok = this.verify(event);
+        } catch {
+          ok = false;
+        }
+        if (!ok) return; // bad id/signature - drop, never deliver
       }
       const idHex = toHex(event.id);
       if (this.seen.has(idHex)) return; // loop suppression

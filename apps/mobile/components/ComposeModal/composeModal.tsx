@@ -226,13 +226,15 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             captureError(error);
             // Never surface the raw dev error: map known failures to user-facing
             // copy instead. A denied OS permission gets its own copy (it tells
-            // the user what to do); every other location failure pauses
-            // posting with the generic copy.
+            // the user what to do); every other location failure shows its
+            // typed userMessage (T10: services-off, timeout and unavailable
+            // each carry distinct actionable copy — collapsing them into one
+            // generic "paused" line hid what the user should do next).
             const message =
                 error instanceof LocationError
                     ? error.code === 'permission-denied'
                         ? t('compose.locationPermissionDenied')
-                        : t('compose.locationPaused')
+                        : error.userMessage
                     : error instanceof Error && /location/i.test(error.message)
                       ? t('compose.locationPaused')
                       : t('compose.publishFailedMessage');

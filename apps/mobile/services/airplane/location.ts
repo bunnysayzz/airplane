@@ -174,11 +174,9 @@ export class ExpoLocationProvider implements LocationProvider {
     // a revoked grant must never serve even a fresh cached cell.
     await this.ensurePermission(Location);
 
-    const cached = this.cached;
-    if (cached && this.now() - cached.atMs <= this.maxAgeMs) {
-      return cached.cell;
-    }
-
+    // Services probe runs BEFORE the cache is consulted (T10 hardening):
+    // a warm cached cell must not mask location services being switched
+    // off — that would post to a stale cell with no failure copy shown.
     // hasServicesEnabledAsync is Android-only; on other platforms the OS
     // surfaces the failure through getCurrentPositionAsync instead.
     try {
@@ -190,8 +188,13 @@ export class ExpoLocationProvider implements LocationProvider {
       }
     } catch (error) {
       if (error instanceof LocationError) throw error;
-      // Non-Android / unexpected probe failure: fall through to the fix
-      // attempt, which reports the real state.
+      // Non-Android / unexpected probe failure: fall through to the cache
+      // and the fix attempt, which report the real state.
+    }
+
+    const cached = this.cached;
+    if (cached && this.now() - cached.atMs <= this.maxAgeMs) {
+      return cached.cell;
     }
 
     let coords: { latitude: number; longitude: number };

@@ -16,10 +16,10 @@ import {
   type WorldConfirmStore,
 } from '@airplane/transport';
 import type { SignedEvent, TransportPort, Hex64 } from '@airplane/protocol';
-import { toHex } from '@airplane/protocol';
+import { toHex, verifyEvent } from '@airplane/protocol';
 import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
-import { getDeviceKeypair } from './identity';
+import { getDeviceKeypair, crypto } from './identity';
 import { loadRelayUrls } from '../../src/lib/relays';
 import { addBreadcrumb } from '../../src/sentry';
 import { GattBlePort, defaultBleDeps, type BleNativeDeps } from './ble/gatt';
@@ -159,7 +159,11 @@ export async function startTransport(): Promise<void> {
   if (hybrid) return;
 
   blePort = makeBlePort();
-  const ble = new BleTransport(blePort.port);
+  // BLE ingress verifies signatures, matching the Nostr path (T11 §23.6):
+  // an unsigned/tampered event from a mesh peer never reaches the store.
+  const ble = new BleTransport(blePort.port, {
+    verify: (event) => verifyEvent(crypto, event),
+  });
   // Relay list is user-configurable in Settings > Relays and persisted in
   // AsyncStorage (src/lib/relays.ts). loadRelayUrls() already falls back to
   // the default public relays when nothing is stored — and never throws —

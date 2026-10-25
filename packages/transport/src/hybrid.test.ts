@@ -6,6 +6,8 @@ import {
   encodeEvent,
   fragment,
   toHex,
+  verifyEvent,
+  NobleCrypto,
   DEFAULT_TTL,
   FRAG_WIRE_MAX,
   type SignedEvent,
@@ -82,6 +84,49 @@ describe('BleTransport', () => {
     expect(received).toHaveLength(1);
     expect(toHex(received[0].id)).toBe(toHex(event.id));
     await ble.stop();
+  });
+
+  test('verify: a valid signed event passes, tampered events are dropped (T11 §23.6)', async () => {
+    const port = new FakeBlePort();
+    const crypto = new NobleCrypto();
+    const ble = new BleTransport(port, {
+      verify: (event) => verifyEvent(crypto, event),
+    });
+    await ble.start();
+    const received: SignedEvent[] = [];
+    ble.onReceive((e) => {
+      received.push(e);
+    });
+
+    injectEvent(port, 'peer1', makePost('genuine'));
+    expect(received).toHaveLength(1);
+
+    const genuine = makePost('victim');
+    const badSig = new Uint8Array(genuine.sig);
+    badSig[0] ^= 1;
+    injectEvent(port, 'peer1', { ...genuine, sig: badSig });
+    expect(received).toHaveLength(1); // flipped signature: dropped
+
+    injectEvent(port, 'peer1', { ...makePost('other'), content: 'tampered' });
+    expect(received).toHaveLength(1); // content/id mismatch: dropped
+    await ble.stop();
+  });
+
+  test('verify: a throwing verifier drops the event without breaking the transport', async () => {
+    const port = new FakeBlePort();
+    const ble = new BleTransport(port, {
+      verify: () => {
+        throw new Error('verifier blew up');
+      },
+    });
+    await ble.start();
+    const received: SignedEvent[] = [];
+    ble.onReceive((e) => {
+      received.push(e);
+    });
+    injectEvent(port, 'peer1', makePost('hello'));
+    expect(received).toHaveLength(0);
+    await ble.stop(); // still stops cleanly
   });
 
   test('fragments arriving out of order still reassemble', async () => {
