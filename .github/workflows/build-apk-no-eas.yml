@@ -1,4 +1,4 @@
-name: APK build (no EAS)
+name: Android build (APK + AAB, no EAS)
 
 on:
   workflow_dispatch:
@@ -92,6 +92,13 @@ jobs:
         working-directory: apps/mobile/android
         run: ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon
 
+      # Phase 1: AAB for Play Store + clean releases (same signing as the APK;
+      # debug-signed until the T12 production keystore lands — fine for GitHub
+      # releases, NOT accepted by the Play Store).
+      - name: Build release AAB
+        working-directory: apps/mobile/android
+        run: ./gradlew bundleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon
+
       - name: Verify APK payload (no Sentry, allowlisted .so, embedded JS bundle)
         run: |
           APK=apps/mobile/android/app/build/outputs/apk/release/app-release.apk
@@ -143,3 +150,12 @@ jobs:
           name: airplane-release-apk
           path: apps/mobile/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: airplane-release-aab
+          path: apps/mobile/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+
+SHA: f52f643bdf5b5f9e704756add8a3cc744bb6b070
