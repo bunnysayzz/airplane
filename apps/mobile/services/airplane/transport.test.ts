@@ -3,7 +3,7 @@
 // connections are attempted; NetInfo is the repo's __mocks__ version.
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests, __getHybridForTests, getBleRadioState } from './transport';
+import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests, __getHybridForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -290,5 +290,31 @@ describe('transport manager', () => {
     // The point is the check-first path ran without wedging the transport.
     expect(getBleRadioState()).toBe('unavailable');
     expect(__getHybridForTests()).not.toBeNull();
+  });
+});
+
+describe('BLE publish targets + mesh status', () => {
+  test('blePeerIdsForPublish returns connected ids, [] otherwise', () => {
+    expect(blePeerIdsForPublish(null)).toEqual([]);
+    expect(blePeerIdsForPublish(undefined)).toEqual([]);
+    expect(blePeerIdsForPublish({} as never)).toEqual([]);
+    expect(blePeerIdsForPublish({ connectedPeerIds: () => ['a', 'b'] } as never)).toEqual(['a', 'b']);
+    expect(blePeerIdsForPublish({ connectedPeerIds: () => { throw new Error('boom'); } } as never)).toEqual([]);
+  });
+
+  test('resolveRelayState truth table', () => {
+    expect(resolveRelayState(true, 'on')).toBe('online');
+    expect(resolveRelayState(true, 'permission-blocked')).toBe('online');
+    expect(resolveRelayState(false, 'on')).toBe('mesh');
+    expect(resolveRelayState(false, 'starting')).toBe('mesh');
+    expect(resolveRelayState(false, 'permission-blocked')).toBe('offline');
+    expect(resolveRelayState(false, 'unavailable')).toBe('offline');
+  });
+
+  test('getMeshStatus after stopTransport reports 0 peers and offline', () => {
+    stopTransport();
+    const s = getMeshStatus();
+    expect(s.peersNearby).toBe(0);
+    expect(s.relayState).toBe('offline');
   });
 });

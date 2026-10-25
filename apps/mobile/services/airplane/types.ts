@@ -7,7 +7,7 @@ export interface PostCardModel {
   eventId: string;
   /** Post creation time, milliseconds since epoch (card formats relative time). */
   createdAtMs: number;
-  /** Pseudonymous author label, e.g. "quiet fox·a3f9". */
+  /** Pseudonymous author label, e.g. "anon·a3f9". */
   authorLabel: string;
   /** NFC-normalized post body, 1..280 chars. */
   body: string;

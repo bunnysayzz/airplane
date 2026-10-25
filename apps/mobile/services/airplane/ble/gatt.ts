@@ -322,6 +322,18 @@ export class GattBlePort implements TransportPort {
         await central.write(bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk);
       }
       await central.startNotification(bleId, MESH_SERVICE_UUID, MESH_TX_CHAR_UUID);
+      // Surface the resolved identity through the scan channel, matching
+      // the peripheral-side hello path: subscribers see the full peerId,
+      // not just the provisional tag key. (Previously the central side
+      // never re-fired, so the scan channel only ever resolved identities
+      // learned via inbound hellos.)
+      for (const cb of this.scanSubs) {
+        try {
+          cb({ peerId });
+        } catch {
+          // subscriber errors must not break connect
+        }
+      }
     } catch (err) {
       await central.disconnect(bleId).catch(() => {});
       throw err instanceof Error ? err : new Error(`ble: connect failed: ${String(err)}`);
@@ -508,6 +520,19 @@ export class GattBlePort implements TransportPort {
   get peerCount(): number {
     return this.conns.size;
   }
+
+  /**
+   * Full peerIds of established connections (deduped). Provisional ids
+   * (tag:/mac: keys) are excluded: only peers whose full identity has been
+   * resolved can receive frames, so this is exactly the set publish targets.
+   */
+  connectedPeerIds(): string[] {
+    const ids = new Set<string>();
+    for (const conn of this.conns.values()) {
+      if (conn.peerId) ids.add(conn.peerId);
+    }
+    return [...ids];
+  }
 }
 
 function uSafe(u: (() => void) | null | undefined): void {
@@ -524,17 +549,28 @@ function uSafe(u: (() => void) | null | undefined): void {
 // ---------------------------------------------------------------------------
 
 /** Extract the 8-byte mesh tag from a ble-manager discover event. */
-function extractTag(peripheral: unknown): Uint8Array | null {
+export function extractTag(peripheral: unknown): Uint8Array | null {
   try {
     const p = peripheral as {
       advertising?: { manufacturerData?: Record<string, { bytes?: number[]; data?: string }> };
     };
     const md = p?.advertising?.manufacturerData;
     if (!md) return null;
-    const entry = md[String(ADVERTISE_COMPANY_ID)] ?? md[ADVERTISE_COMPANY_ID];
+    // ble-manager 12.6.0 on Android keys manufacturerData by lowercase hex
+    // ("%04x"), NOT by decimal company id: 0xFFFF arrives as "ffff". A
+    // decimal-only lookup silently drops every mesh peer (the two-phone
+    // "0 nearby" failure: discovery never saw a single peer). Try the real
+    // native hex key first, then decimal/numeric for robustness.
+    const hexKey = ADVERTISE_COMPANY_ID.toString(16).padStart(4, '0');
+    const entry = md[hexKey] ?? md[String(ADVERTISE_COMPANY_ID)] ?? md[ADVERTISE_COMPANY_ID];
     const bytes = entry?.bytes;
-    if (!Array.isArray(bytes) || bytes.length !== 8) return null;
-    return new Uint8Array(bytes);
+    if (Array.isArray(bytes) && bytes.length === 8) return new Uint8Array(bytes);
+    // Fallback: some shapes carry only base64 data.
+    if (typeof entry?.data === 'string') {
+      const decoded = Buffer.from(entry.data, 'base64');
+      if (decoded.length === 8) return new Uint8Array(decoded);
+    }
+    return null;
   } catch {
     return null;
   }
@@ -552,7 +588,13 @@ function loadCentralAdapter(): CentralAdapter | null {
     const emitter = new rn.NativeEventEmitter(rn.NativeModules.BleManager);
     return {
       start: () => mgr.start({ showAlert: false }),
-      scan: () => mgr.scan({}),
+      // Low-latency scan (Android SCAN_MODE_LOW_LATENCY = 2, the
+      // ble-manager BleScanMode.LowLatency value): the default LowPower
+      // mode stretches discovery over seconds, which reads as a dead mesh
+      // when two phones are already side by side. Battery trade-off, taken
+      // deliberately: fast discovery is the mesh's core promise. Scan runs
+      // until stopScan (seconds default 0 = indefinite in this lib version).
+      scan: () => mgr.scan({ scanMode: 2 }),
       stopScan: () => mgr.stopScan(),
       onDiscover: (cb) => {
         const sub = emitter.addListener('BleManagerDiscoverPeripheral', (p: unknown) =>

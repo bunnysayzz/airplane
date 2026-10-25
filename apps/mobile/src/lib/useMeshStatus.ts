@@ -1,22 +1,28 @@
-import { useMemo } from 'react';
+import { useSyncExternalStore } from 'react';
+import { getMeshStatus, subscribeMeshStatus } from '../../services/airplane/transport';
 
 /** Where this device's posts can travel right now. */
 export type RelayState = 'mesh' | 'online' | 'offline';
 
 export interface MeshStatusState {
-    /** Peers seen on the BLE mesh. Stays 0 until the real transport is wired. */
+    /** Established BLE connections (linked mesh neighbours). */
     peersNearby: number;
-    /** 'mesh' = mesh radio only, 'online' = internet up (World feed visible), 'offline' = radio down. */
+    /** 'mesh' = mesh radio only, 'online' = internet up (World feed visible), 'offline' = neither. */
     relayState: RelayState;
 }
 
 /**
- * Mesh + relay status for the MeshStatus pill.
+ * Mesh + relay status for the MeshStatus pill, wired to the real transport.
  *
- * STUB (P3): returns peersNearby 0 and assumes mesh radio until the real
- * transport lands. packages/mesh-sim exists for tests; the P3 BLE transport
- * (MESH-1) will drive these values for real. No fake live numbers.
+ * Previously a hardcoded stub (peersNearby always 0, relayState always
+ * 'mesh') — the pill read "0 nearby mesh only" even with mesh peers
+ * connected, and mislabelled internet-synced operation as mesh-only.
+ * Now: peersNearby counts established BLE connections (polled every 2s by
+ * the transport's subscription; the port emits no connect/disconnect
+ * events, so polling is the honest mechanism), and relayState reflects
+ * whether Nostr is online. Snapshot identity is stable unless a value
+ * changes, as useSyncExternalStore requires.
  */
 export function useMeshStatus(): MeshStatusState {
-    return useMemo(() => ({ peersNearby: 0, relayState: 'mesh' as RelayState }), []);
+    return useSyncExternalStore(subscribeMeshStatus, getMeshStatus);
 }

@@ -9,6 +9,7 @@ import { toHex } from '@airplane/protocol';
 import {
   GattBlePort,
   defaultBleDeps,
+  extractTag,
   type BleNativeDeps,
   type CentralAdapter,
   type PeripheralAdapter,
@@ -232,7 +233,9 @@ describe('discovery + central connect flow', () => {
     central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
     await tick(50);
 
-    expect(seen).toEqual([`tag:${toHex(PEER_TAG)}`]);
+    // Tag first, then the full peerId once the central side resolves IDENT
+    // (the scan channel re-fire; previously only the tag ever arrived).
+    expect(seen).toEqual([`tag:${toHex(PEER_TAG)}`, PEER_HEX]);
     expect(central.connects).toEqual(['ble-1']);
     expect(central.notificationsStarted).toEqual(['ble-1']);
     expect(port.peerCount).toBe(1);
@@ -288,6 +291,77 @@ describe('discovery + central connect flow', () => {
     central.discoverCb!({ id: 'ble-2', rssi: -60, tag: PEER_TAG });
     await tick(50);
     expect(port.peerCount).toBe(1);
+  });
+});
+
+describe('connectedPeerIds (publish targets)', () => {
+  test('empty before connect, full peerId after central connect', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    expect(port.connectedPeerIds()).toEqual([]);
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    await port.close();
+  });
+
+  test('pre-hello peripheral conns are excluded; hello rekey includes them', async () => {
+    const { deps, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    // Frame before hello: conn exists under a provisional mac: id.
+    for (const chunk of chunkBytes(encodeDatagram(DATAGRAM_FRAME, new Uint8Array([5])), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:02', value: chunk });
+    }
+    expect(port.peerCount).toBe(1);
+    expect(port.connectedPeerIds()).toEqual([]);
+    // Hello resolves the identity -> included.
+    for (const chunk of chunkBytes(encodeHello(PEER_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:02', value: chunk });
+    }
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    await port.close();
+  });
+
+  test('same peer over both roles dedupes to one id', async () => {
+    const { deps, central, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    // Same peer's inbound hello (peripheral role) must not add a second id.
+    for (const chunk of chunkBytes(encodeHello(PEER_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:01', value: chunk });
+    }
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    await port.close();
+  });
+});
+
+describe('extractTag (native discover shapes)', () => {
+  const base64 = (bytes: number[]) => Buffer.from(bytes).toString('base64');
+  test('real Android native shape: lowercase hex key "ffff"', () => {
+    const tag = extractTag({ advertising: { manufacturerData: { ffff: { bytes: [1, 2, 3, 4, 5, 6, 7, 8] } } } });
+    expect([...tag!]).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+  test('decimal key fallback (legacy shape)', () => {
+    const tag = extractTag({ advertising: { manufacturerData: { 65535: { bytes: [1, 2, 3, 4, 5, 6, 7, 8] } } } });
+    expect([...tag!]).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+  test('base64 data fallback when bytes absent', () => {
+    const tag = extractTag({ advertising: { manufacturerData: { ffff: { data: base64([1, 2, 3, 4, 5, 6, 7, 8]) } } } });
+    expect([...tag!]).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+  test('missing / wrong-length / absent manufacturerData -> null', () => {
+    expect(extractTag({ advertising: { manufacturerData: { ffff: { bytes: [1, 2, 3] } } } })).toBeNull();
+    expect(extractTag({ advertising: {} })).toBeNull();
+    expect(extractTag({})).toBeNull();
+    expect(extractTag(null)).toBeNull();
   });
 });
 
@@ -492,7 +566,7 @@ describe('defaultBleDeps adapter delegation', () => {
     await deps.central!.start();
     expect(mgr.start).toHaveBeenCalledWith({ showAlert: false });
     await deps.central!.scan();
-    expect(mgr.scan).toHaveBeenCalledWith({});
+    expect(mgr.scan).toHaveBeenCalledWith({ scanMode: 2 });
     const mtu = await deps.central!.requestMtu('dev', 512);
     expect(mtu).toBe(256);
     expect(mgr.requestMTU).toHaveBeenCalledWith('dev', 512);
@@ -520,6 +594,24 @@ describe('defaultBleDeps adapter delegation', () => {
     expect(seen[0].rssi).toBe(-72);
     expect([...seen[0].tag!]).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(seen[1].tag).toBeNull();
+    off();
+  });
+
+  test('discover events parse the real native hex key (ffff)', async () => {
+    const deps = defaultBleDeps(async () => true);
+    const seen: { id: string; rssi: number; tag: Uint8Array | null }[] = [];
+    const off = deps.central!.onDiscover((info) => seen.push(info));
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { NativeEventEmitter } = require('react-native');
+    const emitter = NativeEventEmitter.instances[NativeEventEmitter.instances.length - 1];
+    emitter.emit('BleManagerDiscoverPeripheral', {
+      id: 'ee:ff',
+      rssi: -65,
+      advertising: { manufacturerData: { ffff: { bytes: [9, 8, 7, 6, 5, 4, 3, 2] } } },
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].id).toBe('ee:ff');
+    expect([...seen[0].tag!]).toEqual([9, 8, 7, 6, 5, 4, 3, 2]);
     off();
   });
 

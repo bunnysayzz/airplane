@@ -43,6 +43,14 @@ export interface TransportPort {
    * layer falls back to the protocol default frame size (FRAG_WIRE_MAX).
    */
   frameSizeFor?(peerId: string): number;
+  /**
+   * Full peerIds of currently established connections (identity known).
+   * Optional and additive (not a breaking change): ports that do not track
+   * connections omit it, and callers fall back to an empty peer set.
+   * Provisional ids (tag:/mac: keys) are never returned — only peers whose
+   * full identity has been resolved can receive frames.
+   */
+  connectedPeerIds?(): string[];
   /** Subscribe to inbound frames. Returns an unsubscribe function. */
   onReceive(cb: (peerId: string, bytes: Uint8Array) => void): () => void;
 }

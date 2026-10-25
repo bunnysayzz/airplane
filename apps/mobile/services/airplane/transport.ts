@@ -253,6 +253,70 @@ export function getBleRadioState(): BleRadioState {
 }
 
 /**
+ * BLE peer ids that can receive a broadcast right now: established
+ * connections only (identity resolved). Ports without the optional
+ * connectedPeerIds() method contribute nothing. Never throws.
+ */
+export function blePeerIdsForPublish(port: TransportPort | null | undefined): string[] {
+  try {
+    return port?.connectedPeerIds?.() ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Mesh pill state: linked neighbours + what the app is actually syncing over. */
+export interface MeshStatusSnapshot {
+  /** Established BLE connections (linked neighbours — not merely heard ads). */
+  peersNearby: number;
+  /** 'mesh' = BLE radio only, 'online' = internet up (World visible), 'offline' = neither. */
+  relayState: 'mesh' | 'online' | 'offline';
+}
+
+/**
+ * Pure relay-state mapping (unit-tested truth table). 'starting' maps to
+ * 'mesh' so the pill keeps its boot appearance until a real state is known;
+ * a permission-blocked/unavailable radio with Nostr online shows 'online'
+ * (truthful: syncing over the internet, NOT the mesh) instead of the old
+ * hardcoded 'mesh only' lie.
+ */
+export function resolveRelayState(nostrOnline: boolean, bleState: BleRadioState): MeshStatusSnapshot['relayState'] {
+  if (nostrOnline) return 'online';
+  if (bleState === 'on' || bleState === 'starting') return 'mesh';
+  return 'offline';
+}
+
+let meshSnapshot: MeshStatusSnapshot = { peersNearby: 0, relayState: 'mesh' };
+
+/**
+ * Current mesh status snapshot. Returns a cached reference that only
+ * changes when a value changes (required by useSyncExternalStore).
+ */
+export function getMeshStatus(): MeshStatusSnapshot {
+  const next: MeshStatusSnapshot = {
+    peersNearby: blePeerIdsForPublish(blePort?.port).length,
+    relayState: resolveRelayState(!!hybrid?.nostr.online, bleRadioState),
+  };
+  if (next.peersNearby !== meshSnapshot.peersNearby || next.relayState !== meshSnapshot.relayState) {
+    meshSnapshot = next;
+  }
+  return meshSnapshot;
+}
+
+/**
+ * Subscribe to mesh-status changes. Polls every 2s and fires only on real
+ * change; the port emits no connect/disconnect events, so polling is the
+ * honest mechanism (not a second event system). Returns unsubscribe.
+ */
+export function subscribeMeshStatus(cb: () => void): () => void {
+  const timer = setInterval(() => {
+    const before = meshSnapshot;
+    if (getMeshStatus() !== before) cb();
+  }, 2000);
+  return () => clearInterval(timer);
+}
+
+/**
  * Priming-aware radio enable. Call ONLY from the user's explicit action
  * (the BlePrime dialog's Enable button): fires the real OS permission
  * request, then brings up the radio on grant. Returns true when the radio
@@ -370,5 +434,8 @@ export async function publishViaTransport(
   event: SignedEvent,
 ): Promise<{ blePeers: number; relays: string[] }> {
   if (!hybrid) await startTransport();
-  return hybrid!.publish(event);
+  // BLE fan-out targets the currently connected peers. Previously this
+  // call passed no peer ids at all, so local posts NEVER went out over
+  // BLE — only Nostr — even with phones connected over GATT.
+  return hybrid!.publish(event, blePeerIdsForPublish(blePort?.port));
 }
