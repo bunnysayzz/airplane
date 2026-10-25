@@ -7,7 +7,7 @@ export type RelayState = 'mesh' | 'online' | 'offline';
 export interface MeshStatusState {
     /** Established BLE connections (linked mesh neighbours). */
     peersNearby: number;
-    /** 'mesh' = mesh radio only, 'online' = internet up (World feed visible), 'offline' = neither. */
+    /** 'mesh' = mesh radio only, 'online' = internet up (Nostr/WorldSync active; World is a status on the one feed, not a separate feed), 'offline' = neither. */
     relayState: RelayState;
 }
 

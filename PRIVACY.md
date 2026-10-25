@@ -9,7 +9,7 @@ Airplane is an anonymous, location-based public broadcast feed that works over B
 ## What data exists
 
 - **Posts you write.** Stored in a local database on your phone (SQLite). That is the only copy Airplane keeps.
-- **Posts you receive.** Stored in the same local database, so you can read the "Around you" feed offline.
+- **Posts you receive.** Stored in the same local database, so you can read the feed offline.
 - **View receipts.** Small counters the app uses to rank posts ("more views rise higher"). They live on your phone.
 - **Your keypair.** A random signing key generated on first launch, stored in the device's secure storage (iOS Keychain / Android Keystore). It signs your posts so others know they came from one consistent anonymous author. It is never uploaded anywhere.
 
@@ -17,8 +17,10 @@ Nothing leaves your phone except when you post or relay — see below.
 
 ## What is public
 
-- **"Around you" feed:** anything you post is broadcast over Bluetooth to every phone in range. Anyone nearby can read it. There is no friend list, no private posts, no direct messages.
-- **"World" feed (opt-in only):** if you flip the "Share with the World feed" switch when posting, that post is additionally sent through public relays, and **anyone on earth can read it**.
+There is **one feed**. Anything you post is broadcast over Bluetooth to every phone in range. Anyone nearby can read it. There is no friend list, no private posts, no direct messages.
+
+- **Mesh-only posts** show no icon. **World-confirmed posts** — posts a copy of which has reached the public relay network — show a tiny 🌐. "World" is a *status* a post earns, not a separate feed and not a switch you flip.
+- **Silent relay uplink:** when your phone is online, it silently uploads posts it receives that are not yet World-confirmed to public relays, with no approval and no prompts — and other online phones do the same with your posts. There is no local-only post: assume anything you post can reach the world, and **anyone on earth can read it** once it does.
 
 Treat every post like a flyer pinned to a public noticeboard: assume the contents can be seen, copied, and kept by strangers.
 
@@ -26,11 +28,11 @@ Treat every post like a flyer pinned to a public noticeboard: assume the content
 
 - **Your identity.** There are no accounts. Your posts carry only a random pseudonym (like `quiet fox·a3f9`) — no name, no phone number, no device identifier you can recognize.
 - **No surveillance surface.** No analytics, no crash-reporting with identifiers, no ads, no trackers, no server logs about you — because there is no Airplane server to log on.
-- **No silent uplink.** The World feed is per-post and opt-in. A post never goes global unless you flip the switch on that post. The default is local mesh only.
+- **No silent uplink — we do NOT promise this.** See "What is public" above: online phones silently relay unconfirmed posts to relays. Onboarding says this once, then never again. If you post, assume it can reach the world.
 
-## World uplink: what changes when you flip it
+## World uplink: what changes when a post reaches relays
 
-- The post is sent to one or more public relay servers over the internet. **Relay operators can see your IP address** while you upload, just like any website you visit can. Your posts remain anonymous, but your network connection to the relay is not.
+- The post is sent to one or more public relay servers over the internet. **Relay operators can see your IP address** while you upload, just like any website you visit can. Your posts remain anonymous, but your network connection to the relay is not. This can happen through your own phone or through another phone relaying your post, with no action from you at that moment.
 - Once on relays, the post can be copied, archived, and re-shared by anyone. Deleting it from your phone does not delete copies others made.
 - Because the contents are not encrypted (see below), treat World-uplinked posts as permanently public.
 
@@ -38,7 +40,7 @@ Treat every post like a flyer pinned to a public noticeboard: assume the content
 
 To stay honest, here is what Airplane does not and cannot give you:
 
-- **No encryption of post contents.** Posts are readable by anyone in Bluetooth range (mesh) and by any relay operator (World feed). Do not post anything whose contents must stay secret.
+- **No encryption of post contents.** Posts are readable by anyone in Bluetooth range (mesh) and by any relay operator. Do not post anything whose contents must stay secret.
 - **No metadata protection against local observers.** Someone in Bluetooth range can observe that _some_ device is transmitting, roughly when, and roughly how far away. Radio is radio.
 - **No protection from the relay knowing your IP.** See "World uplink" above.
 - **No moderation or takedown power over copies.** We can never reach into someone else's phone or a third-party relay and delete your post.
@@ -53,7 +55,7 @@ Airplane is distributed as a sideloadable APK. Android will warn you about insta
 
 ## Contact
 
-Open an issue at [github.com/enginoor/airplane](https://github.com/enginoor/airplane) if you have questions about this policy. There is no data to request, correct, or delete on our side — it all lives on your phone.
+Open an issue at [github.com/bunnysayzz/airplane](https://github.com/bunnysayzz/airplane) if you have questions about this policy. There is no data to request, correct, or delete on our side — it all lives on your phone.
 
 ## Changes
 

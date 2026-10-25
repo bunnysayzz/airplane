@@ -4,7 +4,7 @@
 ## Reporting a vulnerability
 
 Report vulnerabilities via **GitHub Security Advisories** on the
-[`enginoor/airplane`](https://github.com/enginoor/airplane) repository
+[`bunnysayzz/airplane`](https://github.com/bunnysayzz/airplane) repository
 (Security tab → "Report a vulnerability"). Please do not open a public issue
 for a security report.
 

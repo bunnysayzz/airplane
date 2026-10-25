@@ -168,7 +168,7 @@ Stated honestly — what has actually run on a real device, and what has not:
 | App launches (ExpoLinking crash) | ✅ Fixed in v0.1.0 | Alive on real phones: BrowserStack Pixel 8 Pro (~5 min, onboarding verified), pCloudy Pixel 9 Pro XL |
 | Publishing throws (Hermes `crypto.getRandomValues`) | ✅ Fixed in v0.1.2 | No publish error dialog on any real device since; polyfill imported first in entry |
 | Feed shows your post (viewer-cell scoping) | ✅ Verified 2026-10-25 | pCloudy Galaxy M53, v0.1.3: "v013 test" posted and shown as top post in feed, no error dialog |
-| Unit / integration tests | ✅ Green at HEAD | 411 tests, 35 suites; tsc clean (6 projects), eslint 0/0 |
+| Unit / integration tests | ✅ Green at HEAD | 428 tests, 36 suites; tsc clean (6 projects), eslint 0/0 |
 | Post survives app restart (persistent storage) | ⏳ Code done, device proof pending | SQLite store implemented; last device attempt blocked by the test device's GPS state + exhausted trial minutes |
 | NetInfo connectivity wiring | ⏳ Code done, device check pending | Single connectivity funnel implemented; real-device online/offline toggle check still to run |
 | BLE radio interop (two phones) | ❌ Unverified | Needs two physical phones in range; cannot be proven on cloud devices |

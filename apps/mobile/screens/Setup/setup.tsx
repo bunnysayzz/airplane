@@ -37,8 +37,9 @@ interface SetupProps {
 // Bluetooth/location rationale lives inline on card 1 as the pre-prompt copy
 // for the real permission flows: location is primed on the publish path
 // (composeModal asks first, the OS dialog only fires on the user's action),
-// and the BLE stack is still a no-op in v1 (P2/P3 roadmap), so nothing here
-// may claim the OS prompts on this screen. The index route decides when to
+// and the BLE stack is implemented (GattBlePort; radio interop unverified)
+// with its permission priming owned by BlePrime on the feed tab, so nothing
+// here may claim the OS prompts on this screen. The index route decides when to
 // show Setup and uses onboardingStatus to show it once.
 const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false }) => {
   const { type, coat } = useTheme();

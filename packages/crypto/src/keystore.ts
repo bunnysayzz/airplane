@@ -173,9 +173,10 @@ function fromHex(hex: string): Uint8Array {
  * on load. Corrupt/foreign values fail closed (throw) rather than minting a
  * new identity over someone else's slot.
  *
- * TODO(P3): real device persistence needs the native module linked, which
- * Expo dev builds provide (Expo Go / bare node do NOT - fall back to
- * MemoryKeyStore there).
+ * Real device persistence needs the native module linked, which Expo dev
+ * builds provide (Expo Go / bare node do NOT - the app falls back to
+ * MemoryKeyStore there). The app wires this class in
+ * apps/mobile/services/airplane/identity.ts (defaultKeyStore).
  */
 export class SecureKeyStore implements KeyStorePort {
   private readonly adapter: SecureStoreLike;

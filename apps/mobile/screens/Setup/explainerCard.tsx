@@ -19,8 +19,10 @@ export interface ExplainerCardSpec {
 // Airplane's onboarding explainer. Card index 1 is the binding privacy truth, so it is
 // also rendered from Settings (in-app, so it works offline) as the compact privacy
 // explainer. Card 0 carries the Bluetooth/location permission rationale inline as the
-// pre-prompt copy the publish path primes with (location is the only real OS
-// permission in v1; the mesh radio is still a P2/P3 no-op).
+// pre-prompt copy the publish path primes with. Location priming lives on
+// the publish path; Bluetooth permission priming lives on the feed tab
+// (BlePrime) — neither fires on this screen. The BLE mesh itself is
+// implemented (GattBlePort, radio interop still unverified), not a no-op.
 export const EXPLAINER_CARDS: ExplainerCardSpec[] = [
   {
     key: 'mesh',
