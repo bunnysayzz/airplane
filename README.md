@@ -47,6 +47,10 @@ There is no local-only post. If you post, assume it can reach the world. The old
 - **Store-and-forward** — posts live on-device in SQLite; your post propagates when peers show up. Being alone is the normal case, not an error.
 - **Persistent storage** — on-device SQLite (`OpSqliteStore`) for events, MMKV for hot key/value state. Secrets are never stored in KV.
 - **Connectivity-aware transport** — NetInfo wiring starts Nostr/WorldSync when online and stops them when offline; BLE keeps running either way.
+- **Memorable anonymous names** — feed shows "<adjective> <noun>·<pubkey prefix>" instead of "anon·xxxx", derived deterministically from the already-public pubkey.
+- **Star** — public endorsement (signed reference events); counts are partial lower bounds, never fed into ranking.
+- **Direct messages (P1)** — sealed relay DMs to post authors (inbox + requests folder, block/mute, local-only delete).
+- **Reshare** — collapsed cluster on the original card, never duplicate cards; reshare-of-reshare flattens to the original.
 - **Delete your own posts** — deletions are tombstone events the network honors.
 - **No backend** — no server to deploy, rate-limit, subpoena, or take down.
 - **Anonymous, not encrypted** — post *contents* are public by design (anyone in radio range can read them, like shouting in a square). What is protected is your *identity*. The app never promises encryption.
@@ -57,7 +61,7 @@ Sideload-first — the threat model includes store takedowns, so stores are not 
 
 **Android:** install the APK from [GitHub Releases](https://github.com/bunnysayzz/airplane/releases). Current known-good build:
 
-- **v0.1.3-prod** — [`airplane-v0.1.3-prod-gradle-test.apk`](https://github.com/bunnysayzz/airplane/releases/download/v0.1.3-prod/airplane-v0.1.3-prod-gradle-test.apk)
+- **v0.1.7-prod** — [`airplane-v0.1.7-prod-gradle-test.apk`](https://github.com/bunnysayzz/airplane/releases/download/v0.1.7-prod/airplane-v0.1.7-prod-gradle-test.apk)
 
 Android will warn about unknown sources; that is expected for a sideloaded app. Import the releases page in [Obtainium](https://obtainium.imranr98.com/) for updates. Install only from the official releases page — never from forwarded files or mirrors you cannot verify.
 
@@ -168,14 +172,14 @@ Stated honestly — what has actually run on a real device, and what has not:
 | App launches (ExpoLinking crash) | ✅ Fixed in v0.1.0 | Alive on real phones: BrowserStack Pixel 8 Pro (~5 min, onboarding verified), pCloudy Pixel 9 Pro XL |
 | Publishing throws (Hermes `crypto.getRandomValues`) | ✅ Fixed in v0.1.2 | No publish error dialog on any real device since; polyfill imported first in entry |
 | Feed shows your post (viewer-cell scoping) | ✅ Verified 2026-10-25 | pCloudy Galaxy M53, v0.1.3: "v013 test" posted and shown as top post in feed, no error dialog |
-| Unit / integration tests | ✅ Green at HEAD | 428 tests, 36 suites; tsc clean (6 projects), eslint 0/0 |
-| Post survives app restart (persistent storage) | ⏳ Code done, device proof pending | SQLite store implemented; last device attempt blocked by the test device's GPS state + exhausted trial minutes |
+| Unit / integration tests | ✅ Green at HEAD | 501 tests; tsc clean (6 projects), eslint 0/0 |
+| Post survives app restart (persistent storage) | ✅ Verified 2026-10-25 | Kobiton Galaxy S25: post survived full Close-all + relaunch and stayed in feed |
 | NetInfo connectivity wiring | ⏳ Code done, device check pending | Single connectivity funnel implemented; real-device online/offline toggle check still to run |
-| BLE radio interop (two phones) | ❌ Unverified | Needs two physical phones in range; cannot be proven on cloud devices |
+| BLE radio interop (two phones) | ❌ Unverified | Lab proxy 2026-10-25 (two Kobiton phones) showed pill 0 throughout — inconclusive, lab isolation; gold-standard test still needs two physical phones in range, internet OFF |
 
 ## Roadmap
 
-Current direction, in the order work is landing: background relay, thread screen, relay configurability in settings, keystore hardening (key rotation), location edge cases, in-app updater from GitHub Releases. Full phased plan: [`docs/blueprint/ROADMAP.md`](docs/blueprint/ROADMAP.md).
+Current direction: Wi-Fi LAN transport (T15), perf/scale hardening (T20), remaining device proofs (T3 connectivity toggle, T7 Relays tap-through, T10 location checks, T14 updater check), T11 audit gaps (Sentry consent decision needed), T12 store-listing pack. Shipped in v0.1.7: thread screen, relay configurability, in-app updater (code), memorable names, Star, DM P1 relay, Reshare. Full phased plan: [`docs/blueprint/ROADMAP.md`](docs/blueprint/ROADMAP.md).
 
 ## Repository structure
 
