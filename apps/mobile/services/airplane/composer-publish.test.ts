@@ -40,6 +40,7 @@ function throwingStore(message: string): KeyStorePort {
     },
     sign: async () => new Uint8Array(64),
     getPublicKey: async () => null,
+    wipeKeypair: async () => {},
   };
 }
 

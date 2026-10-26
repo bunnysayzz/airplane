@@ -20,21 +20,32 @@
 
 import {
   EVENT_KIND_STAR,
+  STAR_CONTENT,
   StarCounter,
-  createStarEvent,
-  createUnstarEvent,
+  UNSTAR_CONTENT,
   formatStarCount,
-  fromHex,
   toHex,
   verifyEvent,
+  type EventKind,
   type Hex64,
   type SignedEvent,
   type StarView,
 } from '@airplane/protocol';
-import { getDeviceKeypair, crypto } from './identity';
+import {
+  getDevicePublicKey,
+  onIdentityChange,
+  signDeviceEvent,
+  crypto,
+} from './identity';
 
 let counter: StarCounter = new StarCounter();
 let ownPubkeyHex: Hex64 | null = null;
+
+// T8 rotation: the cached own-pubkey must not survive a burn — the next
+// resolveOwnPubkeyHex() re-reads the new identity.
+onIdentityChange(() => {
+  ownPubkeyHex = null;
+});
 
 /** The app-wide star counter (single instance; tests reset it). */
 export function getStarCounter(): StarCounter {
@@ -67,8 +78,8 @@ export function applyIncomingStar(event: SignedEvent): boolean {
 export async function resolveOwnPubkeyHex(): Promise<Hex64 | null> {
   if (ownPubkeyHex) return ownPubkeyHex;
   try {
-    const { publicKey } = await getDeviceKeypair();
-    ownPubkeyHex = toHex(publicKey);
+    const publicKey = await getDevicePublicKey();
+    ownPubkeyHex = toHex(publicKey) as Hex64;
     return ownPubkeyHex;
   } catch {
     return null;
@@ -97,8 +108,8 @@ export async function toggleStar(
   geohash5: string,
   deps: ToggleStarDeps = {},
 ): Promise<boolean> {
-  const { publicKey, secretKey } = await getDeviceKeypair();
-  ownPubkeyHex = toHex(publicKey);
+  const publicKey = await getDevicePublicKey();
+  ownPubkeyHex = toHex(publicKey) as Hex64;
   const id = postIdHex.toLowerCase();
   // Toggling from a visible card means the post is known; mark it so the
   // user's own star can never sit in the pending queue.
@@ -114,15 +125,15 @@ export async function toggleStar(
   const nowSec = Math.floor(Date.now() / 1000);
   const latestOwn = counter.latestFor(id, ownPubkeyHex);
   const createdAt = latestOwn && latestOwn.created_at >= nowSec ? latestOwn.created_at + 1 : nowSec;
-  const params = {
-    crypto,
-    secretKey,
-    pubkey: publicKey,
-    geohash5,
-    postId: fromHex(id),
-    createdAt,
-  };
-  const event = currentlyStarred ? createUnstarEvent(params) : createStarEvent(params);
+  // T8: signed through the KeyStorePort sign() seam — the secret key is
+  // never pulled into this module. Same wire shape as createStarEvent.
+  const event = await signDeviceEvent({
+    created_at: createdAt,
+    kind: EVENT_KIND_STAR as EventKind,
+    geohash: geohash5,
+    tags: [['e', id]],
+    content: currentlyStarred ? UNSTAR_CONTENT : STAR_CONTENT,
+  });
   // Optimistic local apply: verified (we just signed it) and immediate,
   // regardless of whether the flood/relay publish below succeeds.
   counter.apply(event, (e) => verifyEvent(crypto, e));

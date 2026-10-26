@@ -7,10 +7,10 @@
 // apps/mobile wires crypto -> protocol; protocol never imports crypto.
 //
 // SCOPE NOTE: v2's full KeyStorePort also covers the RELAY identity
-// (secp256k1 Schnorr for the Nostr envelope) plus rotation/wipe/panic-wipe.
-// The relay key is a separate, independently generated, UNLINKABLE keypair -
-// deliberately OUT OF SCOPE here (see identity.ts trade-off comment).
-// Rotation and wipe are P2 (they need the settings UI).
+// (secp256k1 Schnorr for the Nostr envelope). The relay key is a separate,
+// independently generated, UNLINKABLE keypair - deliberately OUT OF SCOPE
+// here (see identity.ts trade-off comment). Rotation and wipe landed in
+// T8: KeyStorePort.wipeKeypair() + identity.ts rotateDeviceKey().
 
 import { ed25519 } from '@noble/curves/ed25519.js';
 
@@ -50,6 +50,14 @@ export interface KeyStorePort {
 
   /** The persisted public key, or null when none exists yet. */
   getPublicKey(): Promise<Uint8Array | null>;
+
+  /**
+   * Permanently remove the persisted keypair (T8 key rotation: burn the
+   * old identity). After this, loadKeypair() returns null and sign()
+   * throws until a new keypair is stored. Implementations must remove
+   * the key from the backing store, not just drop an in-memory copy.
+   */
+  wipeKeypair(): Promise<void>;
 }
 
 /** Load the stored keypair, or generate + store one on first launch. */
@@ -112,6 +120,10 @@ export class MemoryKeyStore implements KeyStorePort {
   async getPublicKey(): Promise<Uint8Array | null> {
     const kp = await this.loadKeypair();
     return kp ? kp.publicKey : null;
+  }
+
+  async wipeKeypair(): Promise<void> {
+    this.backing.delete(MemoryKeyStore.ITEM);
   }
 }
 

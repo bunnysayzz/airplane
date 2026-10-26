@@ -21,7 +21,7 @@ import { getStore } from './store';
 import { EVENT_KIND_POST, EVENT_KIND_STAR } from '@airplane/protocol';
 import { applyIncomingStar, markStarPostKnown } from './stars';
 import { notifyFeedListeners } from './feed';
-import { getDeviceKeypair, crypto } from './identity';
+import { getDevicePublicKey, crypto } from './identity';
 import { loadRelayUrls } from '../../src/lib/relays';
 import { addBreadcrumb } from '../../src/sentry';
 import { GattBlePort, defaultBleDeps, type BleNativeDeps } from './ble/gatt';
@@ -218,7 +218,7 @@ export async function startTransport(): Promise<void> {
   // mesh runs Nostr-only, exactly like the old no-op port behaved.
   if (await checkBlePermissions().catch(() => false)) {
     try {
-      const { publicKey } = await getDeviceKeypair();
+      const publicKey = await getDevicePublicKey();
       await bringUpBleRadio(toHex(publicKey));
       bleRadioState = 'on';
     } catch {
@@ -341,7 +341,7 @@ export async function enableBleRadio(): Promise<boolean> {
   if (bleRadioState === 'on') return true;
   try {
     if (!(await requestBlePermissions())) return false;
-    const { publicKey } = await getDeviceKeypair();
+    const publicKey = await getDevicePublicKey();
     await bringUpBleRadio(toHex(publicKey));
     bleRadioState = 'on';
     return true;

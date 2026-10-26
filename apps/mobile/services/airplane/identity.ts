@@ -21,12 +21,27 @@
 // independently generated keypair with no published binding - unlinkable to
 // this mesh key by default. Not built here.
 //
-// P3 hardening: signing still happens with the secret key in app memory via
-// protocol's signEvent. The KeyStorePort.sign() seam exists so a later pass
-// can move all signing behind the store and keep key material out of the
-// app process entirely.
+// T8 hardening: all app signing goes through the KeyStorePort.sign() seam
+// (signWithDeviceKey / signDeviceEvent below). Call-sites never receive the
+// secret key — only this module (custody owner) and the DM key derivation
+// (dm.ts, which needs the secret itself to derive X25519 keys, not to sign)
+// ever touch it. HONEST LIMIT, not an enclave claim: on the
+// expo-secure-store path, KeyStorePort.sign() itself loads the secret from
+// the platform keystore into JS memory to run the pure-JS ed25519 sign, so
+// the secret still transits app memory briefly inside the store. What the
+// seam buys is containment (one place touches it, swappable for a native
+// enclave signer later without touching call-sites) plus a session cache
+// boundary — not hardware-backed signing. See the T8 note in the report.
 
-import { NobleCrypto, type CryptoPort } from '@airplane/protocol';
+import {
+  NobleCrypto,
+  eventId,
+  toHex,
+  type CryptoPort,
+  type EventKind,
+  type SignedEvent,
+  type UnsignedEventFields,
+} from '@airplane/protocol';
 import {
   MemoryKeyStore,
   SecureKeyStore,
@@ -50,9 +65,23 @@ export function setKeyStore(ks: KeyStorePort | null): void {
   injected = ks;
   cached = null;
   inflight = null;
+  // A (re-)injection resets the fallback latch: the fallback re-establishes
+  // itself on the next failed secure-store load, if it still fails.
+  fallbackActive = false;
 }
 
+/**
+ * Memoized default store (T8). The default store MUST be one instance per
+ * process: signWithDeviceKey() signs through the same store that loaded the
+ * key, and a fresh MemoryKeyStore per call would be empty (no key) in
+ * environments without the native module. All instances over the real
+ * SecureStore share one backing item, so memoizing changes nothing on
+ * device — it only makes the no-native-module path consistent.
+ */
+let defaultStore: KeyStorePort | null = null;
+
 function defaultKeyStore(): KeyStorePort {
+  if (defaultStore) return defaultStore;
   // Lazy require: expo-secure-store has no node-compatible entry, so a
   // top-level import would break Jest. On device (Expo dev build) the
   // native module resolves and we get real Keychain/Keystore persistence.
@@ -61,7 +90,7 @@ function defaultKeyStore(): KeyStorePort {
     const SecureStore = require('expo-secure-store') as SecureStoreLike & {
       AFTER_FIRST_UNLOCK?: number;
     };
-    return new SecureKeyStore(SecureStore, {
+    defaultStore = new SecureKeyStore(SecureStore, {
       storeOptions:
         SecureStore.AFTER_FIRST_UNLOCK !== undefined
           ? { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK }
@@ -69,8 +98,9 @@ function defaultKeyStore(): KeyStorePort {
     });
   } catch {
     // Jest, Expo Go, or any environment without the native module linked.
-    return new MemoryKeyStore();
+    defaultStore = new MemoryKeyStore();
   }
+  return defaultStore;
 }
 
 /**
@@ -85,6 +115,9 @@ function defaultKeyStore(): KeyStorePort {
  */
 let memoryFallback: MemoryKeyStore | null = null;
 
+/** True once the session has fallen back to the in-memory store (T8). */
+let fallbackActive = false;
+
 /**
  * Load-or-generate through the default store, falling back to the in-memory
  * store when the secure store throws at call time. An explicitly injected
@@ -95,11 +128,24 @@ async function loadDefaultKeypair(): Promise<DeviceKeypair> {
     return await loadOrGenerateKeypair(defaultKeyStore());
   } catch (err) {
     memoryFallback ??= new MemoryKeyStore();
+    fallbackActive = true;
     addBreadcrumb('keystore-fallback', {
       reason: err instanceof Error ? err.name : 'unknown',
     });
     return loadOrGenerateKeypair(memoryFallback);
   }
+}
+
+/**
+ * The store that actually holds the live identity: the injected store when
+ * one is set, the session fallback store when the secure store failed, else
+ * the memoized default store. Signing and rotation go through this — never
+ * through a fresh store instance, which could point at different backing.
+ */
+function activeKeyStore(): KeyStorePort {
+  if (injected) return injected;
+  if (fallbackActive && memoryFallback) return memoryFallback;
+  return defaultKeyStore();
 }
 
 let cached: DeviceKeypair | null = null;
@@ -137,13 +183,128 @@ export async function getDeviceKeypair(): Promise<DeviceKeypair> {
 }
 
 /**
+ * The device's current public key, without handing the caller the secret.
+ * Callers that only stamp a pubkey (BLE radio bring-up, transport) use this
+ * instead of getDeviceKeypair() so the secret never transits their scope.
+ * (The keypair is still cached in this module — see the T8 note above.)
+ */
+export async function getDevicePublicKey(): Promise<Uint8Array> {
+  const kp = await getDeviceKeypair();
+  return kp.publicKey;
+}
+
+/**
+ * Sign `msg` through the active keystore's sign() seam. The caller never
+ * sees the secret key: only the store implementation loads it (from the
+ * platform keystore into JS memory, briefly) to run the ed25519 sign.
+ * Ensures a keypair exists first, so first-launch signing generates one
+ * exactly like getDeviceKeypair() does.
+ */
+export async function signWithDeviceKey(msg: Uint8Array): Promise<Uint8Array> {
+  await getDeviceKeypair();
+  return activeKeyStore().sign(msg);
+}
+
+/**
+ * Build + sign a full event through the seam: the protocol's eventId over
+ * the fields, signed by signWithDeviceKey(). Same wire shape as protocol's
+ * synchronous signEvent — id = eventId(fields), sig = ed25519(id) — but
+ * async, because the store's sign() is async. This is the ONLY signing
+ * path app call-sites (composer, stars, reshares, view receipts) may use;
+ * protocol's signEvent stays for tests and pure-protocol code.
+ */
+export async function signDeviceEvent(
+  fields: Omit<UnsignedEventFields, 'pubkey'> & { kind: EventKind },
+): Promise<SignedEvent> {
+  const pubkey = await getDevicePublicKey();
+  const full: UnsignedEventFields = { ...fields, pubkey };
+  const id = eventId(full);
+  const sig = await signWithDeviceKey(id);
+  return { ...full, id, sig };
+}
+
+/** Listeners run after a successful rotation (stars/view/DM caches). */
+export type IdentityChangeListener = () => void;
+const identityChangeListeners = new Set<IdentityChangeListener>();
+
+/**
+ * Register a callback for identity rotation. Returns an unsubscribe.
+ * Modules that cache identity-derived state (stars' own-pubkey cache,
+ * view tracker's per-launch receipt set, the DM service singleton) clear
+ * that state here so the new identity takes effect without an app restart.
+ */
+export function onIdentityChange(listener: IdentityChangeListener): () => void {
+  identityChangeListeners.add(listener);
+  return () => {
+    identityChangeListeners.delete(listener);
+  };
+}
+
+export interface RotationResult {
+  /** Hex of the burned (old) public key. */
+  oldPublicKeyHex: string;
+  /** Hex of the new public key. */
+  newPublicKeyHex: string;
+}
+
+/**
+ * Burn the current identity and mint a fresh one (T8, Settings → Identity).
+ *
+ * Sequence: generate the new keypair FIRST, then wipe the old one, then
+ * store the new one — so a wipe failure leaves the old identity intact
+ * (rotation aborts, nothing burned). If storing the new key fails after
+ * the wipe, the cache is cleared and the next load regenerates a fresh key,
+ * so the user is never left keyless — just with a different new key than
+ * the one this call generated. Old posts, stars, reshares and receipts
+ * stay under the OLD pubkey: nothing re-signs them, and a tombstone from
+ * the new key cannot delete old posts (authorship is abandoned, not
+ * transferred). The DM address is derived from the mesh secret, so it
+ * changes too — old DM peers cannot reach the new identity.
+ *
+ * On a fallback (in-memory) identity the burn only affects this session:
+ * the fallback key dies with the process anyway.
+ */
+export async function rotateDeviceKey(): Promise<RotationResult> {
+  const oldKp = await getDeviceKeypair();
+  const store = activeKeyStore();
+  const next = store.generateKeypair();
+  await store.wipeKeypair();
+  try {
+    await store.storeKeypair(next);
+  } catch (err) {
+    // Wiped but not re-stored: clear every cache so the next load mints a
+    // fresh key rather than serving the burned one.
+    cached = null;
+    inflight = null;
+    throw err;
+  }
+  cached = next;
+  inflight = null;
+  identityChangeListeners.forEach((listener) => {
+    try {
+      listener();
+    } catch {
+      // One listener's failure must not roll back a completed rotation.
+    }
+  });
+  return {
+    oldPublicKeyHex: toHex(oldKp.publicKey),
+    newPublicKeyHex: toHex(next.publicKey),
+  };
+}
+
+/**
  * Test seam: drop the cached keypair (and any injected keystore, plus any
  * in-flight load) so the next getDeviceKeypair() load-or-generates fresh -
- * simulating a new device / burned identity.
+ * simulating a new device / burned identity. Also drops the memoized
+ * default store: in Jest the default is a fresh in-memory store per reset,
+ * so keeping the old instance would resurrect the pre-reset key.
  */
 export function __resetDeviceKeypairForTests(): void {
   cached = null;
   injected = null;
   inflight = null;
   memoryFallback = null;
+  defaultStore = null;
+  fallbackActive = false;
 }

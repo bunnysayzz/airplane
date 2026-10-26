@@ -436,6 +436,8 @@ export const en = {
     privacyFullPolicy: 'Read the full privacy policy (PRIVACY.md)',
     relaysTitle: 'Relays',
     relaysHint: 'Opens relay settings',
+    identityTitle: 'Identity',
+    identityHint: 'Opens identity settings',
     relaysLead:
       'Relays carry your posts to the wider network. These are the ones Airplane publishes to when you are online.',
     relaysRestartNote: 'Changes apply the next time the app starts.',
@@ -446,6 +448,27 @@ export const en = {
     relaysInvalid: 'Enter a valid relay URL starting with wss://, or one already in the list.',
     relaysRemove: 'Remove {{url}}',
     relaysReset: 'Reset to default relays',
+  },
+  identity: {
+    title: 'Identity',
+    lead: 'This is your anonymous identity on Airplane. Every post, star and reshare you make is signed with it, so other phones know it came from one device — without knowing who you are.',
+    current: 'Current identity',
+    loading: 'Loading identity…',
+    loadFailed: 'Could not load your identity. Try reopening Settings.',
+    consequence:
+      'Burning this identity cannot be undone. Your old posts stay under the old name, and the old identity is abandoned: it can never post, star, reshare or delete again, and nothing you made with it moves to the new one. Your new posts will carry a new name.',
+    dmConsequence:
+      'Your message address changes too — it is derived from the same key. People you messaged before cannot reach this new identity, and old chats will not follow you.',
+    burnSection: 'Start over',
+    burn: 'Burn this identity',
+    burning: 'Burning…',
+    burnConfirmTitle: 'Burn this identity?',
+    burnConfirmMessage:
+      'This cannot be undone. Your old posts stay under the old name, the old identity is abandoned for good, and your message address changes — old DM peers will not reach the new identity.',
+    burnConfirm: 'Burn it',
+    burnCancel: 'Keep it',
+    burnDone: 'New identity created.',
+    burnFailed: 'Burn failed — your old identity is untouched. Try again.',
   },
   appearance: {
     title: 'Appearance',

@@ -1,8 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // DM app wiring: one DmService singleton for the UI.
 // Keys come from the existing device identity (identity.ts): the DM keypair
-// is derived from the device Ed25519 secret, no new key material, no T8 yet
-// (see dm-plan.md §8 + dm.ts header for the T8 caveat).
+// is derived from the device Ed25519 secret, no new key material.
+// T8 HONEST EXCEPTION: this derivation CANNOT go behind the
+// KeyStorePort.sign() seam — deriving an X25519 keypair from the Ed25519
+// secret needs the secret itself, not a signature over a message. So dm.ts
+// remains, with identity.ts's custody owner, the only app module that
+// receives the secret — and only to derive (never to store or log) the DM
+// keys. Consequence of T8 rotation: the DM address changes with the mesh
+// identity (same derivation, new secret), so old DM peers cannot reach the
+// new identity; the rotation screen says so, and rotation resets this
+// singleton so the next DM derives from the new key.
 // PERSISTENCE NOTE (P1 follow-up): the store below is MemoryDmStore —
 // conversations survive only for the app session. A SQLite DmStore on
 // SEPARATE dm_* tables (same DmStorePort) is the follow-up; the service,
@@ -15,10 +23,21 @@ import {
   dmKeypairFromDeviceSecret,
   dmToHex,
 } from '@airplane/transport';
-import { getDeviceKeypair } from './identity';
+import { getDeviceKeypair, onIdentityChange } from './identity';
 
 let service: DmService | null = null;
 let servicePromise: Promise<DmService> | null = null;
+
+/** Drop the singleton (T8 rotation: the next DM derives from the new key). */
+export function resetDmService(): void {
+  if (service) service.stop();
+  service = null;
+  servicePromise = null;
+}
+
+// T8 rotation changes the DM address (derived from the mesh secret), so a
+// burn must not leave a singleton keyed to the old secret alive.
+onIdentityChange(resetDmService);
 
 export async function getDmService(): Promise<DmService> {
   if (service) return service;
@@ -53,7 +72,5 @@ export async function sendDm(peerHex: string, text: string): Promise<void> {
 
 /** Test seam: drop the singleton so tests get a fresh service. */
 export function __resetDmServiceForTests(): void {
-  if (service) service.stop();
-  service = null;
-  servicePromise = null;
+  resetDmService();
 }

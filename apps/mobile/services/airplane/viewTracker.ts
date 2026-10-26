@@ -12,8 +12,8 @@
 // across restarts: the same device re-viewing a post after a restart does
 // NOT count twice.
 
-import { createViewReceipt, fromHex } from '@airplane/protocol';
-import { getDeviceKeypair, crypto } from './identity';
+import { EVENT_KIND_RECEIPT, type EventKind } from '@airplane/protocol';
+import { onIdentityChange, signDeviceEvent } from './identity';
 import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
 
@@ -25,6 +25,12 @@ const HEX64 = /^[0-9a-f]{64}$/i;
 
 // Event ids already receipted this launch (module scope = app launch).
 const receiptedThisLaunch = new Set<string>();
+
+// T8 rotation: a new identity may legitimately receipt the same post again
+// (dedup is per pubkey), so a burn clears the per-launch set.
+onIdentityChange(() => {
+  receiptedThisLaunch.clear();
+});
 
 /**
  * Pure: which viewable keys are newly seen event ids?
@@ -54,14 +60,14 @@ export async function emitViewReceipt(postIdHex: string): Promise<boolean> {
   const store = getStore();
   const post = await store.getEvent(postIdHex);
   if (!post) return false; // receipt only references posts we actually hold
-  const { publicKey, secretKey } = await getDeviceKeypair();
-  const receipt = createViewReceipt({
-    crypto,
-    secretKey,
-    pubkey: publicKey,
-    geohash5: post.geohash,
-    postId: fromHex(postIdHex),
-    createdAt: Math.floor(Date.now() / 1000),
+  // T8: signed through the KeyStorePort sign() seam — same wire shape as
+  // createViewReceipt, but the secret key never enters this module.
+  const receipt = await signDeviceEvent({
+    created_at: Math.floor(Date.now() / 1000),
+    kind: EVENT_KIND_RECEIPT as EventKind,
+    geohash: post.geohash,
+    tags: [['e', postIdHex.toLowerCase()]],
+    content: '',
   });
   const accepted = await store.saveReceipt(receipt);
   if (accepted) notifyFeedListeners(); // views/score changed

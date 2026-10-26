@@ -16,15 +16,17 @@
 // --- RESHARE (delimited block: end) ---
 
 import {
-  createReshare,
-  createUnreshare,
-  fromHex,
+  EVENT_KIND_RESHARE,
+  RESHARE_CONTENT,
   ReshareCounter,
+  UNRESHARE_CONTENT,
+  fromHex,
   toHex,
   verifyEvent,
+  type EventKind,
   type ReshareCluster,
 } from '@airplane/protocol';
-import { getDeviceKeypair, crypto } from './identity';
+import { getDevicePublicKey, signDeviceEvent, crypto } from './identity';
 import { getStore } from './store';
 import { authorLabelFor } from './names';
 import type { PostCardModel } from './types';
@@ -69,18 +71,22 @@ export async function toggleReshare(card: PostCardModel): Promise<string> {
   if (!card.authorPubkeyHex) {
     throw new Error('toggleReshare: card has no authorPubkeyHex');
   }
-  const keypair = await getDeviceKeypair();
-  const myHex = toHex(keypair.publicKey);
+  const publicKey = await getDevicePublicKey();
+  const myHex = toHex(publicKey);
   const already = counter.hasReshared(myHex, card.eventId);
-  const params = {
-    crypto,
-    secretKey: keypair.secretKey,
-    pubkey: keypair.publicKey,
-    geohash5: card.geohash,
-    originalPostId: fromHex(card.eventId),
-    originalAuthorPubkey: fromHex(card.authorPubkeyHex),
-  };
-  const event = already ? createUnreshare(params) : createReshare(params);
+  // T8: signed through the KeyStorePort sign() seam — same wire shape as
+  // createReshare/createUnreshare (tags e + p, no post content), but the
+  // secret key never enters this module.
+  const event = await signDeviceEvent({
+    created_at: Math.floor(Date.now() / 1000),
+    kind: EVENT_KIND_RESHARE as EventKind,
+    geohash: card.geohash,
+    tags: [
+      ['e', card.eventId.toLowerCase()],
+      ['p', card.authorPubkeyHex.toLowerCase()],
+    ],
+    content: already ? UNRESHARE_CONTENT : RESHARE_CONTENT,
+  });
   counter.markPostKnown(card.eventId);
   counter.add(event, (e) => verifyEvent(crypto, e));
   try {
@@ -95,8 +101,8 @@ export async function toggleReshare(card: PostCardModel): Promise<string> {
 /** Best-effort device pubkey hex for "reshared by me" state (undefined when unavailable). */
 export async function getMyPubkeyHex(): Promise<string | undefined> {
   try {
-    const keypair = await getDeviceKeypair();
-    return toHex(keypair.publicKey);
+    const publicKey = await getDevicePublicKey();
+    return toHex(publicKey);
   } catch {
     return undefined;
   }

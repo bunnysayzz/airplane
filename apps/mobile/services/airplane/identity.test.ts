@@ -136,6 +136,7 @@ describe('concurrency guard and restart persistence', () => {
       loadKeypair: async () => null,
       sign: async () => new Uint8Array(64),
       getPublicKey: async () => null,
+      wipeKeypair: async () => {},
     };
     mod.__resetDeviceKeypairForTests();
     mod.setKeyStore(flaky);
@@ -182,6 +183,7 @@ describe('concurrency guard and restart persistence', () => {
     loadKeypair: async () => fixed,
     sign: async () => new Uint8Array(64),
     getPublicKey: async () => fixed.publicKey,
+    wipeKeypair: async () => {},
   };
 
   test('an injected keystore wins over the default', async () => {
@@ -269,6 +271,7 @@ describe('secure-store call-time failure fallback (T1)', () => {
       },
       sign: async () => new Uint8Array(64),
       getPublicKey: async () => null,
+      wipeKeypair: async () => {},
     };
     mod.setKeyStore(broken);
     await expect(mod.getDeviceKeypair()).rejects.toThrow(

@@ -18,7 +18,18 @@ export {
   emitViewReceipt,
   type ViewabilityInfo,
 } from './viewTracker';
-export { getDeviceKeypair, setKeyStore, crypto, type DeviceKeypair } from './identity';
+export {
+  getDeviceKeypair,
+  getDevicePublicKey,
+  setKeyStore,
+  signWithDeviceKey,
+  signDeviceEvent,
+  rotateDeviceKey,
+  onIdentityChange,
+  crypto,
+  type DeviceKeypair,
+  type RotationResult,
+} from './identity';
 export { getStore } from './store';
 // --- RESHARE (delimited) ---
 export {

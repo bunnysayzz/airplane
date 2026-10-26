@@ -9,12 +9,11 @@
 
 import {
   normalizeContent,
-  signEvent,
   toHex,
   EVENT_KIND_POST,
   type EventKind,
 } from '@airplane/protocol';
-import { getDeviceKeypair, crypto, type DeviceKeypair } from './identity';
+import { getDevicePublicKey, signDeviceEvent } from './identity';
 import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
 import { getLocationCell as resolveLocationCell } from './location';
@@ -77,9 +76,11 @@ export function tagsForPublish(_opts: PublishOpts): string[][] {
  */
 export async function publishPost(body: string, opts: PublishOpts): Promise<string> {
   const content = normalizeContent(body);
-  let keypair: DeviceKeypair;
+  // T8: the keypair load stays its own stage (a keystore failure is still
+  // stage 'keypair'), but signing itself goes through the KeyStorePort
+  // sign() seam — publishPost never receives the secret key.
   try {
-    keypair = await getDeviceKeypair();
+    await getDevicePublicKey();
   } catch (err) {
     throw new PublishError('keypair', err);
   }
@@ -88,8 +89,7 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
   const geohash = opts.geohash5 ?? (await getLocationCell());
   let event;
   try {
-    event = signEvent(crypto, keypair.secretKey, {
-      pubkey: keypair.publicKey,
+    event = await signDeviceEvent({
       created_at: Math.floor(Date.now() / 1000),
       kind: EVENT_KIND_POST as EventKind,
       geohash,
