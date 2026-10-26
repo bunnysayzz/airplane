@@ -19,6 +19,12 @@
 // alongside a service UUID (another 26), blowing the budget. Consequence:
 // the central scans unfiltered and filters by manufacturer id in JS (no
 // hardware scan filter in v1 - a battery trade-off, documented).
+// R3 audit result, verified against the packet math above: the packet is
+// 2 (AD header) + 2 (company id) + 8 (tag) = 12 bytes, so size is NOT the
+// advertise failure; any scan filter on the service UUID would never
+// match this packet, so the scan must stay unfiltered with the JS
+// manufacturer-data filter (see gatt.ts central scan). Do not "fix"
+// discovery by adding a UUID filter.
 // The full peerId is resolved after connect via the IDENT characteristic
 // (central reads it) or the hello datagram (peripheral side learns the
 // central's identity when it writes its hello).

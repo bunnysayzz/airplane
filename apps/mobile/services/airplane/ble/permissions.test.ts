@@ -3,7 +3,7 @@
 // The react-native module is the jest mock (__mocks__/react-native.ts),
 // cast to its mock shape because the real RN types don't declare it.
 
-import { ensureBlePermissions, checkBlePermissions, requestBlePermissions } from './permissions';
+import { ensureBlePermissions, checkBlePermissions, requestBlePermissions, checkBlePermissionStates } from './permissions';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const RN = require('react-native') as {
@@ -113,5 +113,30 @@ describe('requestBlePermissions (priming: user-action only)', () => {
   test('false when denied at the OS dialog', async () => {
     RN.PermissionsAndroid.request.mockResolvedValueOnce('granted').mockResolvedValueOnce('denied');
     await expect(requestBlePermissions()).resolves.toBe(false);
+  });
+});
+
+describe('checkBlePermissionStates (R3 location fix)', () => {
+  beforeEach(() => {
+    RN.__resetReactNativeMock();
+  });
+
+  test('API 31+ location row checks COARSE, not FINE', async () => {
+    RN.Platform.OS = 'android';
+    RN.Platform.Version = 34;
+    const report = await checkBlePermissionStates();
+    expect(report.location).toBe('granted');
+    const checked = RN.PermissionsAndroid.check.mock.calls.map((c: unknown[]) => c[0]);
+    expect(checked).toContain('android.permission.ACCESS_COARSE_LOCATION');
+    expect(checked).not.toContain('android.permission.ACCESS_FINE_LOCATION');
+  });
+
+  test('API <= 30 location row checks FINE', async () => {
+    RN.Platform.OS = 'android';
+    RN.Platform.Version = 30;
+    await checkBlePermissionStates();
+    const checked = RN.PermissionsAndroid.check.mock.calls.map((c: unknown[]) => c[0]);
+    expect(checked).toContain('android.permission.ACCESS_FINE_LOCATION');
+    expect(checked).not.toContain('android.permission.ACCESS_COARSE_LOCATION');
   });
 });

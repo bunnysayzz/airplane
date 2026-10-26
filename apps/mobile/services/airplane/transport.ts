@@ -266,10 +266,14 @@ export async function startTransport(): Promise<void> {
       await bringUpBleRadio(toHex(publicKey));
       bleRadioState = 'on';
     } catch {
-      // Radio unavailable (no BLE, native lib missing): tear down whatever
-      // half-started and continue Nostr-only.
+      // R3: do not conflate a permission loss between the check and the
+      // bring-up (or a permanently denied grant) with a dead radio.
+      // Re-check: missing grants mean permission-blocked (the priming
+      // and Diagnostics Settings flows own the next step); only a
+      // granted-but-failed bring-up is unavailable. Previously every
+      // failure landed as unavailable, hiding the permission path.
       await tearDownBleRadio();
-      bleRadioState = 'unavailable';
+      bleRadioState = (await checkBlePermissions().catch(() => false)) ? 'unavailable' : 'permission-blocked';
     }
   } else {
     bleRadioState = 'permission-blocked';
@@ -392,7 +396,12 @@ export async function enableBleRadio(): Promise<boolean> {
     syncDiagnosticsAdapterState();
     return true;
   } catch {
-    bleRadioState = 'unavailable';
+    // Same R3 classification as startTransport: a failed bring-up with
+    // grants still missing (permanently denied is the common case: the
+    // OS request returns denied without showing a dialog) stays
+    // permission-blocked, so Diagnostics keeps offering Open Settings
+    // instead of reporting a dead radio.
+    bleRadioState = (await checkBlePermissions().catch(() => false)) ? 'unavailable' : 'permission-blocked';
     syncDiagnosticsAdapterState();
     return false;
   }

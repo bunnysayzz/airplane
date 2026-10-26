@@ -48,6 +48,7 @@ export const PermissionsAndroid = {
     BLUETOOTH_ADVERTISE: 'android.permission.BLUETOOTH_ADVERTISE',
     BLUETOOTH_CONNECT: 'android.permission.BLUETOOTH_CONNECT',
     ACCESS_FINE_LOCATION: 'android.permission.ACCESS_FINE_LOCATION',
+    ACCESS_COARSE_LOCATION: 'android.permission.ACCESS_COARSE_LOCATION',
   } as Record<string, string>,
   RESULTS: {
     GRANTED: 'granted',

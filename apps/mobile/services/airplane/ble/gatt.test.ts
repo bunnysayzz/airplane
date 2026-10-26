@@ -9,6 +9,7 @@ import { toHex } from '@airplane/protocol';
 import {
   GattBlePort,
   defaultBleDeps,
+  describeAdvertiseError,
   extractTag,
   type BleNativeDeps,
   type CentralAdapter,
@@ -195,6 +196,28 @@ describe('GattBlePort lifecycle', () => {
     const { deps } = makeDeps({ createPeripheral: null });
     const port = new GattBlePort(deps);
     await expect(port.advertise(OWN_HEX)).rejects.toThrow(/peripheral role unavailable/);
+  });
+
+  test('advertise failure from a null native error is described, not "null"', async () => {
+    expect(describeAdvertiseError(null)).toMatch(/native error was empty/);
+    expect(describeAdvertiseError(null)).not.toMatch(/^null$/);
+    const { deps, peripheral } = makeDeps({
+      createPeripheral: async () => ({
+        startAdvertising: async () => {
+          // Native layer rejecting with null (the R2 device symptom).
+          throw null as unknown as Error;
+        },
+        stopAdvertising: async () => {},
+        onWrite: () => () => {},
+        notify: async () => {},
+        destroy: async () => {
+          peripheral.destroyed = true;
+        },
+      }),
+    });
+    const port = new GattBlePort(deps);
+    await expect(port.advertise(OWN_HEX)).rejects.toThrow(/native error was empty/);
+    expect(peripheral.destroyed).toBe(true);
   });
 
   test('scan without central resolves to an inert unsubscribe', async () => {
@@ -566,7 +589,7 @@ describe('defaultBleDeps adapter delegation', () => {
     await deps.central!.start();
     expect(mgr.start).toHaveBeenCalledWith({ showAlert: false });
     await deps.central!.scan();
-    expect(mgr.scan).toHaveBeenCalledWith({ scanMode: 2 });
+    expect(mgr.scan).toHaveBeenCalledWith([], 0, false, { scanMode: 2 });
     const mtu = await deps.central!.requestMtu('dev', 512);
     expect(mtu).toBe(256);
     expect(mgr.requestMTU).toHaveBeenCalledWith('dev', 512);

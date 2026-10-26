@@ -17,6 +17,7 @@ import {
   type DiagnosticsSnapshot,
 } from '../../services/airplane/diagnostics';
 import { checkBlePermissionStates } from '../../services/airplane/ble/permissions';
+import { enableBleRadio } from '../../services/airplane/transport';
 
 interface DiagnosticsProps {
   onBack: () => void;
@@ -175,6 +176,26 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
               accessibilityLabel={t('settings.diagnosticsOpenSettings')}
             >
               <Text style={[type.name, styles.buttonText]}>{t('settings.diagnosticsOpenSettings')}</Text>
+            </Pressable>
+          )}
+          {snapshot.advertising.state === 'stopped' && (
+            <Pressable
+              style={styles.button}
+              onPress={() => {
+                // R3: restart the radio from Diagnostics, not only on
+                // next launch. enableBleRadio re-requests (a no-op when
+                // granted) and brings up advertise + scan; a permanently
+                // denied grant returns false and keeps the Open Settings
+                // path above, it never loops an OS dialog.
+                void enableBleRadio().then(() => {
+                  refreshPermissions();
+                  setSnapshot(getDiagnosticsSnapshot());
+                });
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={t('settings.diagnosticsRetryBle')}
+            >
+              <Text style={[type.name, styles.buttonText]}>{t('settings.diagnosticsRetryBle')}</Text>
             </Pressable>
           )}
         </View>

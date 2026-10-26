@@ -89,6 +89,23 @@ async function checkOne(perm: Permission | undefined): Promise<BlePermissionStat
   }
 }
 
+/**
+ * Location grant state, read against the permission the manifest actually
+ * declares. R3 fix for the R2 diagnostics discrepancy (Diagnostics said
+ * location denied while system settings showed it allowed while using):
+ * the manifest declares only ACCESS_COARSE_LOCATION on API 31+ (fine is
+ * maxSdkVersion 30), so a FINE check is always denied on API 31+ even
+ * when the user granted coarse location. On API 31+ the location row
+ * therefore checks COARSE; FINE is only checked on API <= 30, where it
+ * is the declared permission. BLUETOOTH_SCAN also carries
+ * neverForLocation, so on API 31+ location is not a BLE gate at all:
+ * it only reports the feed-location grant, never blocks the radio.
+ */
+async function checkLocationState(apiLevel: number): Promise<BlePermissionState> {
+  const p = PermissionsAndroid.PERMISSIONS;
+  return apiLevel >= 31 ? checkOne(p.ACCESS_COARSE_LOCATION) : checkOne(p.ACCESS_FINE_LOCATION);
+}
+
 /** Read the BLE and location grant states without prompting. Never throws. */
 export async function checkBlePermissionStates(): Promise<BlePermissionReport> {
   const apiLevel = typeof Platform.Version === 'number' ? Platform.Version : 0;
@@ -97,7 +114,7 @@ export async function checkBlePermissionStates(): Promise<BlePermissionReport> {
     scan: apiLevel >= 31 ? await checkOne(p.BLUETOOTH_SCAN) : 'unavailable',
     advertise: apiLevel >= 31 ? await checkOne(p.BLUETOOTH_ADVERTISE) : 'unavailable',
     connect: apiLevel >= 31 ? await checkOne(p.BLUETOOTH_CONNECT) : 'unavailable',
-    location: await checkOne(p.ACCESS_FINE_LOCATION),
+    location: await checkLocationState(apiLevel),
     locationServices: 'unavailable',
     batteryOptimisation: 'unavailable',
     autostart: 'unavailable',

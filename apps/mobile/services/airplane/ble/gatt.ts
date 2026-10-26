@@ -144,6 +144,20 @@ function isProvisionalKey(key: string): boolean {
   return key.startsWith(PROVISIONAL_TAG_PREFIX) || key.startsWith(PROVISIONAL_MAC_PREFIX);
 }
 
+/**
+ * Describe an advertise failure for diagnostics. Native peripheral errors
+ * can arrive as null, undefined, or an Error with an empty message (the
+ * R2 run's "null BluetoothGattServer addService" case); those must not
+ * be recorded verbatim, or diagnostics shows a meaningless "null".
+ */
+export function describeAdvertiseError(err: unknown): string {
+  if (err instanceof Error && err.message.trim() !== '') return `ble: advertise failed: ${err.message}`;
+  if (typeof err === 'string' && err.trim() !== '' && err !== 'null' && err !== 'undefined') {
+    return `ble: advertise failed: ${err}`;
+  }
+  return 'ble: advertise failed: native error was empty (null/undefined) - check Bluetooth on, peripheral support, and the Diagnostics retry';
+}
+
 export class GattBlePort implements TransportPort {
   private ownPeerId: string | null = null;
   private ownTag: Uint8Array | null = null;
@@ -181,15 +195,21 @@ export class GattBlePort implements TransportPort {
       recordAdvertiseFailure('peripheral role unavailable (native module missing)');
       throw new Error('ble: peripheral role unavailable (native module missing)');
     }
-    const adapter = await factory();
     const tag = peerTagOf(fromHex(peerId));
+    let adapter: PeripheralAdapter | null = null;
     try {
+      adapter = await factory();
       await adapter.startAdvertising(tag, peerId);
     } catch (err) {
-      await adapter.destroy().catch(() => {});
-      const message = err instanceof Error ? err.message : `ble: advertise failed: ${String(err)}`;
+      await adapter?.destroy().catch(() => {});
+      // R3: the R2 device run surfaced this failure as a bare "null"
+      // (a native BluetoothGattServer error with no message). A null
+      // rejection must never reach diagnostics as "null": describe it,
+      // record it, and throw an Error carrying the description, so the
+      // next device run shows which stage failed instead of a blank.
+      const message = describeAdvertiseError(err);
       recordAdvertiseFailure(message);
-      throw err instanceof Error ? err : new Error(`ble: advertise failed: ${String(err)}`);
+      throw new Error(message);
     }
     // Advertisement length on the air: AD header (2 bytes) + company id
     // (2 bytes) + 8-byte tag = 12 bytes, inside the 31-byte legacy budget.
@@ -662,13 +682,20 @@ function loadCentralAdapter(): CentralAdapter | null {
     const emitter = new rn.NativeEventEmitter(rn.NativeModules.BleManager);
     return {
       start: () => mgr.start({ showAlert: false }),
-      // Low-latency scan (Android SCAN_MODE_LOW_LATENCY = 2, the
-      // ble-manager BleScanMode.LowLatency value): the default LowPower
-      // mode stretches discovery over seconds, which reads as a dead mesh
-      // when two phones are already side by side. Battery trade-off, taken
-      // deliberately: fast discovery is the mesh's core promise. Scan runs
-      // until stopScan (seconds default 0 = indefinite in this lib version).
-      scan: () => mgr.scan({ scanMode: 2 }),
+      // R3 scan audit: ble-manager's scan is POSITIONAL,
+      // scan(serviceUUIDs, seconds, allowDuplicates, scanningOptions).
+      // The old call mgr.scan({ scanMode: 2 }) passed the options object
+      // as the serviceUUIDs argument, so LowLatency never applied and
+      // discovery ran at the default LowPower pace. Correct form:
+      // serviceUUIDs [] (UNFILTERED, deliberately: the advertise packet
+      // carries manufacturer data only, no service UUID, so a UUID
+      // filter would never match a mesh peer; the JS layer filters by
+      // manufacturer data in extractTag/onDiscover), seconds 0
+      // (indefinite until stopScan), allowDuplicates false (iOS only),
+      // scanningOptions { scanMode: 2 } (Android SCAN_MODE_LOW_LATENCY).
+      // Battery trade-off, taken deliberately: fast discovery is the
+      // mesh's core promise.
+      scan: () => mgr.scan([], 0, false, { scanMode: 2 }),
       stopScan: () => mgr.stopScan(),
       onDiscover: (cb) => {
         const sub = emitter.addListener('BleManagerDiscoverPeripheral', (p: unknown) =>
@@ -757,21 +784,49 @@ function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
     const inst = new PeripheralClass(); // throws when the native module is not linked
     await new Promise<void>((resolve, reject) => {
       inst.once('ready', () => resolve());
-      inst.once('error', (err: unknown) => reject(err instanceof Error ? err : new Error(String(err))));
+      inst.once('error', (err: unknown) =>
+        reject(new Error(describeAdvertiseError(err).replace('ble: advertise failed: ', 'ble: peripheral ready failed: '))),
+      );
     });
     return {
       startAdvertising: async (tag, identHex) => {
-        await inst.addService(MESH_SERVICE_UUID, true);
-        await inst.addCharacteristic(MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, PROP_WRITE | PROP_WRITE_NO_RESPONSE, PERM_WRITE);
-        await inst.addCharacteristic(MESH_SERVICE_UUID, MESH_TX_CHAR_UUID, PROP_NOTIFY | PROP_READ, PERM_READ);
-        await inst.addCharacteristic(MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID, PROP_READ | PROP_WRITE, PERM_READ | PERM_WRITE);
-        await inst.updateValue(MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID, Buffer.from(identHex, 'ascii'));
+        // R3: stage-tag every native step. The R2 run's failure was a
+        // null BluetoothGattServer error with no stage attached, so the
+        // next device run must show whether addService, a characteristic,
+        // the IDENT value, or startAdvertising itself failed.
+        const stages: [string, () => Promise<unknown>][] = [
+          ['addService', () => inst.addService(MESH_SERVICE_UUID, true)],
+          [
+            'addCharacteristic RX',
+            () => inst.addCharacteristic(MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, PROP_WRITE | PROP_WRITE_NO_RESPONSE, PERM_WRITE),
+          ],
+          [
+            'addCharacteristic TX',
+            () => inst.addCharacteristic(MESH_SERVICE_UUID, MESH_TX_CHAR_UUID, PROP_NOTIFY | PROP_READ, PERM_READ),
+          ],
+          [
+            'addCharacteristic IDENT',
+            () => inst.addCharacteristic(MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID, PROP_READ | PROP_WRITE, PERM_READ | PERM_WRITE),
+          ],
+          ['updateValue IDENT', () => inst.updateValue(MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID, Buffer.from(identHex, 'ascii'))],
+          [
+            'startAdvertising',
+            () =>
+              inst.startAdvertising(
+                { connectable: true, includeDeviceName: false, manufacturerId: ADVERTISE_COMPANY_ID, manufacturerData: Buffer.from(tag) },
+                undefined,
+              ),
+          ],
+        ];
+        for (const [stage, run] of stages) {
+          try {
+            await run();
+          } catch (err) {
+            throw new Error(`ble: advertise failed at ${stage}: ${describeAdvertiseError(err).replace('ble: advertise failed: ', '')}`);
+          }
+        }
         // Advertise manufacturer data only (12 bytes): the 128-bit service
         // UUID cannot share the 31-byte legacy packet with service data.
-        await inst.startAdvertising(
-          { connectable: true, includeDeviceName: false, manufacturerId: ADVERTISE_COMPANY_ID, manufacturerData: Buffer.from(tag) },
-          undefined,
-        );
       },
       stopAdvertising: async () => {
         await inst.stopAdvertising();
