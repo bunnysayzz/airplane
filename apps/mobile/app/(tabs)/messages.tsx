@@ -5,6 +5,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow } from '@airplane/transport';
 import { DM_UNDECRYPTABLE_PLACEHOLDER } from '@airplane/transport';
 import { getDmService, dmPeerLabel } from '../../services/airplane/dm';
@@ -12,6 +13,7 @@ import { useTheme } from '../../src/theme/themeContext';
 
 export default function MessagesTab() {
     const router = useRouter();
+    const insets = useSafeAreaInsets();
     const { colors, type } = useTheme();
     const [inbox, setInbox] = useState<DmConversationRow[]>([]);
     const [requests, setRequests] = useState<DmConversationRow[]>([]);
@@ -80,10 +82,13 @@ export default function MessagesTab() {
     );
 
     return (
-        <ScrollView style={[styles.root, { backgroundColor: colors.background }]} contentContainerStyle={styles.content}>
+        <ScrollView
+            style={[styles.root, { backgroundColor: colors.background }]}
+            contentContainerStyle={[styles.content, { paddingTop: insets.top + 16 }]}
+        >
             <Text style={[type.title, { color: colors.textPrimary }]}>Messages</Text>
             <Text style={[type.meta, { color: colors.textMuted }]}>
-                Paste a key, or pick someone whose post you saw. No names exist here — keys are the addresses.
+                Paste a key, or pick someone whose post you saw. No names exist here. Keys are the addresses.
             </Text>
             <View style={styles.pasteRow}>
                 <TextInput

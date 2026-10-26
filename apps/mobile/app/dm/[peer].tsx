@@ -6,6 +6,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow, DmThreadRow } from '@airplane/transport';
 import { DM_UNDECRYPTABLE_PLACEHOLDER } from '@airplane/transport';
 import { getDmService, dmPeerLabel, sendDm } from '../../services/airplane/dm';
@@ -14,6 +15,7 @@ import { useTheme } from '../../src/theme/themeContext';
 export default function DmThreadScreen() {
     const { peer } = useLocalSearchParams<{ peer: string }>();
     const peerHex = (peer ?? '').toLowerCase();
+    const insets = useSafeAreaInsets();
     const { colors, type } = useTheme();
     const [thread, setThread] = useState<DmThreadRow[]>([]);
     const [conv, setConv] = useState<DmConversationRow | null>(null);
@@ -56,7 +58,7 @@ export default function DmThreadScreen() {
     const confirmDelete = () => {
         Alert.alert(
             'Delete conversation?',
-            'This only deletes from your device. The relay copy and the other person\'s copy stay exactly where they are — unsend is not possible.',
+            'This only deletes from your device. The relay copy and the other person\'s copy stay exactly where they are. Unsend is not possible.',
             [
                 { text: 'Cancel', style: 'cancel' },
                 {
@@ -73,7 +75,7 @@ export default function DmThreadScreen() {
 
     return (
         <View style={[styles.root, { backgroundColor: colors.background }]}>
-            <View style={[styles.header, { borderBottomColor: colors.borderColor }]}>
+            <View style={[styles.header, { borderBottomColor: colors.borderColor, paddingTop: insets.top + 16 }]}>
                 <Pressable onPress={() => router.back()}>
                     <Text style={[type.meta, { color: colors.accentText }]}>Back</Text>
                 </Pressable>
@@ -83,7 +85,7 @@ export default function DmThreadScreen() {
 
             {isRequest ? (
                 <View style={[styles.requestBar, { borderBottomColor: colors.borderColor }]}>
-                    <Text style={[type.meta, { color: colors.textMuted }]}>Unknown sender — this started in Requests.</Text>
+                    <Text style={[type.meta, { color: colors.textMuted }]}>Unknown sender. This started in Requests.</Text>
                     <View style={styles.requestRow}>
                         <Pressable onPress={() => act(svc => svc.acceptRequest(peerHex))}>
                             <Text style={[type.meta, { color: colors.accentText }]}>Accept</Text>
@@ -129,7 +131,7 @@ export default function DmThreadScreen() {
                                 }}
                             >
                                 <Text style={[type.meta, { color: colors.textMuted }]}>
-                                    {item.status === 'Failed' ? 'Failed — tap to retry' : item.status}
+                                    {item.status === 'Failed' ? 'Failed, tap to retry' : item.status}
                                 </Text>
                             </Pressable>
                         ) : null}
@@ -137,7 +139,7 @@ export default function DmThreadScreen() {
                 )}
             />
 
-            <View style={[styles.sendRow, { borderTopColor: colors.borderColor }]}>
+            <View style={[styles.sendRow, { borderTopColor: colors.borderColor, paddingBottom: insets.bottom + 12 }]}>
                 <TextInput
                     value={draft}
                     onChangeText={setDraft}

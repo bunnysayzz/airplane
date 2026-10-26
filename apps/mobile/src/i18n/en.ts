@@ -53,10 +53,10 @@ export const en = {
     // before the OS Bluetooth dialog; the dialog fires only on "Enable".
     primeTitle: 'Find nearby phones',
     primeMessage:
-      'Airplane uses Bluetooth to find nearby phones and relay posts — no account, no servers, no sign-up. Nothing about you is collected. The system permission dialog only appears if you enable it.',
+      'Airplane uses Bluetooth to find nearby phones and relay posts. No account, no servers, no sign-up. Nothing about you is collected. The system permission dialog only appears if you enable it.',
     enable: 'Enable Bluetooth',
     notNow: 'Not now',
-    enabled: 'Bluetooth on — looking for nearby phones',
+    enabled: 'Bluetooth on, looking for nearby phones',
     deniedTitle: 'Bluetooth is off',
     deniedMessage:
       "Bluetooth permission is off, so nearby phones can't be found. Your posts still travel over the internet when you're online. Allow nearby-device access in Settings to join the mesh.",
@@ -219,7 +219,7 @@ export const en = {
     // Permission priming: the app's own rationale, shown before the OS dialog
     locationPrePromptTitle: 'Location for your post',
     locationPrePromptMessage:
-      'Airplane needs approximate location to place your post on the feed — just a rough area, never your exact spot. The system dialog only appears if you allow it.',
+      'Airplane needs approximate location to place your post on the feed. Just a rough area, never your exact spot. The system dialog only appears if you allow it.',
     locationAllow: 'Allow location',
     locationNotNow: 'Not now',
     locationDeniedTitle: 'Location is off',
@@ -424,7 +424,7 @@ export const en = {
     updateAvailable: 'Update {{version}} available',
     updateTitle: 'Update available',
     updateMessage:
-      'Airplane {{version}} is available. Downloading opens the new APK — nothing installs automatically, and you can install it when you are ready.',
+      'Airplane {{version}} is available. Downloading opens the new APK. Nothing installs automatically, and you can install it when you are ready.',
     updateDownload: 'Download',
     updateLater: 'Later',
     updateOpenFailed: 'Could not open the download',
@@ -451,24 +451,24 @@ export const en = {
   },
   identity: {
     title: 'Identity',
-    lead: 'This is your anonymous identity on Airplane. Every post, star and reshare you make is signed with it, so other phones know it came from one device — without knowing who you are.',
+    lead: 'This is your anonymous identity on Airplane. Every post, star and reshare you make is signed with it, so other phones know it came from one device, without knowing who you are.',
     current: 'Current identity',
     loading: 'Loading identity…',
     loadFailed: 'Could not load your identity. Try reopening Settings.',
     consequence:
       'Burning this identity cannot be undone. Your old posts stay under the old name, and the old identity is abandoned: it can never post, star, reshare or delete again, and nothing you made with it moves to the new one. Your new posts will carry a new name.',
     dmConsequence:
-      'Your message address changes too — it is derived from the same key. People you messaged before cannot reach this new identity, and old chats will not follow you.',
+      'Your message address changes too. It is derived from the same key. People you messaged before cannot reach this new identity, and old chats will not follow you.',
     burnSection: 'Start over',
     burn: 'Burn this identity',
     burning: 'Burning…',
     burnConfirmTitle: 'Burn this identity?',
     burnConfirmMessage:
-      'This cannot be undone. Your old posts stay under the old name, the old identity is abandoned for good, and your message address changes — old DM peers will not reach the new identity.',
+      'This cannot be undone. Your old posts stay under the old name, the old identity is abandoned for good, and your message address changes. Old DM peers will not reach the new identity.',
     burnConfirm: 'Burn it',
     burnCancel: 'Keep it',
     burnDone: 'New identity created.',
-    burnFailed: 'Burn failed — your old identity is untouched. Try again.',
+    burnFailed: 'Burn failed. Your old identity is untouched. Try again.',
   },
   appearance: {
     title: 'Appearance',
