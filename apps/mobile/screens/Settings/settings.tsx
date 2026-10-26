@@ -13,6 +13,7 @@ import { dialog } from '../../src/lib/dialog';
 import Appearance from './appearance';
 import Relays from './relays';
 import Identity from './identity';
+import Diagnostics from './diagnostics';
 import { SettingsHeader } from './header';
 import { makeStyles } from './styles';
 import { useI18n } from '../../src/i18n/i18nContext';
@@ -37,11 +38,11 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const styles = useThemedStyles(makeStyles);
   const insets = useSafeAreaInsets();
   const { compactMode, setCompactMode } = useSettings();
-  // Appearance, Relays, Identity and the privacy explainer are second levels
-  // inside Settings
-  const [page, setPage] = useState<'main' | 'appearance' | 'relays' | 'identity' | 'privacy'>(
-    'main',
-  );
+  // Appearance, Relays, Identity, Diagnostics and the privacy explainer
+  // are second levels inside Settings
+  const [page, setPage] = useState<
+    'main' | 'appearance' | 'relays' | 'identity' | 'diagnostics' | 'privacy'
+  >('main');
   const { t } = useI18n();
   const coatName = t(`coats.${getCoat(coat).key}`);
   // T14: manual update check. Android only — a sideloaded iOS app cannot
@@ -104,6 +105,14 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     return (
       <SafeAreaView style={styles.safeArea}>
         <Identity onBack={() => setPage('main')} />
+      </SafeAreaView>
+    );
+  }
+
+  if (page === 'diagnostics') {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <Diagnostics onBack={() => setPage('main')} />
       </SafeAreaView>
     );
   }
@@ -198,6 +207,18 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           >
             <Ionicons name="key-outline" size={20} color={colors.accentText} />
             <Text style={[labelStyle, styles.rowText]}>{t('settings.identityTitle')}</Text>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+          </Pressable>
+          <View style={styles.divider} />
+          <Pressable
+            style={styles.row}
+            onPress={() => setPage('diagnostics')}
+            accessibilityRole="button"
+            accessibilityLabel={t('settings.diagnosticsTitle')}
+            accessibilityHint={t('settings.diagnosticsHint')}
+          >
+            <Ionicons name="pulse-outline" size={20} color={colors.accentText} />
+            <Text style={[labelStyle, styles.rowText]}>{t('settings.diagnosticsTitle')}</Text>
             <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
           </Pressable>
           <View style={styles.divider} />

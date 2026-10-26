@@ -166,6 +166,30 @@ describe('BleTransport', () => {
     await ble.stop();
   });
 
+  test('dedup hook reports the dropping peer for loop suppression (R2)', async () => {
+    const port = new FakeBlePort();
+    const dropped: string[] = [];
+    const ble = new BleTransport(port, {
+      onDedupDrop: (peerId) => {
+        dropped.push(peerId);
+      },
+    });
+    await ble.start();
+
+    let count = 0;
+    ble.onReceive(() => {
+      count++;
+    });
+
+    const event = makePost('dup-hook');
+    injectEvent(port, 'peer1', event);
+    injectEvent(port, 'peer2', event); // same event, different peer
+
+    expect(count).toBe(1);
+    expect(dropped).toEqual(['peer2']);
+    await ble.stop();
+  });
+
   test('malformed frame is dropped without emitting', async () => {
     const port = new FakeBlePort();
     const ble = new BleTransport(port);
@@ -272,6 +296,26 @@ describe('HybridTransport', () => {
 
     expect(seen).toHaveLength(1);
     expect(seen[0].source).toBe('ble');
+    await h.stop();
+  });
+
+  test('dedup hook reports source and peer for cross-transport drops (R2)', async () => {
+    const dropped: { source: IngressSource; peerId: string | null }[] = [];
+    const port = new FakeBlePort();
+    const ble = new BleTransport(port);
+    const h = new HybridTransport(ble, undefined, {
+      onDedupDrop: (source, peerId) => {
+        dropped.push({ source, peerId });
+      },
+    });
+    const event = makePost('hook-dup');
+    expect(h.ingress(event, 'ble', 'peer1')).toBe(true);
+    expect(h.ingress(event, 'nostr')).toBe(false);
+    expect(h.ingress(event, 'ble', 'peer2')).toBe(false);
+    expect(dropped).toEqual([
+      { source: 'nostr', peerId: null },
+      { source: 'ble', peerId: 'peer2' },
+    ]);
     await h.stop();
   });
 

@@ -44,6 +44,7 @@ export class BleTransport {
   private readonly reassembler = new Reassembler();
   private readonly ttl: number;
   private readonly verify: ((event: SignedEvent) => boolean) | undefined;
+  private readonly onDedupDrop: ((peerId: string) => void) | undefined;
   private unsubscribe: (() => void) | null = null;
   private lastPurgeMs = 0;
 
@@ -61,10 +62,17 @@ export class BleTransport {
        * fixtures); the app always wires verifyEvent.
        */
       verify?: (event: SignedEvent) => boolean;
+      /**
+       * Diagnostics hook only (R2): called when a decoded, verified
+       * event is dropped as a loop-suppression duplicate. No routing
+       * decision reads it; it only feeds the diagnostics counters.
+       */
+      onDedupDrop?: (peerId: string) => void;
     },
   ) {
     this.ttl = opts?.ttl ?? DEFAULT_TTL;
     this.verify = opts?.verify;
+    this.onDedupDrop = opts?.onDedupDrop;
   }
 
   /** Start listening for inbound frames. Idempotent. */
@@ -100,7 +108,10 @@ export class BleTransport {
         if (!ok) return; // bad id/signature - drop, never deliver
       }
       const idHex = toHex(event.id);
-      if (this.seen.has(idHex)) return; // loop suppression
+      if (this.seen.has(idHex)) {
+        this.onDedupDrop?.(peerId); // loop suppression
+        return;
+      }
       this.seen.add(idHex);
       for (const h of this.handlers) {
         try {
@@ -160,6 +171,12 @@ export interface HybridTransportOpts {
   nostr?: NostrTransportOpts;
 }
 
+/** Diagnostics-only options for HybridTransport (R2). No routing reads them. */
+export interface HybridDiagnosticsOpts {
+  /** Called when ingress drops an event as a cross-transport duplicate. */
+  onDedupDrop?: (source: IngressSource, peerId: string | null) => void;
+}
+
 /**
  * Runs BLE mesh and Nostr relays concurrently. Single ingress for inbound
  * posts from any source; cross-transport dedup by event ID hex ensures a
@@ -172,19 +189,22 @@ export class HybridTransport {
   private readonly handlers = new Set<(event: SignedEvent, source: IngressSource) => void>();
   private readonly bleUnsubs: (() => void)[] = [];
   readonly nostr: NostrTransport;
+  private readonly diagnosticsOpts: HybridDiagnosticsOpts | undefined;
 
   constructor(
     private readonly ble: BleTransport,
     nostrOpts?: NostrTransportOpts,
+    diagnosticsOpts?: HybridDiagnosticsOpts,
   ) {
     this.nostr = new NostrTransport(nostrOpts);
+    this.diagnosticsOpts = diagnosticsOpts;
   }
 
   async start(): Promise<void> {
     await this.ble.start();
     await this.nostr.start();
     this.bleUnsubs.push(
-      this.ble.onReceive((event) => this.ingress(event, 'ble')),
+      this.ble.onReceive((event, peerId) => this.ingress(event, 'ble', peerId)),
       this.nostr.onReceive((event) => this.ingress(event, 'nostr')),
     );
   }
@@ -199,9 +219,12 @@ export class HybridTransport {
    * Single ingress point. Deduplicates across transports by event ID;
    * first arrival wins, later duplicates are dropped silently.
    */
-  ingress(event: SignedEvent, source: IngressSource): boolean {
+  ingress(event: SignedEvent, source: IngressSource, peerId?: string): boolean {
     const idHex = toHex(event.id);
-    if (this.seen.has(idHex)) return false;
+    if (this.seen.has(idHex)) {
+      this.diagnosticsOpts?.onDedupDrop?.(source, peerId ?? null);
+      return false;
+    }
     this.seen.add(idHex);
     for (const h of this.handlers) {
       try {

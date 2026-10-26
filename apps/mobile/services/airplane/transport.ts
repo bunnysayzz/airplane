@@ -16,7 +16,7 @@ import {
   type WorldConfirmStore,
 } from '@airplane/transport';
 import type { SignedEvent, TransportPort, Hex64 } from '@airplane/protocol';
-import { toHex, verifyEvent } from '@airplane/protocol';
+import { encodeEvent, toHex, verifyEvent } from '@airplane/protocol';
 import { getStore } from './store';
 import { EVENT_KIND_POST, EVENT_KIND_STAR } from '@airplane/protocol';
 import { applyIncomingStar, markStarPostKnown } from './stars';
@@ -26,6 +26,11 @@ import { loadRelayUrls } from '../../src/lib/relays';
 import { addBreadcrumb } from '../../src/sentry';
 import { GattBlePort, defaultBleDeps, type BleNativeDeps } from './ble/gatt';
 import { ensureBlePermissions, checkBlePermissions, requestBlePermissions } from './ble/permissions';
+import {
+  recordDedupDrop,
+  recordMessage,
+  setDiagnosticsAdapterState,
+} from './diagnostics';
 
 /**
  * NetInfo is a native module. If it fails to load (not linked, Expo Go,
@@ -129,13 +134,45 @@ function stopSyncTimer(): void {
   }
 }
 
-async function handleIncoming(event: SignedEvent): Promise<void> {
+/** Mirror the BLE radio state into the diagnostics collector. */
+function syncDiagnosticsAdapterState(): void {
+  setDiagnosticsAdapterState(
+    bleRadioState === 'on'
+      ? 'on'
+      : bleRadioState === 'permission-blocked'
+        ? 'permission-blocked'
+        : bleRadioState === 'unavailable'
+          ? 'unavailable'
+          : 'starting',
+  );
+}
+
+async function handleIncoming(event: SignedEvent, source: string): Promise<void> {
   // STAR MVP: kind-4 events never reach the events table — its schema
   // CHECKs kind IN (1,2,3). They go to the in-memory star counter instead
   // (same BLE + Nostr ingress path, same event-id dedup upstream).
   if (event.kind === EVENT_KIND_STAR) {
     if (applyIncomingStar(event)) notifyFeedListeners();
     return;
+  }
+  // Diagnostics: 'local' is our own publish echo (already logged as
+  // outbound), so only relay and BLE arrivals are logged as inbound.
+  if (source === 'nostr' || source === 'ble') {
+    recordMessage({
+      id: toHex(event.id),
+      sequence: null,
+      sizeBytes: encodeEvent(event).length,
+      direction: 'inbound',
+      attempts: [
+        {
+          transport: source === 'nostr' ? 'relay' : 'ble',
+          atMs: Date.now(),
+          outcome: 'ok',
+          detail: null,
+        },
+      ],
+      finalStatus: 'received',
+    });
   }
   const store = getStore();
   // Store the event (deduped by HybridTransport already).
@@ -174,14 +211,21 @@ export async function startTransport(): Promise<void> {
   // an unsigned/tampered event from a mesh peer never reaches the store.
   const ble = new BleTransport(blePort.port, {
     verify: (event) => verifyEvent(crypto, event),
+    onDedupDrop: (peerId) => recordDedupDrop(peerId),
   });
   // Relay list is user-configurable in Settings > Relays and persisted in
   // AsyncStorage (src/lib/relays.ts). loadRelayUrls() already falls back to
   // the default public relays when nothing is stored — and never throws —
   // so a storage failure here just means the defaults, never a dead uplink.
-  hybrid = new HybridTransport(ble, {
-    relays: await loadRelayUrls(),
-  });
+  hybrid = new HybridTransport(
+    ble,
+    {
+      relays: await loadRelayUrls(),
+    },
+    {
+      onDedupDrop: (_source, peerId) => recordDedupDrop(peerId),
+    },
+  );
   sync = new WorldSync(hybrid.nostr, {
     markWorldConfirmed: (id: Hex64) => getStore().markWorldConfirmed(id),
     isWorldConfirmed: (id: Hex64) => getStore().isWorldConfirmed(id),
@@ -193,8 +237,8 @@ export async function startTransport(): Promise<void> {
   // them confirmed so the feed's globe icon lights up. Inbound posts still
   // flow through the same store path as before.
   hybrid.onPost(
-    sync.confirmListener((event) => {
-      void handleIncoming(event);
+    sync.confirmListener((event, source) => {
+      void handleIncoming(event, source);
     }),
   );
 
@@ -230,6 +274,7 @@ export async function startTransport(): Promise<void> {
   } else {
     bleRadioState = 'permission-blocked';
   }
+  syncDiagnosticsAdapterState();
 
   try {
     wireConnectivity();
@@ -344,9 +389,11 @@ export async function enableBleRadio(): Promise<boolean> {
     const publicKey = await getDevicePublicKey();
     await bringUpBleRadio(toHex(publicKey));
     bleRadioState = 'on';
+    syncDiagnosticsAdapterState();
     return true;
   } catch {
     bleRadioState = 'unavailable';
+    syncDiagnosticsAdapterState();
     return false;
   }
 }
@@ -442,6 +489,7 @@ export async function stopTransport(): Promise<void> {
   hybrid = null;
   sync = null;
   bleRadioState = 'unavailable';
+  syncDiagnosticsAdapterState();
 }
 
 /** Publish a local event through all available transports. */
@@ -452,5 +500,39 @@ export async function publishViaTransport(
   // BLE fan-out targets the currently connected peers. Previously this
   // call passed no peer ids at all, so local posts NEVER went out over
   // BLE — only Nostr — even with phones connected over GATT.
-  return hybrid!.publish(event, blePeerIdsForPublish(blePort?.port));
+  const result = await hybrid!.publish(event, blePeerIdsForPublish(blePort?.port));
+  const nowMs = Date.now();
+  recordMessage({
+    id: toHex(event.id),
+    sequence: null,
+    sizeBytes: encodeEvent(event).length,
+    direction: 'outbound',
+    attempts: [
+      {
+        transport: 'relay',
+        atMs: nowMs,
+        outcome: result.relays.length > 0 ? 'ok' : 'failed',
+        detail:
+          result.relays.length > 0
+            ? `published to ${result.relays.length} relays`
+            : 'no relay accepted the event',
+      },
+      {
+        transport: 'ble',
+        atMs: nowMs,
+        outcome: result.blePeers > 0 ? 'ok' : 'failed',
+        detail:
+          result.blePeers > 0
+            ? `sent to ${result.blePeers} connected peers (no peer ack in current transport)`
+            : 'no connected BLE peers',
+      },
+    ],
+    finalStatus:
+      result.relays.length > 0
+        ? 'relayed'
+        : result.blePeers > 0
+          ? 'sent over BLE'
+          : 'not delivered to any transport',
+  });
+  return result;
 }

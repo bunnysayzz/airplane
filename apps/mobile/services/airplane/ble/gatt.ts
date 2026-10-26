@@ -45,6 +45,23 @@
 
 import type { PeerInfo, TransportPort } from '@airplane/protocol';
 import { FRAG_WIRE_MAX, fromHex, toHex } from '@airplane/protocol';
+import {
+  recordAdvertiseFailure,
+  recordAdvertiseStopped,
+  recordAdvertiseSuccess,
+  recordFragmentsReceived,
+  recordFragmentsSent,
+  recordIncompleteFragmentSet,
+  recordPacketReceived,
+  recordPacketSent,
+  recordPeerConnected,
+  recordPeerDisconnected,
+  recordPeerResolved,
+  recordPeerSeen,
+  recordScanFailure,
+  recordScanStarted,
+  recordScanStopped,
+} from '../diagnostics';
 import { Buffer } from 'buffer';
 import {
   ADVERTISE_COMPANY_ID,
@@ -111,6 +128,8 @@ interface PeerConn {
   /** ATT MTU for this link; chunk size = mtu - 3. */
   mtu: number;
   inbound: DatagramReassembler;
+  /** True while an ATT chunk arrived without completing a datagram. */
+  partialOpen: boolean;
 }
 
 const PROVISIONAL_TAG_PREFIX = 'tag:';
@@ -153,16 +172,28 @@ export class GattBlePort implements TransportPort {
     if (this.peripheral && this.ownPeerId === peerId) return;
     await this.stopAdvertise();
     const granted = await this.deps.requestPermissions().catch(() => false);
-    if (!granted) throw new Error('ble: bluetooth permissions not granted');
+    if (!granted) {
+      recordAdvertiseFailure('bluetooth permissions not granted');
+      throw new Error('ble: bluetooth permissions not granted');
+    }
     const factory = this.deps.createPeripheral;
-    if (!factory) throw new Error('ble: peripheral role unavailable (native module missing)');
+    if (!factory) {
+      recordAdvertiseFailure('peripheral role unavailable (native module missing)');
+      throw new Error('ble: peripheral role unavailable (native module missing)');
+    }
     const adapter = await factory();
+    const tag = peerTagOf(fromHex(peerId));
     try {
-      await adapter.startAdvertising(peerTagOf(fromHex(peerId)), peerId);
+      await adapter.startAdvertising(tag, peerId);
     } catch (err) {
       await adapter.destroy().catch(() => {});
+      const message = err instanceof Error ? err.message : `ble: advertise failed: ${String(err)}`;
+      recordAdvertiseFailure(message);
       throw err instanceof Error ? err : new Error(`ble: advertise failed: ${String(err)}`);
     }
+    // Advertisement length on the air: AD header (2 bytes) + company id
+    // (2 bytes) + 8-byte tag = 12 bytes, inside the 31-byte legacy budget.
+    recordAdvertiseSuccess(2 + 2 + tag.length);
     this.peripheral = adapter;
     this.ownPeerId = peerId;
     this.ownTag = peerTagOf(fromHex(peerId));
@@ -187,6 +218,7 @@ export class GattBlePort implements TransportPort {
       await p.stopAdvertising().catch(() => {});
       await p.destroy().catch(() => {});
     }
+    recordAdvertiseStopped();
     // Forget peripheral-role conns (their radio is gone); central-role conns
     // survive - the GATT client is independent of our advertiser.
     for (const [key, conn] of [...this.conns]) {
@@ -216,6 +248,7 @@ export class GattBlePort implements TransportPort {
         const u = this.scanUnsub;
         this.scanUnsub = null;
         void this.deps.central?.stopScan().catch(() => {});
+        recordScanStopped();
         u?.();
       }
     };
@@ -233,7 +266,13 @@ export class GattBlePort implements TransportPort {
         central.onDisconnect((id) => this.onCentralDisconnect(id)),
       );
     }
-    await central.scan();
+    try {
+      await central.scan();
+    } catch (err) {
+      recordScanFailure(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+    recordScanStarted();
     this.scanUnsub = () => {
       for (const u of this.centralUnsubs.splice(0)) {
         try {
@@ -253,6 +292,7 @@ export class GattBlePort implements TransportPort {
     const key = provisionalTagKey(tag);
     const known = this.discovered.get(key);
     this.discovered.set(key, { bleId: id, tag, rssi });
+    recordPeerSeen(key, rssi, toHex(tag));
     if (!known) {
       for (const cb of this.scanSubs) {
         try {
@@ -315,6 +355,7 @@ export class GattBlePort implements TransportPort {
         peerId,
         mtu,
         inbound: new DatagramReassembler(),
+        partialOpen: false,
       });
       // Announce ourselves: the peripheral side learns our identity + MTU.
       const hello = encodeHello(fromHex(this.ownPeerId), mtu);
@@ -322,6 +363,8 @@ export class GattBlePort implements TransportPort {
         await central.write(bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk);
       }
       await central.startNotification(bleId, MESH_SERVICE_UUID, MESH_TX_CHAR_UUID);
+      // Subscribed to the peer TX characteristic: CCCD is on for this link.
+      recordPeerConnected(peerId, mtu, true);
       // Surface the resolved identity through the scan channel, matching
       // the peripheral-side hello path: subscribers see the full peerId,
       // not just the provisional tag key. (Previously the central side
@@ -369,7 +412,9 @@ export class GattBlePort implements TransportPort {
       if (!central) throw new Error('ble: central role unavailable');
       for (const chunk of chunkBytes(datagram, chunkSize)) {
         await central.write(conn.bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk);
+        recordFragmentsSent(peerId, 1);
       }
+      recordPacketSent(peerId);
       return;
     }
     const peripheral = this.peripheral;
@@ -379,7 +424,9 @@ export class GattBlePort implements TransportPort {
     // event-ID dedup. Bandwidth-inefficient, not incorrect.
     for (const chunk of chunkBytes(datagram, chunkSize)) {
       await peripheral.notify(chunk);
+      recordFragmentsSent(peerId, 1);
     }
+    recordPacketSent(peerId);
   }
 
   /** Max bytes send() accepts for this peer: the protocol wire-frame max. */
@@ -398,12 +445,28 @@ export class GattBlePort implements TransportPort {
     };
   }
 
+  /** Feed one ATT chunk into a connection, tracking fragments and partial sets. */
+  private feedChunk(conn: PeerConn, key: string, value: Uint8Array): void {
+    const peerKey = conn.peerId ?? key;
+    recordFragmentsReceived(peerKey, 1);
+    const datagrams = conn.inbound.push(value);
+    if (datagrams.length === 0) {
+      if (!conn.partialOpen) {
+        conn.partialOpen = true;
+        recordIncompleteFragmentSet(peerKey);
+      }
+      return;
+    }
+    conn.partialOpen = false;
+    for (const dg of datagrams) this.dispatchDatagram(conn, dg);
+  }
+
   /** Central role: frames arriving as TX notifications from a peer. */
   private onCentralNotify(bleId: string, value: Uint8Array): void {
     const key = this.bleIndex.get(bleId);
     const conn = key ? this.conns.get(key) : undefined;
-    if (!conn) return;
-    for (const dg of conn.inbound.push(value)) this.dispatchDatagram(conn, dg);
+    if (!key || !conn) return;
+    this.feedChunk(conn, key, value);
   }
 
   /** Peripheral role: a central wrote to our RX characteristic. */
@@ -413,10 +476,14 @@ export class GattBlePort implements TransportPort {
     if (!conn) {
       if (this.conns.size >= MAX_BLE_PEERS) return; // drop, bounded
       key = `${PROVISIONAL_MAC_PREFIX}${device}`;
-      conn = { role: 'peripheral', bleId: device, tag: null, peerId: null, mtu: ATT_DEFAULT_MTU, inbound: new DatagramReassembler() };
+      conn = { role: 'peripheral', bleId: device, tag: null, peerId: null, mtu: ATT_DEFAULT_MTU, inbound: new DatagramReassembler(), partialOpen: false };
       this.registerConn(key, conn);
+      // A central is writing to us, but the library does not report
+      // whether it subscribed to our TX characteristic: CCCD stays unknown.
+      recordPeerConnected(key, ATT_DEFAULT_MTU, null);
     }
-    for (const dg of conn.inbound.push(value)) this.dispatchDatagram(conn, dg);
+    if (!key) return;
+    this.feedChunk(conn, key, value);
   }
 
   private dispatchDatagram(conn: PeerConn, dg: Uint8Array): void {
@@ -429,6 +496,9 @@ export class GattBlePort implements TransportPort {
       const peerId = toHex(hello.publicKey);
       conn.mtu = Math.min(Math.max(hello.centralMtu, ATT_DEFAULT_MTU), 517);
       this.rekeyConn(conn, peerId);
+      // The peripheral side learns the central identity and MTU here.
+      // CCCD stays unknown: the library does not report TX subscribers.
+      recordPeerConnected(peerId, conn.mtu, null);
       // Surface the resolved identity through the scan channel.
       for (const cb of this.scanSubs) {
         try {
@@ -441,6 +511,7 @@ export class GattBlePort implements TransportPort {
     }
     if (kind !== DATAGRAM_FRAME) return; // unknown kind - drop
     const peerKey = conn.peerId ?? this.keyOf(conn);
+    recordPacketReceived(peerKey);
     for (const cb of this.receivers) {
       try {
         cb(peerKey, payload);
@@ -474,6 +545,7 @@ export class GattBlePort implements TransportPort {
   private rekeyConn(conn: PeerConn, peerId: string): void {
     const oldKey = this.keyOf(conn);
     if (!isProvisionalKey(oldKey)) return; // already keyed by full id
+    recordPeerResolved(oldKey, peerId);
     const clash = this.conns.get(peerId);
     if (clash && clash !== conn && clash.role === 'central' && conn.role === 'peripheral') {
       // A central-role conn already covers this peer (targeted writes beat
@@ -490,6 +562,7 @@ export class GattBlePort implements TransportPort {
   private dropConn(key: string): void {
     const conn = this.conns.get(key);
     if (!conn) return;
+    recordPeerDisconnected(key);
     this.conns.delete(key);
     if (this.bleIndex.get(conn.bleId) === key) this.bleIndex.delete(conn.bleId);
   }
@@ -501,6 +574,7 @@ export class GattBlePort implements TransportPort {
     const unsub = this.scanUnsub;
     this.scanUnsub = null;
     this.scanSubs.clear();
+    recordScanStopped();
     uSafe(unsub);
     await this.deps.central?.stopScan().catch(() => {});
     for (const u of this.centralUnsubs.splice(0)) uSafe(u);

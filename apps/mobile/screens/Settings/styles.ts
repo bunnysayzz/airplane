@@ -293,3 +293,58 @@ export const makeRelayStyles = (colors: ThemeColors) =>
       color: colors.accentText,
     },
   });
+
+export const makeDiagnosticsStyles = (colors: ThemeColors) =>
+  StyleSheet.create({
+    content: {
+      paddingHorizontal: space.lg,
+      paddingTop: space.xs,
+      gap: space.sm,
+    },
+    sectionLabel: {
+      marginTop: space.md,
+      marginHorizontal: space.xs,
+    },
+    lead: {
+      color: colors.textSecondary,
+      marginTop: space.md,
+      marginHorizontal: space.xs,
+    },
+    group: {
+      overflow: 'hidden',
+      padding: space.lg,
+      gap: space.xs,
+    },
+    kvValue: {
+      color: colors.textPrimary,
+    },
+    peerCard: {
+      padding: space.lg,
+      gap: space.xs,
+    },
+    peerId: {
+      color: colors.textMuted,
+    },
+    buttonRow: {
+      flexDirection: 'row',
+      gap: space.md,
+      marginHorizontal: space.xs,
+    },
+    button: {
+      backgroundColor: colors.accentColor,
+      borderRadius: radii.input,
+      paddingHorizontal: space.lg,
+      paddingVertical: space.md,
+    },
+    buttonText: {
+      color: colors.buttonTextColor,
+    },
+    note: {
+      color: colors.textMuted,
+      marginHorizontal: space.xs,
+    },
+    empty: {
+      color: colors.textMuted,
+      padding: space.lg,
+    },
+  });
