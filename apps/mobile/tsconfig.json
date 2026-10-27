@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-native",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"],
+      "@airplane/*": ["../../packages/*/src"]
+    }
+  },
+  "include": ["app", "src", "components", "screens", "services"]
+}

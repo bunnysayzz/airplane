@@ -1,0 +1,1 @@
+{"dependencies":{"@airplane/protocol":"*","@airplane/storage":"*","@noble/curves":"^1.0.0","@noble/hashes":"^1.0.0"},"description":"Airplane hybrid transport: BLE mesh + Nostr relay orchestration, cross-transport dedup, World sync","license":"Apache-2.0","main":"src/index.ts","name":"@airplane/transport","types":"src/index.ts","version":"0.1.0"}

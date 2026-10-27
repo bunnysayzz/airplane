@@ -1,0 +1,1 @@
+{"dependencies":{"@airplane/protocol":"*"},"description":"Airplane storage layer: port interfaces, SQLite schema, in-memory implementation, native stubs","license":"Apache-2.0","main":"src/index.ts","name":"@airplane/storage","types":"src/index.ts","version":"0.1.0"}

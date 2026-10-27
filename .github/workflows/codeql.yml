@@ -1,0 +1,43 @@
+# CodeQL — static security analysis for JavaScript/TypeScript.
+#
+# Runs on every push to main, every PR targeting main, and weekly (Monday
+# 06:00 UTC) to catch new CodeQL query findings on unchanged code.
+#
+# github/codeql-action/init and /analyze are kept on the SAME version
+# (v4 line) — splitting versions between them breaks the analyze step
+# (they negotiate over a shared state directory).
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1' # weekly, Monday 06:00 UTC
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+
+      # No explicit build step: javascript-typescript analysis needs no
+      # compilation (autobuild is a no-op for JS/TS, so we skip it).
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:javascript-typescript"

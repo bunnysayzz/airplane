@@ -1,0 +1,1 @@
+{"dependencies":{"@noble/curves":"^1.0.0","@noble/hashes":"^1.0.0","cbor-x":"^1.0.0"},"description":"Airplane wire protocol: CBOR event codec, ed25519 signing, flood relay, fragmentation, ranking, receipts, geohash","license":"Apache-2.0","main":"src/index.ts","name":"@airplane/protocol","types":"src/index.ts","version":"0.1.0"}
