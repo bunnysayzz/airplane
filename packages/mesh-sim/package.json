@@ -1,0 +1,1 @@
+{"dependencies":{"@airplane/protocol":"*"},"description":"Airplane mesh simulator: in-memory TransportPort so protocol logic is testable without radios","license":"Apache-2.0","main":"src/index.ts","name":"@airplane/mesh-sim","types":"src/index.ts","version":"0.1.0"}

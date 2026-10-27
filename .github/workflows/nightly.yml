@@ -1,0 +1,37 @@
+# Nightly/weekly health sweep — audits, full test suite, and spec-drift check.
+#
+# Runs on a weekly schedule (Sunday 02:00 UTC) and manually via workflow_dispatch.
+# Unlike per-PR checks, this catches:
+#   - new CVEs in EXISTING dependencies (`npm audit`, failing on high/critical)
+#   - flaky/slow test regressions (full jest suite with --ci)
+#   - documentation drift (protocol constants in docs vs code)
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 2 * * 0' # weekly, Sunday 02:00 UTC
+  workflow_dispatch:
+
+jobs:
+  nightly:
+    name: Audit + tests + spec drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: npm audit (fail on high/critical)
+        run: npm audit --audit-level=high
+
+      - name: Full jest suite
+        run: npm test -- --ci
+
+      - name: Spec drift check (protocol constants vs docs)
+        run: bash .github/scripts/check-spec-drift.sh

@@ -1,0 +1,38 @@
+Airplane — third-party attributions
+=====================================
+
+Airplane is original work by its contributors (see LICENSE, Apache-2.0),
+with selected UI adapted from the following MIT-licensed projects:
+
+1. Pugdon
+   Copyright (c) cajuuh
+   License: MIT
+   Source: https://github.com/cajuuh/pugdomv2
+
+   What was adapted (apps/mobile): the theme system (src/theme — coats,
+   shape, typography, theme context and themed-styles helper), the i18n
+   infrastructure and English dictionary shape (src/i18n), the floating
+   glass TabBar (components/TabBar), the TopBar shell (components/TopBar),
+   the Timeline / Thread / Settings / Setup screens (screens/), the
+   compose sheet (components/ComposeModal), the dialog host
+   (components/Dialog), and the ui primitives (components/ui). All were
+   rebranded to Airplane, stripped of accounts/federation concepts the
+   product doesn't have (anonymous by design), and re-driven by
+   services/airplane instead of Mastodon APIs. New Airplane files written
+   in the same visual language (e.g. components/MeshStatus.tsx) are
+   original work, not Pugdon code.
+
+2. panel-ui
+   Copyright (c) panel-ui
+   License: MIT
+   Source: https://github.com/panel-ui/panelui
+
+   What was adapted (apps/mobile): panel-ui component primitives vendored
+   via the panel-ui CLI (see apps/mobile/panelui.json and
+   apps/mobile/panelui-lock.json), used as the base for shared UI
+   primitives in components/ui.
+
+License texts
+-------------
+The MIT license texts of the projects above apply to the adapted portions
+as noted. The full Airplane project license is Apache-2.0 (see LICENSE).
