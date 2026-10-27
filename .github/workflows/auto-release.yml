@@ -1,0 +1,160 @@
+# Auto-release — MANUAL DISPATCH ONLY (gated 2026-10-21, NovaMind route:
+# EAS retired from the push path; APKs now come from the Gradle CI build).
+# Previously: every push to main became a GitHub Release.
+#
+# PIPELINE (single job, serialized via concurrency):
+#   1. Compute next version from the latest `v*` tag (starts at 0.0.1).
+#   2. Bump `apps/mobile/app.json` expo.version and push the commit
+#      (idempotent: skips if already at the target version).
+#   3. EAS cloud build of the `preview` profile (APK, sideloadable).
+#      Requires the `EXPO_TOKEN` repo secret; fails fast if missing.
+#   4. ONLY on build success: create the tag and the GitHub Release with
+#      the APK. Failed builds leave no tag behind, so the next push retries
+#      the same version instead of leaving orphan tags.
+#
+# VERSIONING
+#   Patch auto-increments: v0.0.1, v0.0.2, ... No manual tagging needed.
+#   Minor/major bumps stay manual (push a tag like v0.1.0 yourself; the next
+#   auto-release continues from there).
+#
+# COST NOTE
+#   GitHub Actions is free/unlimited on public repos. EAS is not: the Expo
+#   free plan allows ~30 builds/month, and every main push burns one.
+#   If that quota becomes a problem, gate this workflow on release branches
+#   or a manual dispatch instead.
+
+name: Auto release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false # queue releases; never run two version bumps at once
+
+permissions:
+  contents: write # push version-bump commit, tag, and create the Release
+
+jobs:
+  release:
+    # Ignore the version-bump commits this workflow pushes itself.
+    # (A custom marker - NOT [skip ci] - so CI/tests still run on the bump
+    # commit and show up on the repo page.)
+    if: "!contains(github.event.head_commit.message, '[auto-release]')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        run: |
+          git fetch --tags --force
+          latest=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n1)
+          if [ -z "$latest" ]; then
+            next="0.0.1"
+          else
+            ver="${latest#v}"
+            major="${ver%%.*}"; rest="${ver#*.}"
+            minor="${rest%%.*}"; patch="${rest##*.}"
+            next="$major.$minor.$((patch + 1))"
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+          echo "Releasing $next (previous tag: ${latest:-none})"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Require EXPO_TOKEN secret
+        env:
+          TOKEN_PRESENT: ${{ secrets.EXPO_TOKEN != '' }}
+        run: |
+          if [ "$TOKEN_PRESENT" != "true" ]; then
+            echo "::error::EXPO_TOKEN repo secret is not set."
+            echo "Add it once at https://github.com/bunnysayzz/airplane/settings/secrets/actions"
+            exit 1
+          fi
+
+      - name: Bump app version (idempotent)
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          VERSION="$APP_VERSION"
+          CURRENT=$(node -e "console.log(require('./apps/mobile/app.json').expo.version)")
+          if [ "$CURRENT" = "$VERSION" ]; then
+            echo "app.json already at $VERSION, skipping bump commit"
+            exit 0
+          fi
+          node -e "
+            const fs = require('fs');
+            const p = 'apps/mobile/app.json';
+            const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+            j.expo.version = process.env.APP_VERSION;
+            if (!j.expo.version) { throw new Error('APP_VERSION was empty - refusing to write app.json'); }
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+          "
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add apps/mobile/app.json
+          git commit -m "chore: bump version to $VERSION [auto-release]"
+          git push origin main
+
+      - name: Set up EAS
+        uses: expo/expo-github-action@c7b66a9c327a43a8fa7c0158e7f30d6040d2481e # v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: EAS preview APK build
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          # Wire the Sentry DSN into this build (JS bundle + native pre-JS crash
+          # capture) from the SENTRY_DSN repo secret. Generated on the runner,
+          # never committed; gitignored. Without it Sentry stays disabled.
+          if [ -n "${{ secrets.SENTRY_DSN }}" ]; then
+            printf 'EXPO_PUBLIC_SENTRY_DSN=%s\n' "${{ secrets.SENTRY_DSN }}" > .env
+            printf '{"dsn":"%s"}\n' "${{ secrets.SENTRY_DSN }}" > sentry.options.json
+            echo "Sentry DSN injected for build"
+          else
+            echo "SENTRY_DSN secret not set; building with Sentry disabled"
+          fi
+          eas build --platform android --profile preview --non-interactive --wait --json > /tmp/build.json
+
+      - name: Show EAS build error (on failure)
+        if: failure()
+        run: |
+          node -e "
+            const b=require('/tmp/build.json'); const x=Array.isArray(b)?b[0]:b;
+            console.log('Build ID:', x.id);
+            console.log('Status:', x.status);
+            console.log('Error:', JSON.stringify(x.error||x.buildError||null, null, 2).slice(0,3000));
+            console.log('Log URL: https://expo.dev/accounts/bunnysayzz/projects/airplane/builds/'+x.id);
+          "
+
+      - name: Download APK
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          URL=$(node -e "const b=require('/tmp/build.json'); const x=Array.isArray(b)?b[0]:b; console.log(x.artifacts.buildUrl)")
+          curl -L --fail -o "airplane-${{ steps.version.outputs.tag }}.apk" "$URL"
+          ls -la *.apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "Airplane ${{ steps.version.outputs.tag }}"
+          generate_release_notes: true
+          files: "airplane-${{ steps.version.outputs.tag }}.apk"

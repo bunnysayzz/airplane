@@ -1,0 +1,91 @@
+# Unsigned IPA build — installable iOS app WITHOUT the paid Apple Developer
+# Program (manual trigger only, Actions tab -> "Unsigned IPA build" -> Run).
+#
+# WHAT IT DOES:
+#   1. Generates the iOS project with `expo prebuild` (ios/ is NOT committed).
+#   2. Archives it for a real device WITHOUT signing
+#      (CODE_SIGNING_ALLOWED=NO). A device archive proves the app links for
+#      arm64 hardware, not just the simulator.
+#   3. Packages the unsigned .app into `Airplane-unsigned.ipa` and uploads
+#      it as a workflow artifact (NOT attached to any release — attaching
+#      to a release is a separate decision).
+#
+# HOW IT IS INSTALLED (no paid program):
+#   AltStore with a free Apple ID re-signs the IPA on install. Requirements:
+#   the user's own iPhone + AltStore + AltServer on the same Wi-Fi.
+#   Alternatively: a local Mac + Xcode + USB cable + free Apple ID installs
+#   the .app directly. Either way the install EXPIRES AFTER 7 DAYS and must
+#   be refreshed (AltServer) or re-installed. Max 3 sideloaded apps on a
+#   free account.
+#
+# WHAT IT DOES NOT DO (by design):
+#   - No TestFlight, no App Store, no push notifications, no expiry-free
+#     install — all of those need the paid Apple Developer Program.
+#   - No install on cloud iPhones (Kobiton iOS devices need a signed app).
+#   - No DSN injection: the Sentry client stays disabled without
+#     EXPO_PUBLIC_SENTRY_DSN, which never breaks the build (see sentry.ts).
+#
+# COST: Airplane is a public repo, so GitHub Actions minutes (including
+# macOS runners) are free/unlimited. Manual-dispatch only so it never
+# burns minutes on every push.
+
+name: Unsigned IPA build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned-ipa:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Show Xcode toolchain
+        run: xcodebuild -version
+
+      - name: Generate iOS project (Expo prebuild)
+        working-directory: apps/mobile
+        run: npx expo prebuild --platform ios --non-interactive
+
+      - name: Archive for device (unsigned)
+        working-directory: apps/mobile
+        run: |
+          xcodebuild \
+            -workspace ios/Airplane.xcworkspace \
+            -scheme Airplane \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/Airplane.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+      - name: Package unsigned IPA
+        working-directory: apps/mobile
+        run: |
+          APP=$(ls -d build/Airplane.xcarchive/Products/Applications/*.app | head -1)
+          echo "Packaging: $APP"
+          mkdir -p Payload
+          cp -r "$APP" Payload/
+          zip -r Airplane-unsigned.ipa Payload
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: airplane-unsigned-ipa
+          path: apps/mobile/Airplane-unsigned.ipa
+          if-no-files-found: error
