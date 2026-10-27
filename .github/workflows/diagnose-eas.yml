@@ -1,0 +1,52 @@
+# Diagnose a failed EAS build without triggering a new one.
+# Manual: Actions tab -> Diagnose EAS build -> enter the build ID from the
+# failed run's "Build ID" line or the expo.dev URL.
+
+name: Diagnose EAS build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: 'EAS build ID (e.g. d4f5ac5c-985d-49b3-b8cc-a521dfde586c)'
+        required: true
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up EAS
+        uses: expo/expo-github-action@c7b66a9c327a43a8fa7c0158e7f30d6040d2481e # v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies (root workspace)
+        run: npm ci --include=dev 2>&1 | tail -3
+
+      - name: Show build details
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          eas build:view ${{ inputs.build_id }} --json > /tmp/view.json 2>/tmp/view.err || true
+          node -e "
+            const fs = require('fs');
+            let raw = fs.readFileSync('/tmp/view.json','utf8');
+            try {
+              const j = JSON.parse(raw);
+              const b = j.data || j;
+              console.log('KEYS:', Object.keys(b).join(', '));
+              console.log('status:', b.status);
+              // hunt for any log URLs
+              const s = JSON.stringify(b);
+              const urls = s.match(/https:\/\/[^\"'\s]*log[^\"'\s]*/gi) || [];
+              console.log('LOG URLS:', [...new Set(urls)].slice(0,5).join('\n  '));
+              console.log('error:', JSON.stringify(b.error || null, null, 2).slice(0,1500));
+            } catch(e) {
+              console.log('parse failed, raw head:', raw.slice(0,1500));
+              console.log('stderr:', fs.readFileSync('/tmp/view.err','utf8').slice(0,1000));
+            }
+          "

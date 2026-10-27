@@ -1,0 +1,1 @@
+{"dependencies":{"@noble/curves":"^1.0.0"},"description":"Airplane device identity: KeyStorePort (stable per-device Ed25519 keypair custody), in-memory and expo-secure-store implementations","license":"Apache-2.0","main":"src/index.ts","name":"@airplane/crypto","types":"src/index.ts","version":"0.1.0"}

@@ -1,0 +1,93 @@
+import { StyleSheet } from 'react-native';
+import { ThemeColors } from '../../src/theme/themeContext';
+import { MIN_TOUCH, radii, space } from '../../src/theme/shape';
+
+export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
+    container: {
+        flex: 1,
+        backgroundColor: colors.background,
+    },
+    loadingContainer: {
+        flex: 1,
+        backgroundColor: colors.background,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    list: {
+        flex: 1,
+    },
+    // The "N new posts" pill floats over the top of the list
+    newPostsWrap: {
+        position: 'absolute',
+        top: space.sm,
+        left: 0,
+        right: 0,
+        alignItems: 'center',
+        zIndex: 10,
+    },
+    newPosts: {
+        minHeight: MIN_TOUCH,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: space.sm,
+        paddingVertical: 6,
+        paddingHorizontal: 14,
+        borderRadius: radii.pill,
+        backgroundColor: colors.accentColor,
+        shadowColor: colors.shadowColor,
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.18,
+        shadowRadius: 10,
+        elevation: 6,
+    },
+    newPostsText: {
+        color: colors.buttonTextColor,
+    },
+    footer: {
+        paddingVertical: 20,
+        alignItems: 'center',
+    },
+    listContent: {
+        paddingTop: 8,
+        // Bottom clearance is applied by the screen itself (it needs the live
+        // safe-area inset) - see timeline.tsx contentContainerStyle.
+    },
+    emptyContainer: {
+        flex: 1,
+        marginTop: 100,
+        padding: 40,
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: space.sm,
+    },
+    emptyText: {
+        color: colors.textSecondary,
+        fontSize: 16,
+        textAlign: 'center',
+    },
+    emptyCta: {
+        marginTop: 8,
+    },
+    errorContainer: {
+        flex: 1,
+        backgroundColor: colors.background,
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: space.md,
+        padding: 40,
+    },
+    errorText: {
+        color: colors.textSecondary,
+        textAlign: 'center',
+    },
+    retryButton: {
+        paddingHorizontal: 20,
+        paddingVertical: 12,
+        borderRadius: radii.pill,
+        backgroundColor: colors.accentColor,
+    },
+    retryText: {
+        color: colors.buttonTextColor,
+        fontSize: 14,
+    },
+});

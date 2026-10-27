@@ -1,0 +1,34 @@
+{
+  "private": true,
+  "name": "airplane-root",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p packages/protocol && tsc --noEmit -p packages/storage && tsc --noEmit -p packages/crypto && tsc --noEmit -p packages/mesh-sim && tsc --noEmit -p packages/transport && tsc --noEmit -p apps/mobile",
+    "test": "jest",
+    "lint": "eslint . --max-warnings=0",
+    "format": "prettier --write .",
+    "test:coverage": "jest --coverage --forceExit"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/jest": "^29.5.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.0.0",
+    "ts-jest": "^29.1.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.0.0"
+  },
+  "overrides": {
+    "react-native-screens": "4.11.1",
+    "expo-linking": "~7.0.5",
+    "expo-location": "~18.1.6",
+    "postcss": "8.5.23"
+  }
+}

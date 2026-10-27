@@ -1,0 +1,87 @@
+# Android preview build — produces a sideloadable APK via Expo EAS.
+#
+# WHAT IT DOES
+#   Manual trigger (Actions tab → "Android preview build" → Run workflow).
+#   Builds a preview APK with the `preview` profile from eas.json (internal
+#   distribution, android buildType: apk). This is the P5 distribution story:
+#   the APK is posted to GitHub Releases for direct sideloading / Obtainium
+#   tracking — no store review, consistent with the app's offline/protest
+#   use case.
+#
+# EXPO_TOKEN REQUIREMENT
+#   This workflow needs a repo secret named `EXPO_TOKEN` — an access token
+#   from expo.dev → Account Settings → Access Tokens.
+#   The repo admin must add it once at:
+#     https://github.com/bunnysayzz/airplane/settings/secrets/actions
+#   No secrets are committed anywhere; the token only ever appears as
+#   ${{ secrets.EXPO_TOKEN }} and is masked in logs by GitHub.
+#
+# ONE-TIME PROJECT LINKING
+#   Before the first run, the repo owner must link this repo to an Expo
+#   project ONCE from a local machine: `eas init` (interactive) and commit
+#   the resulting `projectId` into the Expo `app.config` / `app.json`.
+#   Without a projectId, `eas build` will fail.
+#
+# NO SECRET HANDLING HERE
+#   This file references no other secrets and sets none. It must stay that
+#   way — never paste a token into a workflow file.
+
+name: Android preview build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Install EAS CLI
+        run: npm install -g eas-cli@24.14.0
+
+      # Fail fast with a helpful message if the admin hasn't added EXPO_TOKEN.
+      - name: Require EXPO_TOKEN secret
+        env:
+          TOKEN_PRESENT: ${{ secrets.EXPO_TOKEN != '' }}
+        run: |
+          if [ "$TOKEN_PRESENT" != "true" ]; then
+            echo "::error::EXPO_TOKEN repo secret is not set."
+            echo "The repo admin must add it once at:"
+            echo "  https://github.com/bunnysayzz/airplane/settings/secrets/actions"
+            echo "Generate the token at expo.dev → Account Settings → Access Tokens."
+            exit 1
+          fi
+
+      # Preview APK for sideloading / Obtainium (P5 distribution story).
+      - name: EAS preview APK build
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: eas build --platform android --profile preview --non-interactive --wait --json > /tmp/build.json
+
+      - name: Show EAS build error (on failure)
+        if: failure()
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          BUILD_ID=$(node -e "const b=require('/tmp/build.json'); const x=Array.isArray(b)?b[0]:b; console.log(x.id)")
+          echo "Build ID: $BUILD_ID"
+          curl -s -H "Authorization: Bearer $EXPO_TOKEN" \
+            "https://api.expo.dev/v2/projects/98a17423-033b-4461-a779-82d919336f3c/builds/$BUILD_ID" \
+          | node -e "
+            let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{
+              try {
+                const j=JSON.parse(d).data||JSON.parse(d);
+                console.log('status:', j.status);
+                console.log('error:', JSON.stringify(j.error||'none').slice(0,2000));
+              } catch(e){ console.log('raw:', d.slice(0,1000)); }
+            })"
