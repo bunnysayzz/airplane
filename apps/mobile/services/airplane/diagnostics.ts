@@ -162,6 +162,28 @@ let dedupDropTotal = 0;
 
 const listeners = new Set<() => void>();
 
+// ------------------------------------------------------------ log sink
+// LOG queue item: the automatic log file. The sink receives only the
+// kind + detail pairs built below. No hook below receives post text,
+// location, cell ids or full pubkeys, so none can reach the file.
+// The message hook drops the message id on purpose (see recordMessage).
+// A throwing sink must never break the collector.
+type DiagnosticsLogSink = (kind: string, detail: string) => void;
+let logSink: DiagnosticsLogSink | null = null;
+
+export function setDiagnosticsLogSink(sink: DiagnosticsLogSink | null): void {
+  logSink = sink;
+}
+
+function logEvent(kind: string, detail: string): void {
+  if (logSink === null) return;
+  try {
+    logSink(kind, detail);
+  } catch {
+    // logging never breaks diagnostics
+  }
+}
+
 function notify(): void {
   for (const cb of listeners) {
     try {
@@ -202,6 +224,7 @@ function pruneScanStarts(nowMs: number): void {
 
 export function setDiagnosticsAdapterState(state: DiagnosticsAdapterState): void {
   adapterState = state;
+  logEvent('adapter', state);
   notify();
 }
 
@@ -212,17 +235,20 @@ export function recordAdvertiseSuccess(advertisementLengthBytes: number): void {
   advertisingLastSuccessAtMs = Date.now();
   advertisingLastFailure = null;
   advertisingLengthBytes = advertisementLengthBytes;
+  logEvent('advertise', `started ${advertisementLengthBytes}B`);
   notify();
 }
 
 export function recordAdvertiseFailure(code: string): void {
   advertisingState = 'stopped';
   advertisingLastFailure = code;
+  logEvent('advertise', `failed ${code}`);
   notify();
 }
 
 export function recordAdvertiseStopped(): void {
   advertisingState = 'stopped';
+  logEvent('advertise', 'stopped');
   notify();
 }
 
@@ -230,6 +256,7 @@ export function recordAdvertiseStopped(): void {
 
 export function recordScanStarted(): void {
   scanningState = 'started';
+  logEvent('scan', 'started');
   scanStarts.push(Date.now());
   pruneScanStarts(Date.now());
   notify();
@@ -237,11 +264,13 @@ export function recordScanStarted(): void {
 
 export function recordScanStopped(): void {
   scanningState = 'stopped';
+  logEvent('scan', 'stopped');
   notify();
 }
 
 export function recordScanFailure(code: string): void {
   scanningLastFailure = code;
+  logEvent('scan', `failed ${code}`);
   notify();
 }
 
@@ -253,6 +282,7 @@ export function recordPeerSeen(peerId: string, rssi: number, advertisementHex: s
   peer.rssi = rssi;
   peer.advertisementHex = advertisementHex;
   if (peer.gattState !== 'connected') peer.gattState = 'seen';
+  logEvent('peer', `seen ${peerId} rssi ${rssi} ad ${advertisementHex}`);
   notify();
 }
 
@@ -275,6 +305,7 @@ export function recordPeerResolved(oldKey: string, peerId: string): void {
     old.peerId = peerId;
     peers.set(peerId, old);
   }
+  logEvent('peer', `resolved ${oldKey} -> ${peerId}`);
   notify();
 }
 
@@ -283,6 +314,7 @@ export function recordPeerConnected(
   mtu: number,
   cccdSubscribed: boolean | null,
 ): void {
+  logEvent('peer', `connected ${peerId} mtu ${mtu} cccd ${cccdSubscribed}`);
   const peer = ensurePeer(peerId);
   peer.gattState = 'connected';
   peer.mtu = mtu;
@@ -294,6 +326,7 @@ export function recordPeerConnected(
 export function recordPeerDisconnected(peerId: string): void {
   const peer = peers.get(peerId);
   if (!peer) return;
+  logEvent('peer', `disconnected ${peerId}`);
   peer.gattState = 'disconnected';
   notify();
 }
@@ -302,32 +335,38 @@ export function recordPeerDisconnected(peerId: string): void {
 
 export function recordFragmentsSent(peerId: string, count: number): void {
   if (count <= 0) return;
+  logEvent('frames', `${peerId} fragments-sent ${count}`);
   ensurePeer(peerId).frames.fragmentsSent += count;
   notify();
 }
 
 export function recordPacketSent(peerId: string): void {
+  logEvent('frames', `${peerId} packet-sent`);
   ensurePeer(peerId).frames.packetsSent += 1;
   notify();
 }
 
 export function recordFragmentsReceived(peerId: string, count: number): void {
   if (count <= 0) return;
+  logEvent('frames', `${peerId} fragments-received ${count}`);
   ensurePeer(peerId).frames.fragmentsReceived += count;
   notify();
 }
 
 export function recordIncompleteFragmentSet(peerId: string): void {
+  logEvent('frames', `${peerId} incomplete-fragment-set`);
   ensurePeer(peerId).frames.incompleteFragmentSets += 1;
   notify();
 }
 
 export function recordPacketReceived(peerId: string): void {
+  logEvent('frames', `${peerId} packet-received`);
   ensurePeer(peerId).frames.packetsReceived += 1;
   notify();
 }
 
 export function recordDedupDrop(peerId: string | null): void {
+  logEvent('frames', `dedup-drop ${peerId ?? 'unknown-peer'}`);
   dedupDropTotal += 1;
   if (peerId !== null) {
     const peer = peers.get(peerId);
@@ -339,6 +378,13 @@ export function recordDedupDrop(peerId: string | null): void {
 // ---------------------------------------------------------------- messages
 
 export function recordMessage(message: DiagnosticsMessage): void {
+  // Log direction, size, status and attempt outcomes only. The message
+  // id is deliberately NOT logged: it is not needed to diagnose a step,
+  // and keeping ids out keeps the shareable file to diagnostics data.
+  const attempts = message.attempts
+    .map((a) => `${a.transport}:${a.outcome}${a.detail !== null ? `:${a.detail}` : ''}`)
+    .join(',');
+  logEvent('message', `${message.direction} ${message.sizeBytes}B ${message.finalStatus} ${attempts}`);
   messages.push(message);
   while (messages.length > MAX_MESSAGES) messages.shift();
   notify();
@@ -347,6 +393,10 @@ export function recordMessage(message: DiagnosticsMessage): void {
 // ------------------------------------------------------------- permissions
 
 export function setDiagnosticsPermissions(report: DiagnosticsPermissionReport): void {
+  logEvent(
+    'permissions',
+    `scan=${report.scan} advertise=${report.advertise} connect=${report.connect} location=${report.location}`,
+  );
   permissionReport = report;
   notify();
 }
@@ -407,4 +457,5 @@ export function resetDiagnosticsForTests(): void {
   permissionReport = null;
   dedupDropTotal = 0;
   listeners.clear();
+  logSink = null;
 }

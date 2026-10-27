@@ -444,6 +444,9 @@ export const en = {
       'Live radio and transport state from this phone. Values come from the BLE stack and the transport, never from samples.',
     diagnosticsRefresh: 'Refresh',
     diagnosticsRetryBle: 'Retry Bluetooth',
+    diagnosticsShareLog: 'Share diagnostics log',
+    diagnosticsLogFile: 'Log file: {{count}} lines',
+    diagnosticsShareUnavailable: 'Sharing is not available on this device, so the log file cannot be shared from here.',
     diagnosticsOpenSettings: 'Open system settings',
     diagnosticsOpenSettingsNote:
       'Use system settings when Android no longer prompts for a permission.',

@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
+import { AppState, InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SplashScreen, Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { ThemeProvider, useTheme } from '../src/theme/themeContext';
@@ -8,6 +8,11 @@ import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
 import { startTransport, stopTransport } from '../services/airplane';
 import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
+import {
+  recordDiagnosticsLogAppState,
+  startDiagnosticsLogFile,
+  stopDiagnosticsLogFile,
+} from '../services/airplane/diagnosticsLogExpo';
 
 SplashScreen.preventAutoHideAsync().catch(() => {
     /* splash may already be hidden in tests */
@@ -57,6 +62,12 @@ function ThemedStatusBar() {
 
 export default function RootLayout() {
     useEffect(() => {
+        // LOG: automatic diagnostics logging starts on launch, before
+        // transport, with no tap. AppState markers follow below.
+        void startDiagnosticsLogFile().catch(() => {});
+        const appStateSub = AppState.addEventListener('change', (state) => {
+          recordDiagnosticsLogAppState(state);
+        });
         // Start hybrid transport (BLE always, Nostr when online) AFTER first
         // paint so nothing blocks the UI thread during launch. Failures are
         // non-fatal; the feed works offline regardless.
@@ -70,6 +81,8 @@ export default function RootLayout() {
             checkForUpdateOnLaunch().catch(() => {});
         });
         return () => {
+            appStateSub.remove();
+            stopDiagnosticsLogFile();
             task.cancel();
             updateTask.cancel();
             // Root unmount is rare on mobile, but if it happens the NetInfo

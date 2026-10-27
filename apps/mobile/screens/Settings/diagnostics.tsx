@@ -17,6 +17,10 @@ import {
   type DiagnosticsSnapshot,
 } from '../../services/airplane/diagnostics';
 import { checkBlePermissionStates } from '../../services/airplane/ble/permissions';
+import {
+  getDiagnosticsLogStatus,
+  shareDiagnosticsLogFile,
+} from '../../services/airplane/diagnosticsLogExpo';
 import { enableBleRadio } from '../../services/airplane/transport';
 
 interface DiagnosticsProps {
@@ -33,6 +37,8 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
   const insets = useSafeAreaInsets();
   const { t } = useI18n();
   const [snapshot, setSnapshot] = useState<DiagnosticsSnapshot>(() => getDiagnosticsSnapshot());
+  const [logLines, setLogLines] = useState<number>(() => getDiagnosticsLogStatus().lineCount);
+  const [shareFailed, setShareFailed] = useState<boolean>(false);
 
   const refreshPermissions = () => {
     checkBlePermissionStates()
@@ -55,7 +61,10 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
   useEffect(() => {
     refreshPermissions();
     const unsub = subscribeDiagnostics(() => setSnapshot(getDiagnosticsSnapshot()));
-    const timer = setInterval(() => setSnapshot(getDiagnosticsSnapshot()), 1000);
+    const timer = setInterval(() => {
+      setSnapshot(getDiagnosticsSnapshot());
+      setLogLines(getDiagnosticsLogStatus().lineCount);
+    }, 1000);
     return () => {
       unsub();
       clearInterval(timer);
@@ -168,6 +177,19 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
           >
             <Text style={[type.name, styles.buttonText]}>{t('settings.diagnosticsRefresh')}</Text>
           </Pressable>
+          <Pressable
+            style={styles.button}
+            onPress={() => {
+              setShareFailed(false);
+              void shareDiagnosticsLogFile()
+                .then(() => setLogLines(getDiagnosticsLogStatus().lineCount))
+                .catch(() => setShareFailed(true));
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={t('settings.diagnosticsShareLog')}
+          >
+            <Text style={[type.name, styles.buttonText]}>{t('settings.diagnosticsShareLog')}</Text>
+          </Pressable>
           {anyDenied && (
             <Pressable
               style={styles.button}
@@ -201,6 +223,10 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
         </View>
         {anyDenied && (
           <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsOpenSettingsNote')}</Text>
+        )}
+        <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogFile', { count: logLines })}</Text>
+        {shareFailed && (
+          <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsShareUnavailable')}</Text>
         )}
 
         <SectionLabel style={styles.sectionLabel}>{t('settings.diagnosticsRadio')}</SectionLabel>
