@@ -16,12 +16,13 @@ export type {
   NostrKeypair,
   NostrTransportOpts,
   RelayState,
+  RelayPublishAck,
   WebSocketLike,
   WebSocketFactory,
 } from './nostr';
 
-export { BleTransport, HybridTransport } from './hybrid';
-export type { HybridTransportOpts, IngressSource } from './hybrid';
+export { BleTransport, HybridTransport, DEFAULT_RELAY_DEADLINE_MS } from './hybrid';
+export type { HybridTransportOpts, HybridDiagnosticsOpts, IngressSource, RouterOpts, RouterStatus, RouterTransport, RouteResult } from './hybrid';
 
 export { WorldSync } from './sync';
 export type { SyncReport, WorldConfirmStore } from './sync';

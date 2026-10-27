@@ -80,6 +80,107 @@ describe('diagnostics log writer', () => {
   });
 });
 
+describe('diagnostics log restart survival', () => {
+  test('appends during load are buffered, not wiped by the read', async () => {
+    let resolveRead!: (value: string | null) => void;
+    const port: DiagnosticsLogFilePort & { content: string } = {
+      content: '2026-10-27T00:00:00.000Z app started\n2026-10-27T00:00:01.000Z scan started\n',
+      read: () => new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+      write: async (content: string) => {
+        port.content = content;
+      },
+    };
+    const writer = new DiagnosticsLogWriter(port);
+    const loading = writer.load();
+    // These land while the file read is still in flight. Before the
+    // fix, the read completing below replaced the line list and wiped
+    // them; now they are buffered and drained in order.
+    writer.append('2026-10-27T00:00:02.000Z app foreground');
+    writer.append('2026-10-27T00:00:03.000Z adapter on');
+    expect(writer.getLineCount()).toBe(2);
+    resolveRead(port.content);
+    await loading;
+    expect(writer.getLoadedFromFileCount()).toBe(2);
+    expect(writer.getLoadOk()).toBe(true);
+    expect(writer.getLines()).toEqual([
+      '2026-10-27T00:00:00.000Z app started',
+      '2026-10-27T00:00:01.000Z scan started',
+      '2026-10-27T00:00:02.000Z app foreground',
+      '2026-10-27T00:00:03.000Z adapter on',
+    ]);
+    // The drained lines reach the file without any further append.
+    for (let i = 0; i < 20 && !port.content.includes('adapter on'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(port.content).toContain('adapter on');
+  });
+
+  test('lines appended during a failed write are re-flushed, not stranded', async () => {
+    let failFirstWrite!: (error: Error) => void;
+    let writeCalls = 0;
+    const port: DiagnosticsLogFilePort & { content: string } = {
+      content: '',
+      read: async () => (port.content.length > 0 ? port.content : null),
+      write: (content: string) => {
+        writeCalls += 1;
+        if (writeCalls === 1) {
+          return new Promise<void>((_resolve, reject) => {
+            failFirstWrite = reject;
+          });
+        }
+        port.content = content;
+        return Promise.resolve();
+      },
+    };
+    const writer = new DiagnosticsLogWriter(port);
+    await writer.load();
+    writer.append('2026-10-27T00:00:00.000Z app started');
+    // This append lands while the first write is still in flight, so
+    // it only marks the buffer dirty. Before the fix, the failed write
+    // left it stranded in memory with no flush scheduled until the
+    // next append, so closing the app right after lost the tail.
+    writer.append('2026-10-27T00:00:01.000Z scan started');
+    failFirstWrite(new Error('transient failure'));
+    for (let i = 0; i < 20 && !port.content.includes('scan started'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(port.content).toContain('app started');
+    expect(port.content).toContain('scan started');
+    expect(writer.getLastWriteStatus().ok).toBe(true);
+  });
+
+  test('load and write status are visible for the device re-check', async () => {
+    const port = memoryPort('line-one\nline-two\nline-three\n');
+    const writer = new DiagnosticsLogWriter(port);
+    expect(writer.getLastWriteStatus()).toEqual({ ok: null, atMs: null, error: null });
+    await writer.load();
+    expect(writer.getLoadedFromFileCount()).toBe(3);
+    expect(writer.getLoadOk()).toBe(true);
+    writer.append('line-four');
+    await writer.flush();
+    expect(writer.getLastWriteStatus().ok).toBe(true);
+    expect(writer.getLastWriteStatus().error).toBeNull();
+
+    const failingPort: DiagnosticsLogFilePort = {
+      read: async () => {
+        throw new Error('no storage');
+      },
+      write: async () => {
+        throw new Error('no storage');
+      },
+    };
+    const failingWriter = new DiagnosticsLogWriter(failingPort);
+    await failingWriter.load();
+    expect(failingWriter.getLoadedFromFileCount()).toBe(0);
+    expect(failingWriter.getLoadOk()).toBe(false);
+    failingWriter.append('line-one');
+    await failingWriter.flush();
+    expect(failingWriter.getLastWriteStatus().ok).toBe(false);
+    expect(failingWriter.getLastWriteStatus().error).toBe('no storage');
+  });
+});
 describe('diagnostics log sink wiring and privacy', () => {
   beforeEach(() => {
     resetDiagnosticsForTests();

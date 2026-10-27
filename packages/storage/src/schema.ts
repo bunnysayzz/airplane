@@ -100,3 +100,63 @@ CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_a
 CREATE TABLE tombstones(target_id BLOB NOT NULL, author BLOB NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(target_id, author));
 CREATE INDEX idx_tombstones_target ON tombstones(target_id);
 `;
+
+/**
+ * MIGRATION_004 - Durable stars (T17).
+ *
+ * `star_events` stores every verified kind-4 star/unstar event this node
+ * has accepted (applied, superseded, or held pending), keyed by event id,
+ * so the star counter rebuilds exactly across restarts instead of
+ * repopulating only from re-arriving flood/relay traffic. The full signed
+ * event is stored (same column layout as `events` minus the kind CHECK,
+ * which would reject kind 4) so replay through the counter re-derives
+ * latest-wins state, dedup, and pending queues without new logic.
+ * `star_known_posts` records post ids marked known for star purposes, so
+ * pending stars flush to the right posts after a restart.
+ * Client-side only: never part of a signed payload, never relayed.
+ * Stars are display-only; no ranking input lives here.
+ */
+export const MIGRATION_004 = `
+CREATE TABLE star_events(
+  event_id   BLOB PRIMARY KEY,
+  pubkey     BLOB NOT NULL,
+  target_id  BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  geohash    TEXT NOT NULL,
+  tags       BLOB NOT NULL,
+  content    TEXT NOT NULL,
+  sig        BLOB NOT NULL
+);
+CREATE INDEX idx_star_events_target ON star_events(target_id, created_at);
+CREATE TABLE star_known_posts(
+  post_id BLOB PRIMARY KEY
+);
+`;
+
+/**
+ * MIGRATION_005 - Durable reshare events (T19).
+ *
+ * `reshare_events` holds kind-5 reshare/unreshare events apart from the
+ * `events` table, whose CHECK forbids kind 5. Keeping them separate means
+ * reshare rows can never leak into the kind-1-only feed query or the
+ * World-sync unconfirmed set, and no existing table is rebuilt. The
+ * `target_id` column is the original post id from the event's `e` tag,
+ * extracted at save time so rehydration never has to parse tags.
+ *
+ * Numbered 005 because MIGRATION_004 already owns the star tables
+ * (T17 landed first); both tracks' migrations run in version order.
+ */
+export const MIGRATION_005 = `
+CREATE TABLE IF NOT EXISTS reshare_events(
+  id         BLOB PRIMARY KEY,
+  pubkey     BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  geohash    TEXT NOT NULL,
+  target_id  BLOB NOT NULL,
+  tags       BLOB NOT NULL,
+  content    TEXT NOT NULL DEFAULT '',
+  sig        BLOB NOT NULL,
+  received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reshare_events_target ON reshare_events(target_id);
+`;

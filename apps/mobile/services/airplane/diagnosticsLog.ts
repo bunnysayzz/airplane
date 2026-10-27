@@ -58,16 +58,39 @@ export function rotateDiagnosticsLogLines(lines: string[]): string[] {
  * during an in-flight write marks the buffer dirty and flushes again
  * after, so no event is lost and concurrent writes never interleave.
  * A failed write never throws to the caller: logging must never break
- * the app it is diagnosing. The failure is visible only as a stale
- * file, never as a crash.
+ * the app it is diagnosing. Two rules keep a failed write from losing
+ * the tail anyway: lines appended during a failed write are re-flushed
+ * from the finally block (without it they would sit in memory with no
+ * flush scheduled until the next append, so closing the app right
+ * after would lose them), and the failure itself is recorded for the
+ * Diagnostics screen instead of vanishing as a stale file.
+ * Appends that land while the file is still loading are buffered and
+ * drained in order once the read finishes, so the load can never wipe
+ * lines that arrived during its own async window.
  */
+export interface DiagnosticsLogWriteStatus {
+  /** Null until the first write attempt finishes. */
+  ok: boolean | null;
+  atMs: number | null;
+  /** Sanitized failure reason from the last failed write, else null. */
+  error: string | null;
+}
+
 export class DiagnosticsLogWriter {
   private readonly port: DiagnosticsLogFilePort;
   private lines: string[] = [];
   private byteCount = 0;
   private flushing = false;
   private dirty = false;
-  private loaded = false;
+  private loadStarted = false;
+  private loadComplete = false;
+  /** Lines appended while the file was still loading. Drained in order by load(). */
+  private pendingLines: string[] = [];
+  /** Lines the file held when load() read it, before pending lines were drained. */
+  private loadedFromFile = 0;
+  /** Null until load() finishes; false when the file could not be read. */
+  private loadOk: boolean | null = null;
+  private lastWrite: DiagnosticsLogWriteStatus = { ok: null, atMs: null, error: null };
 
   constructor(port: DiagnosticsLogFilePort) {
     this.port = port;
@@ -75,25 +98,63 @@ export class DiagnosticsLogWriter {
 
   /** Load the surviving file (if any) so lines survive a restart. */
   async load(): Promise<void> {
-    if (this.loaded) return;
-    this.loaded = true;
+    if (this.loadStarted) return;
+    this.loadStarted = true;
     try {
       const content = await this.port.read();
       if (content !== null && content.length > 0) {
         this.lines = rotateDiagnosticsLogLines(content.split('\n').filter((l) => l.length > 0));
       }
+      this.loadOk = true;
     } catch {
       this.lines = [];
+      this.loadOk = false;
+    }
+    this.loadedFromFile = this.lines.length;
+    this.loadComplete = true;
+    // Appends that landed while the file was loading were buffered, not
+    // dropped and not wiped by the read above. Drain them in order now.
+    const pending = this.pendingLines;
+    this.pendingLines = [];
+    for (const line of pending) {
+      this.pushLine(line);
     }
     this.byteCount = this.lines.reduce((sum, line) => sum + line.length + 1, 0);
+    if (pending.length > 0) {
+      void this.flush();
+    }
   }
 
   getLineCount(): number {
-    return this.lines.length;
+    return this.lines.length + this.pendingLines.length;
   }
 
   getByteCount(): number {
     return this.byteCount;
+  }
+
+  /**
+   * Lines the file held at load time. After a restart, compare with
+   * the line count: equal (plus new launch lines) means the file
+   * survived, lower means lines were lost before the restart.
+   */
+  getLoadedFromFileCount(): number {
+    return this.loadedFromFile;
+  }
+
+  getLoadOk(): boolean | null {
+    return this.loadOk;
+  }
+
+  getLastWriteStatus(): DiagnosticsLogWriteStatus {
+    return { ...this.lastWrite };
+  }
+
+  private pushLine(line: string): void {
+    this.lines.push(line);
+    this.byteCount += line.length + 1;
+    this.lines = rotateDiagnosticsLogLines(this.lines);
+    this.byteCount = this.lines.reduce((sum, l) => sum + l.length + 1, 0);
   }
 
   /** Test seam: the current lines, oldest first. */
@@ -102,10 +163,17 @@ export class DiagnosticsLogWriter {
   }
 
   append(line: string): void {
-    this.lines.push(line);
-    this.byteCount += line.length + 1;
-    this.lines = rotateDiagnosticsLogLines(this.lines);
-    this.byteCount = this.lines.reduce((sum, l) => sum + l.length + 1, 0);
+    if (!this.loadComplete) {
+      // The file is still loading: buffer, do not drop, and do not let
+      // the read finishing below wipe this line when it replaces the
+      // line list. The buffer is capped like the file itself.
+      this.pendingLines.push(line);
+      if (this.pendingLines.length > MAX_DIAGNOSTICS_LOG_LINES) {
+        this.pendingLines.shift();
+      }
+      return;
+    }
+    this.pushLine(line);
     void this.flush();
   }
 
@@ -120,11 +188,31 @@ export class DiagnosticsLogWriter {
         this.dirty = false;
         const content = this.lines.length > 0 ? `${this.lines.join('\n')}\n` : '';
         await this.port.write(content);
+        this.lastWrite = { ok: true, atMs: Date.now(), error: null };
       } while (this.dirty);
-    } catch {
-      // Logging never breaks the app; the next append retries.
+    } catch (error) {
+      // Logging never breaks the app; the next append retries. The
+      // failure is recorded for the Diagnostics screen instead of
+      // vanishing: a stale file with a failed-write status beats a
+      // stale file with no explanation.
+      this.lastWrite = {
+        ok: false,
+        atMs: Date.now(),
+        error: String(error instanceof Error ? error.message : error)
+          .replace(/[\r\n]+/g, ' ')
+          .trim()
+          .slice(0, 120),
+      };
     } finally {
       this.flushing = false;
+      if (this.dirty) {
+        // Lines landed during a failed write (or after the last write
+        // of this flush): without this re-flush they sit in memory
+        // with no flush scheduled until the next append, so closing
+        // the app right after loses the tail. Flush them now. This
+        // cannot loop on its own: dirty is set only by appends.
+        void this.flush();
+      }
     }
   }
 }

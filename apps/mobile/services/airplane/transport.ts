@@ -14,12 +14,18 @@ import {
   BleTransport,
   WorldSync,
   type WorldConfirmStore,
+  type RouteResult,
 } from '@airplane/transport';
 import type { SignedEvent, TransportPort, Hex64 } from '@airplane/protocol';
 import { encodeEvent, toHex, verifyEvent } from '@airplane/protocol';
 import { getStore } from './store';
-import { EVENT_KIND_POST, EVENT_KIND_STAR } from '@airplane/protocol';
+import { EVENT_KIND_POST, EVENT_KIND_RESHARE, EVENT_KIND_STAR, reshareTargetId } from '@airplane/protocol';
 import { applyIncomingStar, markStarPostKnown } from './stars';
+import {
+  markResharePostKnown,
+  recordReshareEvent,
+  rehydrateReshares,
+} from './reshares';
 import { notifyFeedListeners } from './feed';
 import { getDevicePublicKey, crypto } from './identity';
 import { loadRelayUrls } from '../../src/lib/relays';
@@ -30,6 +36,7 @@ import {
   recordDedupDrop,
   recordMessage,
   setDiagnosticsAdapterState,
+  type DiagnosticsMessageAttempt,
 } from './diagnostics';
 
 /**
@@ -155,6 +162,23 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
     if (applyIncomingStar(event)) notifyFeedListeners();
     return;
   }
+  // T19: kind-5 reshare/unreshare events never reach the events table
+  // either (same CHECK). They go to the reshare counter, are persisted to
+  // the reshare_events table for cross-restart rehydration, and a reshare
+  // for a post this node does not yet hold triggers a pull-on-demand
+  // relay query for the original post (best-effort, once per post per
+  // launch; a mesh-only post simply stays pending until BLE delivers it).
+  if (event.kind === EVENT_KIND_RESHARE) {
+    const result = recordReshareEvent(event);
+    if (result === 'pending') void pullOriginalForReshare(event);
+    try {
+      await getStore().saveReshareEvent(event);
+    } catch {
+      // The count already applied; rehydration reconciles later.
+    }
+    notifyFeedListeners();
+    return;
+  }
   // Diagnostics: 'local' is our own publish echo (already logged as
   // outbound), so only relay and BLE arrivals are logged as inbound.
   if (source === 'nostr' || source === 'ble') {
@@ -178,9 +202,38 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
   // Store the event (deduped by HybridTransport already).
   // saveEvent is idempotent.
   await store.saveEvent(event);
-  // A post arriving may release stars held pending for it.
-  if (event.kind === EVENT_KIND_POST) markStarPostKnown(toHex(event.id));
+  // A post arriving may release stars and reshares held pending for it.
+  if (event.kind === EVENT_KIND_POST) {
+    markStarPostKnown(toHex(event.id));
+    markResharePostKnown(toHex(event.id));
+  }
   notifyFeedListeners();
+}
+
+/**
+ * Pull-on-demand for reshare targets (T19): when a reshare arrives for a
+ * post this node does not hold, ask the open relays for the original post
+ * by id. Responses arrive via the normal onPost path, which marks the post
+ * known and releases the pending reshare. Best-effort and once per post
+ * per launch: when offline the query sends nowhere, and a mesh-only post
+ * stays pending until a BLE peer delivers it. Never throws.
+ */
+const pulledPostIds = new Set<string>();
+
+async function pullOriginalForReshare(event: SignedEvent): Promise<void> {
+  const target = reshareTargetId(event);
+  if (!target || pulledPostIds.has(target)) return;
+  pulledPostIds.add(target);
+  try {
+    await hybrid?.nostr.queryByIds([target]);
+  } catch {
+    // Best-effort: the pending reshare still applies when the post arrives.
+  }
+}
+
+/** Test seam: clear the pull-on-demand once-per-launch set. */
+export function __resetPulledPostsForTests(): void {
+  pulledPostIds.clear();
 }
 
 async function runSync(): Promise<void> {
@@ -225,6 +278,15 @@ export async function startTransport(): Promise<void> {
     {
       onDedupDrop: (_source, peerId) => recordDedupDrop(peerId),
     },
+    {
+      relayDeadlineMs: 5000,
+      // R4: the router runs the relay stage only when the network is
+      // not positively offline. A positive offline signal skips the
+      // relay wait and falls through at once; unknown (no connectivity
+      // state yet, or no NetInfo module) still routes on the live
+      // socket fact, so builds without NetInfo keep relay working.
+      networkValidated: () => lastOnline !== false,
+    },
   );
   sync = new WorldSync(hybrid.nostr, {
     markWorldConfirmed: (id: Hex64) => getStore().markWorldConfirmed(id),
@@ -253,6 +315,16 @@ export async function startTransport(): Promise<void> {
     sync = null;
     lastOnline = null;
     throw new Error('transport failed to start; running offline-only');
+  }
+
+  // T19: rebuild reshare counts from stored kind-5 events before the feed
+  // first renders them. Best-effort and idempotent: a failure just means
+  // counts repopulate as reshare events re-arrive via flood/relay.
+  try {
+    const restored = await rehydrateReshares();
+    if (restored > 0) notifyFeedListeners();
+  } catch {
+    // Never fail launch on a counter rebuild.
   }
 
   // Bring up the BLE radio only when the OS grants are already in place.
@@ -501,45 +573,59 @@ export async function stopTransport(): Promise<void> {
   syncDiagnosticsAdapterState();
 }
 
-/** Publish a local event through all available transports. */
-export async function publishViaTransport(
-  event: SignedEvent,
-): Promise<{ blePeers: number; relays: string[] }> {
+/** Publish a local event through the ordered router (R4). */
+export async function publishViaTransport(event: SignedEvent): Promise<RouteResult> {
   if (!hybrid) await startTransport();
   // BLE fan-out targets the currently connected peers. Previously this
   // call passed no peer ids at all, so local posts NEVER went out over
   // BLE — only Nostr — even with phones connected over GATT.
   const result = await hybrid!.publish(event, blePeerIdsForPublish(blePort?.port));
   const nowMs = Date.now();
+  // Diagnostics record exactly the stages the router actually ran: a
+  // relay win never touches BLE, a skipped relay stage is marked
+  // skipped (not failed), and a queued result records both stages as
+  // unattempted or failed per the router result.
+  const attempts: DiagnosticsMessageAttempt[] = [];
+  if (result.transport === 'relay') {
+    attempts.push({
+      transport: 'relay',
+      atMs: nowMs,
+      outcome: 'ok',
+      detail: `published to ${result.relays.length} relays (OK)`,
+    });
+  } else {
+    attempts.push({
+      transport: 'relay',
+      atMs: nowMs,
+      outcome: result.relayTried ? 'failed' : 'skipped',
+      detail: result.relayDetail,
+    });
+    if (result.transport === 'mesh') {
+      attempts.push({
+        transport: 'ble',
+        atMs: nowMs,
+        outcome: 'ok',
+        detail: `sent to ${result.blePeers} connected peers (no peer ack in current transport)`,
+      });
+    } else {
+      attempts.push({
+        transport: 'ble',
+        atMs: nowMs,
+        outcome: 'skipped',
+        detail: 'no connected BLE peers',
+      });
+    }
+  }
   recordMessage({
     id: toHex(event.id),
     sequence: null,
     sizeBytes: encodeEvent(event).length,
     direction: 'outbound',
-    attempts: [
-      {
-        transport: 'relay',
-        atMs: nowMs,
-        outcome: result.relays.length > 0 ? 'ok' : 'failed',
-        detail:
-          result.relays.length > 0
-            ? `published to ${result.relays.length} relays`
-            : 'no relay accepted the event',
-      },
-      {
-        transport: 'ble',
-        atMs: nowMs,
-        outcome: result.blePeers > 0 ? 'ok' : 'failed',
-        detail:
-          result.blePeers > 0
-            ? `sent to ${result.blePeers} connected peers (no peer ack in current transport)`
-            : 'no connected BLE peers',
-      },
-    ],
+    attempts,
     finalStatus:
-      result.relays.length > 0
+      result.transport === 'relay'
         ? 'relayed'
-        : result.blePeers > 0
+        : result.transport === 'mesh'
           ? 'sent over BLE'
           : 'not delivered to any transport',
   });

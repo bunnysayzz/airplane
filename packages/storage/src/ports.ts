@@ -49,6 +49,18 @@ export interface StorePort {
   getEvent(id: Hex64): Promise<SignedEvent | null>;
 
   /**
+   * Reshare events (kind 5) live apart from the kind-1/2/3 events table:
+   * that table's CHECK forbids kind 5, and reshare rows must never leak
+   * into the feed query or the World-sync unconfirmed set. Insert is
+   * idempotent by `id` (re-saving is a no-op). Throws when the event is
+   * not kind 5 or carries no valid original-post `e` tag.
+   */
+  saveReshareEvent(e: SignedEvent): Promise<void>;
+
+  /** All stored reshare events, oldest first (rehydration replay order). */
+  listReshareEvents(): Promise<SignedEvent[]>;
+
+  /**
    * Feed query: kind-1 posts only, excluding deleted and expired rows,
    * matching one of `cells`, newest first. `views`/`score` are computed from
    * receipts; see `FeedPost` in `@airplane/protocol`.
@@ -103,6 +115,27 @@ export interface StorePort {
    * Used by the sync engine to decide what to push / query.
    */
   getUnconfirmed(): Promise<Hex64[]>;
+
+  // ------------------------------------------------------------------
+  // Stars (T17). Client-side only: durable star state so counts and the
+  // device's own star survive restarts. Never relayed, never ranked.
+  // ------------------------------------------------------------------
+
+  /**
+   * Persist one verified kind-4 star/unstar event. Idempotent by event
+   * id (re-saving is a no-op). Only verified events are stored; callers
+   * verify the signature before calling.
+   */
+  saveStarEvent(e: SignedEvent): Promise<void>;
+
+  /** Mark a post id as known for star purposes. Idempotent. */
+  saveStarKnownPost(postId: Hex64): Promise<void>;
+
+  /** All stored verified kind-4 events, oldest first. */
+  listStarEvents(): Promise<SignedEvent[]>;
+
+  /** All stored known post ids. */
+  listStarKnownPosts(): Promise<Hex64[]>;
 }
 
 /** Tiny string key/value store (STORE-5). Backed by MMKV on device. */

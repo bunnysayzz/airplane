@@ -30,8 +30,17 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests, __getHybridForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus } from './transport';
+import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus } from './transport';
 import { getStore, __resetStoreForTests } from './store';
+import { __resetDeviceKeypairForTests } from './identity';
+import {
+  __resetResharesForTests,
+  markResharePostKnown,
+  reshareViewFor,
+  toggleReshare,
+} from './reshares';
+import { NobleCrypto, createReshare, fromHex } from '@airplane/protocol';
+import type { PostCardModel } from './types';
 import { DEFAULT_RELAYS, RELAYS_KEY } from '../../src/lib/relays';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -87,6 +96,9 @@ describe('transport manager', () => {
     netInfoMock.addEventListener.mockReturnValue(jest.fn());
     __resetStoreForTests();
     __resetNetInfoForTests();
+    __resetResharesForTests();
+    __resetPulledPostsForTests();
+    __resetDeviceKeypairForTests();
     AsyncStorageMock.__clear();
     jest.useFakeTimers();
   });
@@ -314,6 +326,76 @@ describe('transport manager', () => {
     hybrid!.ingress(bleEvent, 'ble');
     for (let i = 0; i < 10; i++) await Promise.resolve();
     expect(await store.isWorldConfirmed('08'.repeat(32))).toBe(false);
+  });
+
+  test('kind-5 ingress counts, persists, and a pending reshare pulls its original post', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+
+    const crypto = new NobleCrypto();
+    const other = crypto.generateKeypair();
+    const postId = 'c'.repeat(64);
+    const author = 'a'.repeat(64);
+    const reshare = createReshare({
+      crypto,
+      secretKey: other.secretKey,
+      pubkey: other.publicKey,
+      geohash5: 'tdr1v',
+      originalPostId: fromHex(postId),
+      originalAuthorPubkey: fromHex(author),
+    });
+
+    // The post is unknown, so the reshare sits pending and pull-on-demand
+    // asks the relays for the original post by id.
+    const querySpy = jest.spyOn(hybrid!.nostr, 'queryByIds');
+    hybrid!.ingress(reshare, 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(querySpy).toHaveBeenCalledWith([postId]);
+    expect(reshareViewFor(postId).reshares).toBe(0);
+
+    // The original post arrives: the pending reshare applies, no re-pull.
+    const postEvent = makeSignedEvent();
+    postEvent.id = fromHex(postId);
+    postEvent.kind = 1;
+    hybrid!.ingress(postEvent, 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(reshareViewFor(postId).reshares).toBe(1);
+    expect(querySpy).toHaveBeenCalledTimes(1);
+
+    // Persisted for rehydration, not in the kind-1 feed table.
+    const stored = await getStore().listReshareEvents();
+    expect(stored).toHaveLength(1);
+    expect(await getStore().getEvent(postId)).not.toBeNull();
+  });
+
+  test('own reshare published via publishViaTransport echoes locally as a duplicate, not a double count', async () => {
+    await startTransport();
+    const postId = 'd'.repeat(64);
+    markResharePostKnown(postId);
+    const card: PostCardModel = {
+      eventId: postId,
+      createdAtMs: Date.now(),
+      authorLabel: 'author',
+      body: 'test post',
+      geohash: 'tdr1v',
+      views: 0,
+      score: 0,
+      worldConfirmed: false,
+      authorPubkeyHex: 'a'.repeat(64),
+      reshares: 0,
+      resharedByMe: false,
+      stars: 0,
+      starLabel: '',
+      starredByMe: false,
+    };
+    // Real publish path (no stub): no BLE peers, no open relays, but the
+    // local echo flows through ingress and must not double count.
+    await toggleReshare(card);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(reshareViewFor(postId).reshares).toBe(1);
+    const stored = await getStore().listReshareEvents();
+    expect(stored).toHaveLength(1);
   });
 
   // BLE permission priming (prod-14): the OS dialog must never fire at

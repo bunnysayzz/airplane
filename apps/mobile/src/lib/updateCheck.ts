@@ -30,12 +30,14 @@ import {
 import { dialog } from './dialog';
 import { defaultTranslator } from '../i18n/translate';
 
-// Installed version source — the same source the Settings screen already
-// shows (appVersionLabel): app.json `version` via expoConfig. Note what is
-// NOT here, deliberately: this project has no expo-application dependency,
-// so the Android versionCode (build.gradle `versionCode`, currently 5 for
-// 0.1.3) is not exposed to JS at all — expo-constants in this SDK offers
-// no nativeBuildVersion, and inventing one would be a lie. The comparison
+// Installed version source: the same source the Settings screen already
+// shows (appVersionLabel): app.json `version` via expoConfig. PL1: app.json
+// is the single source of truth, and build.gradle derives versionName and
+// versionCode from it, so the installed version always matches the release
+// line the build was cut from. Note what is NOT here, deliberately: this
+// project has no expo-application dependency, so the Android versionCode
+// is not exposed to JS at all (expo-constants in this SDK offers no
+// nativeBuildVersion, and inventing one would be a lie). The comparison
 // is therefore semver-vs-semver (see updater.ts header); if a future change
 // adds expo-application, its nativeBuildVersion can be surfaced here for
 // display, but it still cannot be compared against a GitHub tag, which

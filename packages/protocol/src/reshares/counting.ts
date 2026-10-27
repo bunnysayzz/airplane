@@ -199,6 +199,20 @@ export class ReshareCounter {
     return this.knownPosts.has(postIdHex.toLowerCase());
   }
 
+  /**
+   * Latest event for this (pubkey, post), or null when none seen.
+   * Used by the toggle path to step created_at past its own previous
+   * event, so a same-second reshare-then-unreshare resolves by intent
+   * instead of falling to the id-hex tie-break (same pattern as stars).
+   */
+  latestFor(postIdHex: Hex64, pubkeyHex: Hex64): SignedEvent | null {
+    const state = this.latest.get(
+      ReshareCounter.stateKey(pubkeyHex.toLowerCase(), postIdHex.toLowerCase()),
+    );
+    if (!state) return null;
+    return this.events.get(state.latestIdHex) ?? null;
+  }
+
   /** Retained verified events (for debugging / rehydration), by event id. */
   retainedEventCount(): number {
     return this.events.size;

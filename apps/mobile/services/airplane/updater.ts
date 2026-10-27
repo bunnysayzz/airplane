@@ -7,11 +7,13 @@
 //
 // Version comparison, stated plainly because the GitHub API forces it:
 // the public releases API exposes a tag (e.g. `v0.1.4`) and assets, but NO
-// versionCode. There is therefore no release-side versionCode to compare the
-// installed versionCode (build.gradle `versionCode`, currently 5 for 0.1.3)
-// against. The comparison is semver tag vs the installed app version
-// (app.json `version`, expo-constants `expoConfig` `version` — the same
-// string the Settings screen already shows via `appVersionLabel()`).
+// versionCode. There is therefore no release-side versionCode to compare
+// the installed versionCode against. PL1: app.json `version` is the single
+// source of truth, and build.gradle derives versionName and versionCode
+// from it, so the installed version always matches the release line the
+// build was cut from. The comparison is semver tag vs the installed app
+// version (app.json `version`, expo-constants `expoConfig` `version`, the
+// same string the Settings screen already shows via `appVersionLabel()`).
 // Additionally, this project has no expo-application dependency, so the
 // installed versionCode is not even visible to JS; adding that dependency
 // would surface it for display only and still would not make it comparable

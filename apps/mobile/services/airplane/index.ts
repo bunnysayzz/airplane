@@ -39,6 +39,7 @@ export {
   resharerLabelFor,
   toggleReshare,
   getMyPubkeyHex,
+  rehydrateReshares,
   reshareViewFor,
 } from './reshares';
 export { getKv } from './kv';

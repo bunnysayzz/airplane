@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Version lockstep (PL1): app.json is now the single source of truth for the app version. The Android build derives versionName and versionCode from it at configuration time, so a build can no longer report a stale version and prompt an update to its own release line. The in-app version and the update check both read the same app.json version, and a lockstep test fails if the sources drift apart again. Version bumped to 0.1.9 (versionCode 109).
 - Feed scope wiring (0.1.3): the feed tab passed `cells={[]}` to Timeline,
   and an empty cell set matches no post by construction — so the feed stayed
   permanently empty even though posts saved fine. The tab now resolves the

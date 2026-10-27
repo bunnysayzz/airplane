@@ -171,6 +171,25 @@ export interface NostrTransportOpts {
 /** Connection state per relay. */
 export type RelayState = 'connecting' | 'open' | 'closed';
 
+/** Result of a publish that waits for relay acknowledgement. */
+export interface RelayPublishAck {
+  /** Relay URLs that sent an accepted OK for the envelope. */
+  ok: string[];
+  /** Relay URLs that sent a rejected OK for the envelope. */
+  rejected: string[];
+  /** True when the deadline expired before any OK arrived. */
+  timedOut: boolean;
+}
+
+/** One in-flight OK waiter, shared by every concurrent publish of one envelope. */
+interface OkWaiter {
+  remaining: Set<string>;
+  ok: Set<string>;
+  rejected: Set<string>;
+  resolve: (ack: RelayPublishAck) => void;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 /**
  * Nostr relay client. Connects to multiple relays, publishes wrapped events,
  * subscribes to Airplane-kind events. No Google services; plain WebSocket.
@@ -194,6 +213,9 @@ export class NostrTransport {
   private timers = new Set<ReturnType<typeof setTimeout>>();
   /** Consecutive failed connect attempts per relay; reset on open. */
   private reconnectAttempts = new Map<string, number>();
+  /** In-flight relay OK waiters, indexed by Nostr envelope id. */
+  private okWaiters = new Map<string, Set<OkWaiter>>();
+  private allOkWaiters = new Set<OkWaiter>();
 
   constructor(opts: NostrTransportOpts = {}) {
     this.relays = opts.relays ?? DEFAULT_RELAYS;
@@ -237,6 +259,15 @@ export class NostrTransport {
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
     this.reconnectAttempts.clear();
+    // A stop must never leave a publish hanging on an OK that can no
+    // longer arrive: resolve every waiter with no OK.
+    for (const w of this.allOkWaiters) {
+      if (w.timer) clearTimeout(w.timer);
+      w.timer = null;
+      w.resolve({ ok: [...w.ok], rejected: [...w.rejected], timedOut: false });
+    }
+    this.allOkWaiters.clear();
+    this.okWaiters.clear();
     for (const [url, ws] of this.sockets) {
       this.states.set(url, 'closed');
       try {
@@ -273,6 +304,7 @@ export class NostrTransport {
     ws.onclose = () => {
       this.sockets.delete(url);
       this.states.set(url, 'closed');
+      this.noteRelayGone(url);
       this.scheduleReconnect(url);
     };
   }
@@ -326,6 +358,97 @@ export class NostrTransport {
   }
 
   /**
+   * Publish one event to all open relays and wait for the first accepted
+   * relay OK, up to deadlineMs. First accepted OK resolves immediately;
+   * all relays rejecting, all relays dropping, or the deadline expiring
+   * resolves with an empty ok list. When no relay socket is open, this
+   * resolves immediately without waiting: the caller falls through at
+   * once instead of spinning on a relay that is not there. The plain
+   * publish() above stays for callers that do not need an OK (WorldSync
+   * uplink); the ordered router uses this method.
+   */
+  async publishWithAck(event: SignedEvent, deadlineMs: number): Promise<RelayPublishAck> {
+    const envelope = wrapEvent(event, this.keys);
+    const msg: ClientMsg = ['EVENT', envelope];
+    const sent: string[] = [];
+    for (const url of this.relays) {
+      if (this.sendMsg(url, msg)) sent.push(url);
+    }
+    if (sent.length === 0) return { ok: [], rejected: [], timedOut: false };
+    return new Promise<RelayPublishAck>((resolve) => {
+      const waiter: OkWaiter = {
+        remaining: new Set(sent),
+        ok: new Set(),
+        rejected: new Set(),
+        resolve,
+        timer: null,
+      };
+      const finish = (ack: RelayPublishAck): void => {
+        if (waiter.timer) {
+          clearTimeout(waiter.timer);
+          this.timers.delete(waiter.timer);
+          waiter.timer = null;
+        }
+        this.allOkWaiters.delete(waiter);
+        const set = this.okWaiters.get(envelope.id);
+        if (set) {
+          set.delete(waiter);
+          if (set.size === 0) this.okWaiters.delete(envelope.id);
+        }
+        resolve(ack);
+      };
+      waiter.resolve = (ack) => finish(ack);
+      const timer = setTimeout(() => {
+        finish({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: true });
+      }, deadlineMs);
+      waiter.timer = timer;
+      this.timers.add(timer);
+      let set = this.okWaiters.get(envelope.id);
+      if (!set) {
+        set = new Set();
+        this.okWaiters.set(envelope.id, set);
+      }
+      set.add(waiter);
+      this.allOkWaiters.add(waiter);
+    });
+  }
+
+  /**
+   * A relay socket closed while OK waiters were outstanding: that relay
+   * can no longer OK. Waiters with no remaining relay resolve at once
+   * instead of waiting out the deadline.
+   */
+  private noteRelayGone(url: string): void {
+    for (const waiter of [...this.allOkWaiters]) {
+      if (!waiter.remaining.has(url)) continue;
+      waiter.remaining.delete(url);
+      if (waiter.remaining.size === 0 && waiter.ok.size === 0) {
+        waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false });
+      }
+    }
+  }
+
+  /** Route one relay OK message to every waiter for that envelope id. */
+  private handleOk(relayUrl: string, envelopeId: unknown, accepted: unknown): void {
+    if (typeof envelopeId !== 'string' || typeof accepted !== 'boolean') return;
+    const waiters = this.okWaiters.get(envelopeId);
+    if (!waiters) return;
+    for (const waiter of [...waiters]) {
+      if (!waiter.remaining.has(relayUrl)) continue;
+      waiter.remaining.delete(relayUrl);
+      if (accepted) {
+        waiter.ok.add(relayUrl);
+        waiter.resolve({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: false });
+      } else {
+        waiter.rejected.add(relayUrl);
+        if (waiter.remaining.size === 0) {
+          waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false });
+        }
+      }
+    }
+  }
+
+  /**
    * Query relays for specific event IDs (Nostr REQ with `ids` filter).
    * Responses arrive via onReceive; matches our wrapped events by the `e` tag.
    */
@@ -364,7 +487,13 @@ export class NostrTransport {
     } catch {
       return;
     }
-    if (!Array.isArray(msg) || msg[0] !== 'EVENT') return;
+    if (!Array.isArray(msg)) return;
+    // Relay acknowledgement for a published envelope: ["OK", id, accepted, message].
+    if (msg[0] === 'OK') {
+      this.handleOk(relayUrl, msg[1], msg[2]);
+      return;
+    }
+    if (msg[0] !== 'EVENT') return;
     const nostr = msg[2] as NostrEvent | undefined;
     if (!nostr || typeof nostr !== 'object') return;
     const event = unwrapEvent(nostr);

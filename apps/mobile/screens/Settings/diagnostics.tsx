@@ -37,7 +37,7 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
   const insets = useSafeAreaInsets();
   const { t } = useI18n();
   const [snapshot, setSnapshot] = useState<DiagnosticsSnapshot>(() => getDiagnosticsSnapshot());
-  const [logLines, setLogLines] = useState<number>(() => getDiagnosticsLogStatus().lineCount);
+  const [logStatus, setLogStatus] = useState(() => getDiagnosticsLogStatus());
   const [shareFailed, setShareFailed] = useState<boolean>(false);
 
   const refreshPermissions = () => {
@@ -63,7 +63,7 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
     const unsub = subscribeDiagnostics(() => setSnapshot(getDiagnosticsSnapshot()));
     const timer = setInterval(() => {
       setSnapshot(getDiagnosticsSnapshot());
-      setLogLines(getDiagnosticsLogStatus().lineCount);
+      setLogStatus(getDiagnosticsLogStatus());
     }, 1000);
     return () => {
       unsub();
@@ -87,6 +87,21 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
       : value
         ? t('settings.diagnosticsYes')
         : t('settings.diagnosticsNo');
+
+  // File status for the restart-survival check: the loaded count tells
+  // the next device run whether the file survived (loaded near the
+  // pre-restart count) or reset (loaded near zero), and the write
+  // status tells it whether file writes are landing at all.
+  const formatLogWriteStatus = (): string => {
+    const status =
+      logStatus.lastWriteOk === null
+        ? t('settings.diagnosticsLogWritePending')
+        : logStatus.lastWriteOk
+          ? t('settings.diagnosticsLogWriteOk')
+          : t('settings.diagnosticsLogWriteFailed');
+    const when = logStatus.lastWriteAtMs === null ? '' : ` ${formatTime(logStatus.lastWriteAtMs)}`;
+    return `${t('settings.diagnosticsLogWrite', { status })}${when}`;
+  };
 
   const anyDenied =
     snapshot.permissions !== null &&
@@ -182,7 +197,7 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
             onPress={() => {
               setShareFailed(false);
               void shareDiagnosticsLogFile()
-                .then(() => setLogLines(getDiagnosticsLogStatus().lineCount))
+                .then(() => setLogStatus(getDiagnosticsLogStatus()))
                 .catch(() => setShareFailed(true));
             }}
             accessibilityRole="button"
@@ -224,7 +239,18 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
         {anyDenied && (
           <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsOpenSettingsNote')}</Text>
         )}
-        <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogFile', { count: logLines })}</Text>
+        <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogFile', { count: logStatus.lineCount })}</Text>
+        <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogLoaded', { count: logStatus.loadedFromFile })}</Text>
+        <Text style={[type.body, styles.kvValue]}>{formatLogWriteStatus()}</Text>
+        {logStatus.loadOk === false && (
+          <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsLogLoadFailed')}</Text>
+        )}
+        {logStatus.lastWriteError !== null && (
+          <Text style={[type.body, styles.kvValue]}>
+            {t('settings.diagnosticsLogWriteError')}: {logStatus.lastWriteError}
+          </Text>
+        )}
+        <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogPath', { path: logStatus.fileUri })}</Text>
         {shareFailed && (
           <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsShareUnavailable')}</Text>
         )}

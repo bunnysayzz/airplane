@@ -612,3 +612,46 @@ describe('getUnconfirmed expiry exclusion', () => {
     expect(ids).not.toContain(bytesToHex(expired.id));
   });
 });
+
+describe('MemoryEventStore reshare events (kind 5)', () => {
+  function makeReshare(seed: number, postId: string, createdAt: number): SignedEvent {
+    return {
+      id: seedBytes(seed),
+      pubkey: seedBytes(seed + 1000),
+      created_at: createdAt,
+      kind: 5,
+      geohash: 'tdr1v',
+      tags: [
+        ['e', postId],
+        ['p', 'a'.repeat(64)],
+      ],
+      content: '',
+      sig: seedBytes(seed + 2000, 64),
+    };
+  }
+
+  test('save/list round-trip, oldest first, idempotent by id', async () => {
+    const store = new MemoryEventStore();
+    const post = 'b'.repeat(64);
+    const newer = makeReshare(11, post, NOW);
+    const older = makeReshare(12, post, NOW - 100);
+    await store.saveReshareEvent(newer);
+    await store.saveReshareEvent(older);
+    await store.saveReshareEvent(newer);
+    const listed = await store.listReshareEvents();
+    expect(listed).toHaveLength(2);
+    expect(listed[0].created_at).toBe(NOW - 100);
+    expect(listed[1].created_at).toBe(NOW);
+    // Reshare rows never leak into the post feed table.
+    expect(await store.getEvent(bytesToHex(newer.id))).toBeNull();
+  });
+
+  test('saveReshareEvent rejects non-kind-5 events and reshares without an e tag', async () => {
+    const store = new MemoryEventStore();
+    const post = makeEvent({ seed: 21 });
+    await expect(store.saveReshareEvent(post)).rejects.toThrow(/kind 5/);
+    const untagged = makeReshare(22, 'b'.repeat(64), NOW);
+    untagged.tags = [];
+    await expect(store.saveReshareEvent(untagged)).rejects.toThrow(/\["e"/);
+  });
+});

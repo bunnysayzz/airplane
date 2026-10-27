@@ -290,3 +290,38 @@ describe('pending reshares apply when the original post later arrives', () => {
     expect(counter.hasReshared(toHex(resharer.publicKey), toHex(originalId))).toBe(true);
   });
 });
+
+describe('latestFor (toggle monotonicity seam)', () => {
+  test('returns the newest event for (pubkey, post), null when none seen', () => {
+    const counter = new ReshareCounter();
+    const author = keypair();
+    const resharer = keypair();
+    const postId = bytes32(7);
+    expect(counter.latestFor(toHex(postId), toHex(resharer.publicKey))).toBeNull();
+    const first = createReshare({
+      crypto,
+      secretKey: resharer.secretKey,
+      pubkey: resharer.publicKey,
+      geohash5: GEOHASH,
+      originalPostId: postId,
+      originalAuthorPubkey: author.publicKey,
+      createdAt: 1_700_000_000,
+    });
+    counter.markPostKnown(toHex(postId));
+    expect(counter.add(first, verify)).toBe('counted');
+    expect(counter.latestFor(toHex(postId), toHex(resharer.publicKey))?.created_at).toBe(
+      1_700_000_000,
+    );
+    const second = createUnreshare({
+      crypto,
+      secretKey: resharer.secretKey,
+      pubkey: resharer.publicKey,
+      geohash5: GEOHASH,
+      originalPostId: postId,
+      originalAuthorPubkey: author.publicKey,
+      createdAt: 1_700_000_001,
+    });
+    expect(counter.add(second, verify)).toBe('counted');
+    expect(counter.latestFor(toHex(postId), toHex(resharer.publicKey))?.content).toBe('undo');
+  });
+});

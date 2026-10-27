@@ -178,11 +178,70 @@ export interface HybridDiagnosticsOpts {
 }
 
 /**
- * Runs BLE mesh and Nostr relays concurrently. Single ingress for inbound
- * posts from any source; cross-transport dedup by event ID hex ensures a
- * post is emitted exactly once even when it arrives via both.
+ * Delivery status for one routed publish. Monotonic within a publish:
+ * a failed relay attempt never moves the result backward, it only falls
+ * through to the next stage. R4 reaches queued, sent, and relayed only.
+ * delivered (peer ack) and read arrive with peer acks in a later track.
+ */
+export type RouterStatus = 'queued' | 'sent' | 'relayed';
+
+/** Which stage won a routed publish, or none when nothing could send. */
+export type RouterTransport = 'relay' | 'mesh' | 'none';
+
+/**
+ * Result of one routed publish. blePeers and relays keep their old
+ * meaning for callers: blePeers is the count of BLE peers sent to,
+ * relays is the list of relay URLs that sent an accepted OK.
+ */
+export interface RouteResult {
+  transport: RouterTransport;
+  status: RouterStatus;
+  blePeers: number;
+  relays: string[];
+  /** True when the relay stage was actually attempted. */
+  relayTried: boolean;
+  /** Why the relay stage was skipped or failed; null when relay won. */
+  relayDetail: string | null;
+}
+
+/** Ordered-router options (R4). */
+export interface RouterOpts {
+  /**
+   * How long to wait for the first accepted relay OK before falling
+   * through to mesh, in ms. Default 5000 (a few seconds, per plan).
+   */
+  relayDeadlineMs?: number;
+  /**
+   * Validated-network fact, supplied by the app (NetInfo). When present,
+   * the relay stage runs only when it returns true: a positive offline
+   * signal skips the relay wait and falls through at once. When absent,
+   * the live relay-socket fact alone gates the relay stage, which keeps
+   * package-level callers and builds without a connectivity module
+   * working exactly as before.
+   */
+  networkValidated?: () => boolean;
+}
+
+/** Default relay OK deadline (ms). */
+export const DEFAULT_RELAY_DEADLINE_MS = 5000;
+
+/**
+ * Runs BLE mesh and Nostr relays in strict order (R4): relay first when
+ * the network is validated and a relay socket is live, mesh fallback on
+ * relay timeout, rejection, or no socket, queued when no transport can
+ * send. Single ingress for inbound posts from any source; cross-transport
+ * dedup by event ID hex ensures a post is emitted exactly once even when
+ * it arrives via both.
  *
- * Outbound: `publish` fans out to BLE peers and all open relays.
+ * DMs do not flow through this router. DmService stays relay-only, and
+ * R4 adds no BLE DM path, so D1 (strict relay first, no warm-peer BLE
+ * shortcut for DMs) holds by construction.
+ *
+ * Outbound: `publish` routes through the stages in order. It reports the
+ * winning stage and status but does NOT persist a queued result: the
+ * durable outbox with retry and drain is a later track (R5). A queued
+ * result means "reported, not stored"; callers must not treat it as
+ * a delivery promise.
  */
 export class HybridTransport {
   private readonly seen = new SeenCache();
@@ -190,14 +249,19 @@ export class HybridTransport {
   private readonly bleUnsubs: (() => void)[] = [];
   readonly nostr: NostrTransport;
   private readonly diagnosticsOpts: HybridDiagnosticsOpts | undefined;
+  private readonly relayDeadlineMs: number;
+  private readonly networkValidated: (() => boolean) | undefined;
 
   constructor(
     private readonly ble: BleTransport,
     nostrOpts?: NostrTransportOpts,
     diagnosticsOpts?: HybridDiagnosticsOpts,
+    routerOpts?: RouterOpts,
   ) {
     this.nostr = new NostrTransport(nostrOpts);
     this.diagnosticsOpts = diagnosticsOpts;
+    this.relayDeadlineMs = routerOpts?.relayDeadlineMs ?? DEFAULT_RELAY_DEADLINE_MS;
+    this.networkValidated = routerOpts?.networkValidated;
   }
 
   async start(): Promise<void> {
@@ -237,20 +301,32 @@ export class HybridTransport {
   }
 
   /**
-   * Publish a locally-created event: mark seen (so the echo isn't
-   * re-emitted), fan out to BLE peers and Nostr relays.
+   * Publish a locally-created event through the ordered router.
+   * Stage order is fixed: relay first, mesh fallback, queued when
+   * neither can send. A future LAN stage slots in between relay and
+   * mesh: it must run after the relay stage, never before it, so the
+   * relay-first order and D1 hold for every transport added later.
+   * Marks the id seen (so the echo is not re-emitted), then emits
+   * locally so the feed store sees our own post through the same path
+   * as remote ones.
    */
-  async publish(event: SignedEvent, blePeerIds: string[] = []): Promise<{ blePeers: number; relays: string[] }> {
+  async publish(event: SignedEvent, blePeerIds: string[] = []): Promise<RouteResult> {
     const idHex = toHex(event.id);
     this.seen.add(idHex);
-    let blePeers = 0;
-    if (blePeerIds.length > 0) {
-      await this.ble.broadcast(event, blePeerIds);
-      blePeers = blePeerIds.length;
+    const relay = await this.attemptRelay(event);
+    let result: RouteResult;
+    if (relay.ok.length > 0) {
+      result = {
+        transport: 'relay',
+        status: 'relayed',
+        blePeers: 0,
+        relays: relay.ok,
+        relayTried: true,
+        relayDetail: null,
+      };
+    } else {
+      result = await this.attemptMesh(event, blePeerIds, relay);
     }
-    const relays = await this.nostr.publish(event);
-    // Also emit locally so the feed store sees our own post through the
-    // same path as remote ones.
     for (const h of this.handlers) {
       try {
         h(event, 'local');
@@ -258,7 +334,62 @@ export class HybridTransport {
         // ignore
       }
     }
-    return { blePeers, relays };
+    return result;
+  }
+
+  /**
+   * Relay stage. Returns the accepted-OK URLs, or an empty list with
+   * the reason the stage did not win. Skips the wait entirely when the
+   * network is known offline or no relay socket is open: per plan, a
+   * relay client in backoff is not waited on, it is fallen through.
+   */
+  private async attemptRelay(event: SignedEvent): Promise<{
+    ok: string[];
+    tried: boolean;
+    detail: string | null;
+  }> {
+    if (this.networkValidated && !this.networkValidated()) {
+      return { ok: [], tried: false, detail: 'network not validated' };
+    }
+    if (!this.nostr.online) {
+      return { ok: [], tried: false, detail: 'no open relay socket' };
+    }
+    const ack = await this.nostr.publishWithAck(event, this.relayDeadlineMs);
+    if (ack.ok.length > 0) return { ok: ack.ok, tried: true, detail: null };
+    if (ack.rejected.length > 0) return { ok: [], tried: true, detail: 'relays rejected the event' };
+    if (ack.timedOut) return { ok: [], tried: true, detail: `no relay OK within ${this.relayDeadlineMs}ms` };
+    return { ok: [], tried: true, detail: 'relay unavailable' };
+  }
+
+  /**
+   * Mesh stage. Broadcasts to the given peers, or reports queued when
+   * there is no peer to send to. Queued is a report, not storage: the
+   * durable outbox (R5) owns persistence, retry, and drain.
+   */
+  private async attemptMesh(
+    event: SignedEvent,
+    blePeerIds: string[],
+    relay: { ok: string[]; tried: boolean; detail: string | null },
+  ): Promise<RouteResult> {
+    if (blePeerIds.length === 0) {
+      return {
+        transport: 'none',
+        status: 'queued',
+        blePeers: 0,
+        relays: [],
+        relayTried: relay.tried,
+        relayDetail: relay.detail,
+      };
+    }
+    await this.ble.broadcast(event, blePeerIds);
+    return {
+      transport: 'mesh',
+      status: 'sent',
+      blePeers: blePeerIds.length,
+      relays: [],
+      relayTried: relay.tried,
+      relayDetail: relay.detail,
+    };
   }
 
   /** Subscribe to deduplicated inbound posts from any source. */

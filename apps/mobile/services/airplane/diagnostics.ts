@@ -31,7 +31,7 @@ export type DiagnosticsGattState = 'seen' | 'connected' | 'disconnected';
 
 export type DiagnosticsTransportKind = 'relay' | 'ble' | 'mesh';
 
-export type DiagnosticsAttemptOutcome = 'ok' | 'failed' | 'queued';
+export type DiagnosticsAttemptOutcome = 'ok' | 'failed' | 'queued' | 'skipped';
 
 export interface DiagnosticsPeerFrames {
   packetsSent: number;
@@ -66,7 +66,12 @@ export interface DiagnosticsMessageAttempt {
 
 export interface DiagnosticsMessage {
   id: string;
-  /** Per-conversation sender sequence. Null until the ordered router (R4) assigns one. */
+  /**
+   * Per-conversation sender sequence. Null until the durable outbox (R5)
+   * assigns one: sequence counters must survive restart to stay true,
+   * and R4 deliberately assigns no volatile in-memory sequence that a
+   * restart would reset into duplicate numbers.
+   */
   sequence: number | null;
   sizeBytes: number;
   direction: 'outbound' | 'inbound';

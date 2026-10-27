@@ -76,10 +76,33 @@ export function recordDiagnosticsLogAppState(state: string): void {
   }
 }
 
-export function getDiagnosticsLogStatus(): { lineCount: number; byteCount: number } {
+export interface DiagnosticsLogFileStatus {
+  lineCount: number;
+  byteCount: number;
+  /** Lines the file held when it was loaded. 0 on a fresh install or when the file could not be read. */
+  loadedFromFile: number;
+  /** False when the file could not be read at load time, null before loading. */
+  loadOk: boolean | null;
+  /** Null until the first write attempt finishes. */
+  lastWriteOk: boolean | null;
+  lastWriteAtMs: number | null;
+  lastWriteError: string | null;
+  fileName: string;
+  fileUri: string;
+}
+
+export function getDiagnosticsLogStatus(): DiagnosticsLogFileStatus {
+  const lastWrite = writer?.getLastWriteStatus() ?? { ok: null, atMs: null, error: null };
   return {
     lineCount: writer?.getLineCount() ?? 0,
     byteCount: writer?.getByteCount() ?? 0,
+    loadedFromFile: writer?.getLoadedFromFileCount() ?? 0,
+    loadOk: writer?.getLoadOk() ?? null,
+    lastWriteOk: lastWrite.ok,
+    lastWriteAtMs: lastWrite.atMs,
+    lastWriteError: lastWrite.error,
+    fileName: DIAGNOSTICS_LOG_FILE_NAME,
+    fileUri: logFileUri(),
   };
 }
 

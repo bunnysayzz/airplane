@@ -9,7 +9,7 @@
 import { EVENT_KIND_POST, toHex, type FeedPost } from '@airplane/protocol';
 import { DEFAULT_RETENTION_SEC, rankScore, type ListFeedOpts } from '@airplane/storage';
 import type { PostCardModel } from './types';
-import { markStarPostKnown, resolveOwnPubkeyHex, starViewFor } from './stars';
+import { ensureStarsHydrated, markStarPostKnown, resolveOwnPubkeyHex, starViewFor } from './stars';
 import { markResharePostKnown, reshareViewFor } from './reshares';
 import { getStore } from './store';
 
@@ -97,6 +97,9 @@ export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[
   const store = getStore();
   const posts = await store.listFeed(storeOpts);
   const ranked = [...posts].sort((a, b) => b.score - a.score);
+  // T17: the store is proven working by the query above, so a hydration
+  // failure here propagates (it means the store itself is broken).
+  await ensureStarsHydrated();
   // STAR MVP: every listed post is known, so pending stars flush here too.
   // --- RESHARE: every listed post is marked known, so pending reshares for
   // it apply; the cluster is then read onto its (single, original) card.
@@ -148,6 +151,8 @@ export async function getPostCardById(eventId: string): Promise<PostCardModel | 
   const views = await store.countViews(id);
   const ageHours = Math.max(0, (nowSec - event.created_at) / 3600);
   const worldConfirmed = await store.isWorldConfirmed(id);
+  // T17: hydrate durable star state before reading the star view.
+  await ensureStarsHydrated();
   markStarPostKnown(id);
   const ownHex = await resolveOwnPubkeyHex();
   const star = starViewFor(id, ownHex);
