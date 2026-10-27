@@ -110,6 +110,12 @@ export class MemoryEventStore implements StorePort {
    * Client-side only; sticky (no un-confirm).
    */
   private readonly worldConfirmed = new Map<Hex64, UnixSec>();
+  /**
+   * Stars (T17): verified kind-4 events by event id hex, and known post
+   * ids. Same idempotent semantics as the SQLite star tables.
+   */
+  private readonly starEvents = new Map<Hex64, SignedEvent>();
+  private readonly starKnownPosts = new Set<Hex64>();
 
   constructor(opts: MemoryEventStoreOpts = {}) {
     this.retentionSec = opts.retentionSec ?? DEFAULT_RETENTION_SEC;
@@ -323,6 +329,32 @@ export class MemoryEventStore implements StorePort {
       out.push(idHex);
     }
     return out;
+  }
+
+  // Stars (T17): same semantics as the SQLite star tables.
+
+  async saveStarEvent(e: SignedEvent): Promise<void> {
+    const idHex = bytesToHex(e.id);
+    if (!this.starEvents.has(idHex)) {
+      this.starEvents.set(idHex, cloneEvent(e));
+    }
+  }
+
+  async saveStarKnownPost(postId: Hex64): Promise<void> {
+    this.starKnownPosts.add(postId.toLowerCase());
+  }
+
+  async listStarEvents(): Promise<SignedEvent[]> {
+    return [...this.starEvents.values()]
+      .map((e) => cloneEvent(e))
+      .sort((a, b) => {
+        if (a.created_at !== b.created_at) return a.created_at - b.created_at;
+        return bytesToHex(a.id) < bytesToHex(b.id) ? -1 : 1;
+      });
+  }
+
+  async listStarKnownPosts(): Promise<Hex64[]> {
+    return [...this.starKnownPosts];
   }
 }
 

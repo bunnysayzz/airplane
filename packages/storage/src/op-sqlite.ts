@@ -20,8 +20,9 @@ import type {
   PeerInfo,
   UnixSec,
 } from '@airplane/protocol';
+import { EVENT_KIND_STAR } from '@airplane/protocol';
 import type { StorePort, DatabasePort, ListFeedOpts } from './ports';
-import { MIGRATION_001, MIGRATION_002, MIGRATION_003 } from './schema';
+import { MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004 } from './schema';
 import {
   DEFAULT_RETENTION_SEC,
   RECEIPT_DAY_BUCKET_SEC,
@@ -65,6 +66,17 @@ interface EventRowShape {
   id: Uint8Array;
   pubkey: Uint8Array;
   kind: 1 | 2 | 3;
+  created_at: number;
+  geohash: string;
+  tags: Uint8Array;
+  content: string;
+  sig: Uint8Array;
+}
+
+/** One stored kind-4 row (MIGRATION_004); kind is always EVENT_KIND_STAR. */
+interface StarEventRowShape {
+  event_id: Uint8Array;
+  pubkey: Uint8Array;
   created_at: number;
   geohash: string;
   tags: Uint8Array;
@@ -118,13 +130,13 @@ export class OpSqliteStore implements StorePort {
    *
    * - `schema_version` is bootstrapped with CREATE TABLE IF NOT EXISTS (not
    *   a numbered migration) and MAX(version) is read as the current level.
-   * - v >= 3: no-op (re-running migrate on an up-to-date DB is safe).
+   * - v >= 4: no-op (re-running migrate on an up-to-date DB is safe).
    * - v == 0: legacy pre-versioning DBs are detected via sqlite_master:
-   *   no `events` table -> fresh install (apply 001, 002, 003); `events`
-   *   without `world_confirmed` -> 001-only install (apply 002, 003);
-   *   both present -> 002-era install (apply 003 only; re-running 002's
+   *   no `events` table -> fresh install (apply 001, 002, 003, 004); `events`
+   *   without `world_confirmed` -> 001-only install (apply 002, 003, 004);
+   *   both present -> 002-era install (apply 003, 004 only; re-running 002's
    *   plain CREATE TABLE would throw).
-   * - v == 1: apply 002, 003. v == 2: apply 003.
+   * - v == 1: apply 002, 003, 004. v == 2: apply 003, 004. v == 3: apply 004.
    * - Each numbered migration runs inside a transaction (BEGIN IMMEDIATE;
    *   COMMIT; ROLLBACK + rethrow on error); the version row is recorded
    *   only after the migration commits, so a failed upgrade never wipes
@@ -157,7 +169,7 @@ export class OpSqliteStore implements StorePort {
       );
     };
 
-    if (v >= 3) return;
+    if (v >= 4) return;
     if (v === 0) {
       const tables = await db.query<{ name: string }>(
         `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('events', 'world_confirmed')`,
@@ -171,15 +183,14 @@ export class OpSqliteStore implements StorePort {
       }
       // else: 002-era legacy DB - 001+002 already applied, skip to 003.
       await applyMigration(3, MIGRATION_003);
-      return;
-    }
-    if (v === 1) {
+    } else if (v === 1) {
       await applyMigration(2, MIGRATION_002);
       await applyMigration(3, MIGRATION_003);
-      return;
+    } else if (v === 2) {
+      await applyMigration(3, MIGRATION_003);
     }
-    // v === 2
-    await applyMigration(3, MIGRATION_003);
+    // v === 3 falls through: only 004 remains.
+    await applyMigration(4, MIGRATION_004);
   }
 
   async saveEvent(e: SignedEvent): Promise<void> {
@@ -444,5 +455,58 @@ export class OpSqliteStore implements StorePort {
       [now],
     );
     return rows.map((r) => bytesToHex(r.id));
+  }
+
+  // ------------------------------------------------------------------
+  // Stars (T17): durable kind-4 events + known posts (MIGRATION_004).
+  // Callers verify the signature before saveStarEvent; the store trusts
+  // that, exactly as saveEvent trusts its callers for other kinds.
+  // ------------------------------------------------------------------
+
+  async saveStarEvent(e: SignedEvent): Promise<void> {
+    const target = taggedPostId(e);
+    if (target === null) return;
+    await this.db.exec(
+      `INSERT INTO star_events
+         (event_id, pubkey, target_id, created_at, geohash, tags, content, sig)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(event_id) DO NOTHING`,
+      [
+        e.id, e.pubkey, hexToBytes(target), e.created_at, e.geohash,
+        encodeTags(e.tags), e.content, e.sig,
+      ],
+    );
+  }
+
+  async saveStarKnownPost(postId: Hex64): Promise<void> {
+    await this.db.exec(
+      `INSERT INTO star_known_posts (post_id) VALUES (?)
+       ON CONFLICT(post_id) DO NOTHING`,
+      [hexToBytes(postId)],
+    );
+  }
+
+  async listStarEvents(): Promise<SignedEvent[]> {
+    const rows = await this.db.query<StarEventRowShape>(
+      `SELECT event_id, pubkey, created_at, geohash, tags, content, sig
+       FROM star_events ORDER BY created_at ASC, event_id ASC`,
+    );
+    return rows.map((row) => ({
+      id: row.event_id,
+      pubkey: row.pubkey,
+      created_at: row.created_at,
+      kind: EVENT_KIND_STAR,
+      geohash: row.geohash,
+      tags: decodeTags(row.tags),
+      content: row.content,
+      sig: row.sig,
+    }));
+  }
+
+  async listStarKnownPosts(): Promise<Hex64[]> {
+    const rows = await this.db.query<{ post_id: Uint8Array }>(
+      `SELECT post_id FROM star_known_posts`,
+    );
+    return rows.map((r) => bytesToHex(r.post_id));
   }
 }

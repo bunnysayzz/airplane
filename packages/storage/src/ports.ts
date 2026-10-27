@@ -103,6 +103,27 @@ export interface StorePort {
    * Used by the sync engine to decide what to push / query.
    */
   getUnconfirmed(): Promise<Hex64[]>;
+
+  // ------------------------------------------------------------------
+  // Stars (T17). Client-side only: durable star state so counts and the
+  // device's own star survive restarts. Never relayed, never ranked.
+  // ------------------------------------------------------------------
+
+  /**
+   * Persist one verified kind-4 star/unstar event. Idempotent by event
+   * id (re-saving is a no-op). Only verified events are stored; callers
+   * verify the signature before calling.
+   */
+  saveStarEvent(e: SignedEvent): Promise<void>;
+
+  /** Mark a post id as known for star purposes. Idempotent. */
+  saveStarKnownPost(postId: Hex64): Promise<void>;
+
+  /** All stored verified kind-4 events, oldest first. */
+  listStarEvents(): Promise<SignedEvent[]>;
+
+  /** All stored known post ids. */
+  listStarKnownPosts(): Promise<Hex64[]>;
 }
 
 /** Tiny string key/value store (STORE-5). Backed by MMKV on device. */
