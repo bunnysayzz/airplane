@@ -453,9 +453,10 @@ describe('send/receive over the central role', () => {
   test('send chunks frames to (mtu - 3) ATT PDUs', async () => {
     const { port, central } = await connectedPort();
     const frame = new Uint8Array(1200).map((_, i) => i & 0xff);
-    const before = central.writes.length;
+    // Frame chunks go out without-response (F-P2-9); hello writes stay
+    // in central.writes, so chunking is asserted on the without-response log.
     await port.send(PEER_HEX, frame);
-    const newWrites = central.writes.slice(before);
+    const newWrites = central.writesWithoutResponse;
     // datagram = 2 (len) + 1 (kind) + 1200; chunk size 509 -> 3 chunks
     expect(newWrites).toHaveLength(3);
     expect(newWrites.every((w) => w.chunk.length <= 512 - ATT_OVERHEAD)).toBe(true);
@@ -978,18 +979,19 @@ describe('persistent peripheral error listener (audit F-P2-6)', () => {
 });
 
 describe('stopAdvertise failure ordering (audit F-P2-7)', () => {
-  test('a failed stop keeps the handle and never reports stopped; a later stop retries', async () => {
+  test('a failed stop keeps the handle and never throws; a later stop retries', async () => {
     const { deps, peripheral } = makeDeps();
     const port = new GattBlePort(deps);
     await port.advertise(OWN_HEX);
     peripheral.failStop = true;
-    await port.stopAdvertise(); // never throws
-    expect(peripheral.advertising).toBe(true);
-    // Re-advertising the same peer is still idempotent while the handle is kept.
-    await port.advertise(OWN_HEX);
+    await port.stopAdvertise(); // never throws, despite the native failure
+    // The handle is kept: advertising a different peer must refuse rather
+    // than overwrite the kept handle and orphan the old advertiser.
+    const otherPub = new Uint8Array(32).fill(0x0d);
+    await expect(port.advertise(toHex(otherPub))).rejects.toThrow(/could not be stopped/);
+    // Once the native stop recovers, a later stop succeeds and destroys.
     peripheral.failStop = false;
     await port.stopAdvertise();
-    expect(peripheral.advertising).toBe(false);
     expect(peripheral.destroyed).toBe(true);
     await port.close();
   });
