@@ -439,6 +439,27 @@ describe('DmService routing + outbox', () => {
     restarted.stop();
   });
 
+  test('F16: per-conversation message lists cap with oldest eviction', async () => {
+    const store = new MemoryDmStore();
+    const peer = 'd'.repeat(64);
+    for (let i = 0; i < 1005; i++) {
+      await store.addMessage({
+        id: `msg-${i}`,
+        peerHex: peer,
+        direction: 'in',
+        sealed: 'sealed',
+        createdAtMs: i,
+        status: 'Sent',
+        attempts: 0,
+        nextAttemptAtMs: i,
+      });
+    }
+    const rows = await store.listMessages(peer);
+    expect(rows).toHaveLength(1000);
+    expect(rows[0].id).toBe('msg-5');
+    expect(rows[rows.length - 1].id).toBe('msg-1004');
+  });
+
   test('P1-09: the flush scheduler re-arms on the backoff and drains without user action', async () => {
     jest.useFakeTimers();
     try {

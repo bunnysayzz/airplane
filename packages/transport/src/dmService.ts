@@ -116,6 +116,7 @@ export class MemoryDmStore implements DmStorePort {
   async addMessage(m: DmMessageRow): Promise<void> {
     const list = this.messages.get(m.peerHex) ?? [];
     list.push({ ...m });
+    while (list.length > DM_MAX_MESSAGES_PER_CONVERSATION) list.shift();
     this.messages.set(m.peerHex, list);
   }
 
@@ -123,7 +124,10 @@ export class MemoryDmStore implements DmStorePort {
     const list = this.messages.get(m.peerHex) ?? [];
     const idx = list.findIndex(x => x.id === m.id);
     if (idx >= 0) list[idx] = { ...m };
-    else list.push({ ...m });
+    else {
+      list.push({ ...m });
+      while (list.length > DM_MAX_MESSAGES_PER_CONVERSATION) list.shift();
+    }
   }
 
   async listMessages(peerHex: string): Promise<DmMessageRow[]> {
@@ -162,6 +166,17 @@ export class MemoryDmRelay implements DmRelayPort {
   }
 }
 
+/**
+ * Inbound memory caps. History is ephemeral in-memory today, so capping
+ * drops nothing durable: the oldest messages in a conversation fall away
+ * past the per-conversation cap, and the service maps evict their oldest
+ * entries past the map cap. The SQLite DM store, when it lands, owns
+ * durable history and must apply its own retention there.
+ */
+export const DM_MAX_MESSAGES_PER_CONVERSATION = 1000;
+export const DM_MAX_SEEN_EVENT_IDS_PER_CONVERSATION = 5000;
+export const DM_MAX_DM_MAP_ENTRIES = 5000;
+
 /** Relay that always refuses (offline / relay down): outbox must queue, never drop. */
 export class FailingDmRelay implements DmRelayPort {
   async publish(): Promise<boolean> {
@@ -185,6 +200,15 @@ export interface DmServiceOpts {
 
 function newId(): string {
   return dmToHex(x25519.utils.randomSecretKey().slice(0, 16));
+}
+
+/** Evict oldest entries (Map insertion order) past the DM map cap. */
+function capMapEntries<K, V>(map: Map<K, V>): void {
+  while (map.size > DM_MAX_DM_MAP_ENTRIES) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+  }
 }
 
 export class DmService {
@@ -340,6 +364,8 @@ export class DmService {
     // memory-only outbox map so retries can re-send the identical bytes.
     this.outboxEnvelopes.set(row.id, envelope);
     this.outgoingPlaintext.set(row.id, text);
+    capMapEntries(this.outboxEnvelopes);
+    capMapEntries(this.outgoingPlaintext);
     await this.store.addMessage(row);
     await this.touchConversation(peerHex, row);
     this.emit();
@@ -470,6 +496,11 @@ export class DmService {
       }
       if (seen.has(envelope.relayEventId)) return 'ignored';
       seen.add(envelope.relayEventId);
+      while (seen.size > DM_MAX_SEEN_EVENT_IDS_PER_CONVERSATION) {
+        const oldest = seen.values().next();
+        if (oldest.done) break;
+        seen.delete(oldest.value);
+      }
     }
     const nowMs = this.now();
     const row: DmMessageRow = {
@@ -485,6 +516,7 @@ export class DmService {
     };
     await this.store.addMessage(row);
     this.incomingEnvelopes.set(row.id, envelope);
+    capMapEntries(this.incomingEnvelopes);
     if (!existing) {
       // Unknown sender -> requests folder, NEVER straight to inbox (orders).
       await this.store.upsertConversation({
