@@ -8,6 +8,7 @@ import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
 import { startTransport, stopTransport } from '../services/airplane';
 import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
+import { friendlyErrorMessage } from '../src/lib/errorCopy';
 import {
   recordDiagnosticsLogAppState,
   startDiagnosticsLogFile,
@@ -18,12 +19,16 @@ SplashScreen.preventAutoHideAsync().catch(() => {
     /* splash may already be hidden in tests */
 });
 
-/** Route-level error boundary: expo-router renders this on uncaught route errors. */
+/** Route-level error boundary: expo-router renders this on uncaught route errors.
+ *  The raw error is never rendered (it could carry a file path, a hex
+ *  value, or internals): it goes to the console only, and the screen
+ *  shows mapped friendly copy with a generic fallback. */
 export function ErrorBoundary({ error, retry }: { error: Error; retry: () => void }) {
+    console.error(error);
     return (
         <View style={fallbackStyles.center}>
             <Text style={fallbackStyles.title}>Something broke</Text>
-            <Text style={fallbackStyles.muted}>{error.message}</Text>
+            <Text style={fallbackStyles.muted}>{friendlyErrorMessage(error)}</Text>
             <Pressable style={fallbackStyles.button} onPress={retry}>
                 <Text style={fallbackStyles.buttonText}>Try again</Text>
             </Pressable>
