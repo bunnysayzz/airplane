@@ -142,12 +142,19 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
         scrollListToTop(listRef.current);
     }, [load]);
 
+    // Pagination guard: the state flag only lands after re-render, so two
+    // rapid onEndReached firings can both pass it and append the same page
+    // twice (duplicate keys and rows). The ref is set synchronously, so the
+    // second firing sees it immediately.
+    const loadingMoreRef = useRef(false);
     const handleLoadMore = () => {
-        if (!loadingMore && hasMore && !loading) {
-            const current = postsRef.current;
-            const before = current.length > 0 ? Math.floor(current[current.length - 1].createdAtMs / 1000) : undefined;
-            load('more', before);
-        }
+        if (loadingMoreRef.current || loadingMore || !hasMore || loading) return;
+        loadingMoreRef.current = true;
+        const current = postsRef.current;
+        const before = current.length > 0 ? Math.floor(current[current.length - 1].createdAtMs / 1000) : undefined;
+        void load('more', before).finally(() => {
+            loadingMoreRef.current = false;
+        });
     };
 
     // View receipts: FlashList's viewability -> signed kind-2 receipts (see viewTracker.ts)
