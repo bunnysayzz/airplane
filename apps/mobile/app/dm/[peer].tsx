@@ -53,13 +53,17 @@ export default function DmThreadScreen() {
         }
     }, []);
 
+    // Returns the inner promise so act() waits for the refresh and its
+    // catch Alerts on a refresh failure too. Callers that do not need the
+    // failure (initial load, live updates, send) swallow it: the retry
+    // affordance above already records it via setRefreshError.
     const refresh = useCallback(() => {
         if (!peerValid) {
             setThread([]);
             setConv(null);
-            return;
+            return Promise.resolve();
         }
-        void getDmService()
+        return getDmService()
             .then(async svc => {
                 setThread(await svc.getThread(peerHex));
                 const inbox = await svc.listInbox();
@@ -68,10 +72,12 @@ export default function DmThreadScreen() {
                 setConv([...inbox, ...requests, ...blocked].find(c => c.peerHex === peerHex) ?? null);
                 setRefreshError(false);
             })
-            .catch(() => {
+            .catch((e: unknown) => {
                 // A getDmService rejection (or a refresh failure) shows the
-                // retry affordance instead of leaving a stale thread.
+                // retry affordance instead of leaving a stale thread, and
+                // rethrows so act() can Alert and report failure.
                 setRefreshError(true);
+                throw e;
             });
     }, [peerHex, peerValid]);
 
@@ -81,11 +87,13 @@ export default function DmThreadScreen() {
             setConv(null);
             return;
         }
-        refresh();
+        void refresh().catch(() => {});
         let unsub: (() => void) | undefined;
         void getDmService()
             .then(svc => {
-                unsub = svc.subscribe(refresh);
+                unsub = svc.subscribe(() => {
+                    void refresh().catch(() => {});
+                });
                 void svc.markRead(peerHex);
             })
             .catch(() => {
@@ -99,7 +107,9 @@ export default function DmThreadScreen() {
         if (!text) return;
         setDraft('');
         sendDm(peerHex, text)
-            .then(refresh)
+            .then(() => {
+                void refresh().catch(() => {});
+            })
             .catch((e: unknown) => Alert.alert('Could not send', dmUserErrorMessage(e)));
     };
 
@@ -236,7 +246,11 @@ export default function DmThreadScreen() {
             {refreshError ? (
                 <View style={[styles.requestBar, { borderBottomColor: colors.borderColor }]}>
                     <Text style={[type.meta, { color: colors.textMuted }]}>Could not load conversation.</Text>
-                    <Pressable onPress={refresh}>
+                    <Pressable
+                        onPress={() => {
+                            void refresh().catch(() => {});
+                        }}
+                    >
                         <Text style={[type.meta, { color: colors.accentText }]}>Retry</Text>
                     </Pressable>
                 </View>
