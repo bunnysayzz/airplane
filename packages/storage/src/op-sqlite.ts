@@ -40,11 +40,37 @@ export function splitStatements(script: string): string[] {
 }
 
 /**
+ * Per-connection transaction queue: emulated BEGIN IMMEDIATE transactions
+ * must never overlap on one connection, or the second BEGIN fails and the
+ * post or receipt it carried is lost. Each transaction chains onto the
+ * previous transaction's settled promise for the same port, so concurrent
+ * saveEvent/saveReceipt calls serialize instead of nesting BEGINs. A
+ * failure in one transaction never blocks the next (the stored chain
+ * promise always settles).
+ */
+const txQueues = new WeakMap<DatabasePort, Promise<void>>();
+
+async function runTransaction<T>(db: DatabasePort, fn: () => Promise<T>): Promise<T> {
+  const prev = txQueues.get(db) ?? Promise.resolve();
+  const run = prev.then(() => runTransactionInner(db, fn));
+  txQueues.set(
+    db,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return run;
+}
+
+/**
  * Run fn atomically. Uses the port's native transaction when present;
  * otherwise emulates with BEGIN IMMEDIATE / COMMIT / ROLLBACK via exec.
- * On throw, rolls back and rethrows.
+ * On throw, rolls back and rethrows. A BEGIN failure propagates to the
+ * caller (it is never swallowed here); callers that fire-and-forget must
+ * log it instead of dropping it.
  */
-async function runTransaction<T>(db: DatabasePort, fn: () => Promise<T>): Promise<T> {
+async function runTransactionInner<T>(db: DatabasePort, fn: () => Promise<T>): Promise<T> {
   if (db.transaction) return db.transaction(fn);
   await db.exec('BEGIN IMMEDIATE');
   try {

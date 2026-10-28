@@ -290,6 +290,20 @@ describe('saveEvent / getEvent', () => {
       expect(await store.getEvent(bytesToHex(e.id))).not.toBeNull();
     }
   });
+
+  test('concurrent saveEvent calls serialize: a relay burst loses nothing', async () => {
+    // Emulated transactions only: this is the path that used to fail the
+    // second BEGIN while the first transaction was still open.
+    const { port } = await migratedDb(false);
+    const store = new OpSqliteStore(port);
+    const events = Array.from({ length: 20 }, (_, i) => makeEvent({ seed: 300 + i }));
+    await Promise.all(events.map((e) => store.saveEvent(e)));
+    for (const e of events) {
+      expect(await store.getEvent(bytesToHex(e.id))).not.toBeNull();
+    }
+    const feed = await store.listFeed({ cells: ['tdr1v'], limit: 50, nowSec: NOW });
+    expect(feed).toHaveLength(20);
+  });
 });
 
 describe('tombstones', () => {

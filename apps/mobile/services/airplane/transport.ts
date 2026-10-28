@@ -300,7 +300,12 @@ export async function startTransport(): Promise<void> {
   // flow through the same store path as before.
   hybrid.onPost(
     sync.confirmListener((event, source) => {
-      void handleIncoming(event, source);
+      // Never drop a storage failure silently: a rejected handleIncoming
+      // used to vanish (relay ingress is fire-and-forget), so a lost post
+      // left no trace. Log it; the next relay pass can re-deliver it.
+      void handleIncoming(event, source).catch((e) => {
+        console.error('handleIncoming failed:', e);
+      });
     }),
   );
 
