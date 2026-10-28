@@ -396,6 +396,13 @@ export class GattBlePort implements TransportPort {
    * `tag:<hex>` id until the full peerId resolves, then again with it).
    * Resolves to an unsubscribe function. Inert no-op when central is
    * unavailable.
+   *
+   * Order requirement: advertise() must run before scan(). The self
+   * filter in onDiscover needs ownTag, which is only set by advertise;
+   * scanning first surfaces our own advertisement as a nearby peer
+   * (latent in the app flow, which always advertises first). No
+   * behaviour change is made here: this comment plus the
+   * scan-before-advertise test pin the requirement.
    */
   async scan(onPeer: (peer: PeerInfo) => void): Promise<() => void> {
     // The subscriber joins only after ensureCentral succeeds: previously it

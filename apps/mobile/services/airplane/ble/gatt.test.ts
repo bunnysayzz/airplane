@@ -1033,3 +1033,19 @@ describe('close cleanup (audit F-P3-1)', () => {
     resetDiagnosticsForTests();
   });
 });
+
+describe('scan-before-advertise self filtering (audit F-P3-2)', () => {
+  test('scanning before advertising surfaces our own advertisement as a peer (documented latent order requirement)', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    // No advertise() call: ownTag is null, so the self filter cannot run.
+    const seen: string[] = [];
+    await port.scan((peer) => seen.push(peer.peerId));
+    central.discoverCb!({ id: 'ble-self', rssi: -50, tag: peerTagOf(OWN_PUB) });
+    await tick(20);
+    // The app flow always advertises first, so this never happens live;
+    // the test pins that the filter depends on advertise having run.
+    expect(seen).toEqual([`tag:${toHex(peerTagOf(OWN_PUB))}`]);
+    await port.close();
+  });
+});
