@@ -143,14 +143,16 @@ describe('fragmentation', () => {
 });
 
 describe('fragment bounds (audit area6 F12)', () => {
-  test('parseHeader rejects total over 16 and nonzero flags', () => {
-    expect(() => parseHeader(encodeHeader({ msgTag: 1, total: 17, index: 0, ttl: 7, flags: 0 }))).toThrow(
+  test('parseHeader rejects total over the cap and nonzero flags', () => {
+    expect(() => parseHeader(encodeHeader({ msgTag: 1, total: 257, index: 0, ttl: 7, flags: 0 }))).toThrow(
       FragmentError,
     );
     expect(() => parseHeader(encodeHeader({ msgTag: 1, total: 1, index: 0, ttl: 7, flags: 1 }))).toThrow(
       FragmentError,
     );
-    expect(parseHeader(encodeHeader({ msgTag: 1, total: 16, index: 0, ttl: 7, flags: 0 })).total).toBe(16);
+    // 38 fragments (the MTU-aware broadcast case) stays accepted.
+    expect(parseHeader(encodeHeader({ msgTag: 1, total: 38, index: 0, ttl: 7, flags: 0 })).total).toBe(38);
+    expect(parseHeader(encodeHeader({ msgTag: 1, total: 256, index: 0, ttl: 7, flags: 0 })).total).toBe(256);
   });
 
   test('Reassembler caps pending tags at 64, dropping the oldest', () => {

@@ -27,12 +27,17 @@ export class FragmentError extends Error {
 }
 
 /**
- * Sane fragment-total cap. A valid event is at most MAX_EVENT_BYTES
- * (4096) over a 458-byte payload, so 9 fragments; 16 leaves margin for a
- * smaller sender MTU while still rejecting the old anything-up-to-65535
- * claim a hostile peer could use to pin huge reassembly state.
+ * Sane fragment-total cap. At the standard 469-byte wire frame a valid
+ * event needs at most 9 fragments, but BleTransport fragments to the
+ * port's frame size, and the repo's own MTU-aware broadcast test splits
+ * a 2000-byte event into 38 frames at a 64-byte frame size: a 16 cap
+ * would reject that legitimate path. 256 caps the per-tag fragment-index
+ * state (down from 65535) while covering a 4096-byte event at any frame
+ * size down to a 27-byte payload; the binding memory bound is the
+ * per-tag MAX_EVENT_BYTES cap enforced in Reassembler.push, plus the
+ * 64-tag pending cap, not this count.
  */
-export const MAX_FRAGMENT_TOTAL = 16;
+export const MAX_FRAGMENT_TOTAL = 256;
 /** Cap on distinct pending reassembly tags; the oldest is dropped on overflow. */
 export const MAX_PENDING_REASSEMBLIES = 64;
 
