@@ -141,13 +141,36 @@ export function parseHello(payload: Uint8Array): { publicKey: Uint8Array; centra
  * Returns complete datagrams (kind || payload, without the length prefix).
  * Oversized buffers are dropped to bound memory.
  */
+/**
+ * Window within which a datagram must complete. A partial buffer older
+ * than this is dropped by expireIfStale (called from feedChunk) so one
+ * corrupt first chunk cannot poison the stream until the 66 KB cap drops
+ * everything. The 66 KB cap stays as a second bound.
+ */
+export const DATAGRAM_STALE_MS = 10_000;
+
 export class DatagramReassembler {
   private buf = new Uint8Array(0);
+  private lastActivityMs = 0;
+
+  /**
+   * Drop the buffer when no datagram completed within the stale window.
+   * Returns true when a partial buffer was dropped.
+   */
+  expireIfStale(nowMs: number = Date.now(), windowMs: number = DATAGRAM_STALE_MS): boolean {
+    if (this.buf.length === 0) return false;
+    if (nowMs - this.lastActivityMs > windowMs) {
+      this.buf = new Uint8Array(0);
+      return true;
+    }
+    return false;
+  }
 
   /** Feed one ATT chunk; returns any complete datagrams in order. */
   push(chunk: Uint8Array): Uint8Array[] {
     const out: Uint8Array[] = [];
     if (chunk.length === 0) return out;
+    this.lastActivityMs = Date.now();
     const merged = new Uint8Array(this.buf.length + chunk.length);
     merged.set(this.buf, 0);
     merged.set(chunk, this.buf.length);

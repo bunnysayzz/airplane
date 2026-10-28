@@ -704,6 +704,10 @@ export class GattBlePort implements TransportPort {
   private feedChunk(conn: PeerConn, key: string, value: Uint8Array): void {
     const peerKey = conn.peerId ?? key;
     recordFragmentsReceived(peerKey, 1);
+    // Per-datagram expiry: a stalled partial buffer is dropped here
+    // before the new chunk is appended, so a corrupt length prefix
+    // cannot wedge the stream for this connection.
+    if (conn.inbound.expireIfStale(Date.now())) conn.partialOpen = false;
     const datagrams = conn.inbound.push(value);
     if (datagrams.length === 0) {
       if (!conn.partialOpen) {

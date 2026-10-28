@@ -147,3 +147,26 @@ describe('base64', () => {
     expect(ADVERTISE_COMPANY_ID).toBe(0xffff);
   });
 });
+
+describe('DatagramReassembler expiry (audit F-P2-2)', () => {
+  test('a partial buffer older than the window is dropped before the next chunk', () => {
+    const r = new DatagramReassembler();
+    const dg = encodeDatagram(DATAGRAM_FRAME, new Uint8Array([1, 2, 3, 4]));
+    const chunks = chunkBytes(dg, 2);
+    expect(r.push(chunks[0])).toEqual([]);
+    expect(r.buffered).toBeGreaterThan(0);
+    // Within the window: still held.
+    expect(r.expireIfStale(Date.now(), 10_000)).toBe(false);
+    // Past the window: dropped, and the stream recovers with a fresh datagram.
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 11_000);
+    expect(r.expireIfStale()).toBe(true);
+    expect(r.buffered).toBe(0);
+    nowSpy.mockRestore();
+    expect(r.push(dg)).toHaveLength(1);
+  });
+
+  test('an empty buffer never counts as expired', () => {
+    const r = new DatagramReassembler();
+    expect(r.expireIfStale(Date.now() + 60_000)).toBe(false);
+  });
+});
