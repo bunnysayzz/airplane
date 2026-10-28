@@ -420,6 +420,19 @@ describe('NostrTransport inbound edge cases', () => {
     await t.stop();
   });
 
+  test('queryByIds caps the filter at 100 ids', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    const ids = Array.from({ length: 150 }, (_, i) => String(i).padStart(64, '0'));
+    await t.queryByIds(ids as never);
+    const req = sockets[0].sent
+      .map((s) => JSON.parse(s))
+      .find((m) => m[0] === 'REQ' && m[2] && '#e' in m[2]);
+    expect(req[2]['#e']).toHaveLength(100);
+    await t.stop();
+  });
+
   test('publish skips relays whose send throws; others still deliver', async () => {
     const { t, sockets } = makeTransport(['wss://bad.relay', 'wss://good.relay']);
     await t.start();

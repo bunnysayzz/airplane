@@ -27,6 +27,11 @@ export interface FeedQueryOpts {
 
 const DEFAULT_LIMIT = 50;
 
+/** API-boundary caps (audit F38): the UI passes 50 and 9 cells, but the
+ *  function itself must not build an unbounded SQL IN list or page. */
+export const FEED_LIMIT_MAX = 100;
+export const FEED_CELLS_MAX = 32;
+
 /**
  * Anonymous author display names: "<adjective> <noun>·<4 hex>", e.g.
  * "quiet fox·a3f9". Display-only: the author identity stays the pubkey
@@ -90,8 +95,8 @@ export function toPostCardModel(
  */
 export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[]> {
   const storeOpts: ListFeedOpts = {
-    cells: opts.cells,
-    limit: opts.limit ?? DEFAULT_LIMIT,
+    cells: opts.cells.slice(0, FEED_CELLS_MAX),
+    limit: Math.min(opts.limit ?? DEFAULT_LIMIT, FEED_LIMIT_MAX),
     before: opts.before,
   };
   const store = getStore();

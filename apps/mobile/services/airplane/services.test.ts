@@ -248,6 +248,18 @@ describe('listFeedPosts', () => {
     });
     expect(paged.map((c) => c.eventId)).not.toContain(all[0].eventId);
   });
+
+  it('caps limit at 100 and cells at 32 at the API boundary', async () => {
+    const store = getStore();
+    const spy = jest.spyOn(store, 'listFeed');
+    const manyCells = Array.from({ length: 40 }, (_, i) => `c${String(i).padStart(4, '0')}`);
+    await listFeedPosts({ cells: manyCells, limit: 1000 });
+    const passed = spy.mock.calls[0][0] as { cells: string[]; limit: number };
+    expect(passed.limit).toBe(100);
+    expect(passed.cells).toHaveLength(32);
+    expect(passed.cells[0]).toBe('c0000');
+    spy.mockRestore();
+  });
 });
 
 describe('subscribeFeed / notifyFeedListeners', () => {

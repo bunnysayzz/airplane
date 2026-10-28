@@ -60,6 +60,9 @@ export const DEFAULT_RELAYS = [
 /** Max inbound relay message, bytes: far above any real frame (4 KiB event plus envelope). */
 export const MAX_RELAY_MESSAGE_BYTES = 65536;
 
+/** Max event ids in one queryByIds filter (audit F38). */
+export const QUERY_BY_IDS_MAX = 100;
+
 /** A Nostr event per NIP-01 (JSON-serializable). */
 export interface NostrEvent {
   id: string;
@@ -470,11 +473,17 @@ export class NostrTransport {
   /**
    * Query relays for specific event IDs (Nostr REQ with `ids` filter).
    * Responses arrive via onReceive; matches our wrapped events by the `e` tag.
+   * Capped at 100 ids per call (audit F38): a larger list is truncated to
+   * the first 100, and the caller must split the rest across calls (the
+   * WorldSync batching work owns that split; this cap only bounds one
+   * filter). The query is best-effort confirmation, so a truncated tail
+   * simply stays unconfirmed until a later pass.
    */
   async queryByIds(eventIdsHex: Hex64[]): Promise<void> {
     if (eventIdsHex.length === 0) return;
+    const capped = eventIdsHex.slice(0, QUERY_BY_IDS_MAX);
     const subId = `q${++this.subIdCounter}`;
-    const filter = { ids: [] as string[], kinds: [AIRPLANE_NOSTR_KIND], '#e': eventIdsHex };
+    const filter = { ids: [] as string[], kinds: [AIRPLANE_NOSTR_KIND], '#e': capped };
     // Note: we filter by our event IDs via the `e` tag (Nostr `ids` would
     // match the *envelope* id, which differs per publisher).
     const msg: ClientMsg = ['REQ', subId, filter];
