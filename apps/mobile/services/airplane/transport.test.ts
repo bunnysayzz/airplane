@@ -349,6 +349,31 @@ describe('transport manager', () => {
     expect(await store.getEvent('09'.repeat(32))).not.toBeNull();
   });
 
+  test('inbound receipts count views once via the counting path', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const postId = '07'.repeat(32);
+    const makeReceipt = (seed: number) => ({
+      id: new Uint8Array(32).fill(seed),
+      pubkey: new Uint8Array(32).fill(1),
+      created_at: 1_700_000_000,
+      kind: 2,
+      geohash: 'ezs42',
+      tags: [['e', postId]],
+      content: '',
+      sig: new Uint8Array(64).fill(3),
+    });
+    hybrid!.ingress(makeReceipt(21) as never, 'nostr');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(await store.countViews(postId)).toBe(1);
+    // Same viewer, same post, same day, different event id: still one view.
+    hybrid!.ingress(makeReceipt(22) as never, 'nostr');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(await store.countViews(postId)).toBe(1);
+  });
+
   test('kind-5 ingress counts, persists, and a pending reshare pulls its original post', async () => {
     await startTransport();
     const hybrid = __getHybridForTests();

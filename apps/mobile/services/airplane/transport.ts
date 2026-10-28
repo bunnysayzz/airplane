@@ -19,7 +19,7 @@ import {
 import type { SignedEvent, TransportPort, Hex64 } from '@airplane/protocol';
 import { encodeEvent, toHex, verifyEvent } from '@airplane/protocol';
 import { getStore } from './store';
-import { EVENT_KIND_POST, EVENT_KIND_RESHARE, EVENT_KIND_STAR, reshareTargetId } from '@airplane/protocol';
+import { EVENT_KIND_POST, EVENT_KIND_RECEIPT, EVENT_KIND_RESHARE, EVENT_KIND_STAR, reshareTargetId } from '@airplane/protocol';
 import { applyIncomingStar, markStarPostKnown } from './stars';
 import {
   markResharePostKnown,
@@ -199,6 +199,24 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
     });
   }
   const store = getStore();
+  // Receipts (kind 2) go through the counting path, not the generic
+  // saveEvent path: saveReceipt updates view_counts with
+  // (pubkey, post, day) dedup, so a relay view counts exactly once and
+  // actually moves the feed. Previously inbound receipts were stored
+  // but never counted, so relay views changed nothing.
+  if (event.kind === EVENT_KIND_RECEIPT) {
+    let counted = false;
+    try {
+      counted = await getStore().saveReceipt(event);
+    } catch {
+      addBreadcrumb('transport: inbound receipt store failed', {
+        id: toHex(event.id).slice(0, 16),
+      });
+      return;
+    }
+    if (counted) notifyFeedListeners();
+    return;
+  }
   // Store the event (deduped by HybridTransport already).
   // saveEvent is idempotent. A storage failure must not escape as an
   // unhandled rejection (the caller uses void handleIncoming) and must
