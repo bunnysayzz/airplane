@@ -34,6 +34,7 @@
 
 import { EVENT_KIND_RESHARE, type Hex64, type SignedEvent } from '../events/types';
 import { toHex } from '../hex';
+import { SeenCache } from '../flood/engine';
 import { isUnreshare, reshareTargetId } from '../payloads/reshares';
 
 /** Result of offering an event to the counter. */
@@ -74,8 +75,12 @@ function newerThan(
 }
 
 export class ReshareCounter {
-  /** Verified event ids already processed (cross-transport dedup). */
-  private readonly seenEventIds = new Set<Hex64>();
+  /**
+   * Verified event ids already processed (cross-transport dedup).
+   * LRU-capped like the transport SeenCache: the persistent reshare
+   * table already dedups on save, so eviction cannot resurrect a count.
+   */
+  private readonly seenEventIds = new SeenCache();
   /** All verified events, retained so late arrivals resolve correctly. */
   private readonly events = new Map<Hex64, SignedEvent>();
   /** Latest state per (pubkey, post). Key: `${pubkeyHex}:${postIdHex}`. */
