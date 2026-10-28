@@ -124,6 +124,12 @@ export class MemoryEventStore implements StorePort {
   }
 
   async saveEvent(e: SignedEvent): Promise<void> {
+    if (e.kind !== 1 && e.kind !== 2 && e.kind !== 3) {
+      throw new Error(
+        `saveEvent: kind ${e.kind} does not belong in the events table; ` +
+          `use saveStarEvent for kind 4 or saveReshareEvent for kind 5`,
+      );
+    }
     const idHex = bytesToHex(e.id);
     const existing = this.events.get(idHex);
     if (existing) {

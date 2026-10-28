@@ -294,6 +294,15 @@ export class OpSqliteStore implements StorePort {
   }
 
   async saveEvent(e: SignedEvent): Promise<void> {
+    // Early routing check: without it a misrouted kind-4/5 event surfaces
+    // as a raw SQLite CHECK error, which reads like a database problem
+    // instead of a caller routing bug.
+    if (e.kind !== 1 && e.kind !== 2 && e.kind !== 3) {
+      throw new Error(
+        `saveEvent: kind ${e.kind} does not belong in the events table; ` +
+          `use saveStarEvent for kind 4 or saveReshareEvent for kind 5`,
+      );
+    }
     const authorHex = bytesToHex(e.pubkey);
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = e.created_at + this.retentionSec;

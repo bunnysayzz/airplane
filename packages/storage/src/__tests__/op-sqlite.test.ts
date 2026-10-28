@@ -60,7 +60,7 @@ function seedBytes(seed: number, len = 32): Uint8Array {
 
 interface FixtureOpts {
   seed: number;
-  kind?: 1 | 2 | 3;
+  kind?: 1 | 2 | 3 | 4 | 5;
   geohash?: string;
   createdAt?: number;
   tags?: string[][];
@@ -307,6 +307,17 @@ describe('migrate', () => {
 });
 
 describe('saveEvent / getEvent', () => {
+  test('misrouted kind 4/5 events fail with a routing error, not a CHECK error', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    await expect(store.saveEvent(makeEvent({ seed: 95, kind: 4 }))).rejects.toThrow(
+      /saveStarEvent for kind 4/,
+    );
+    await expect(store.saveEvent(makeEvent({ seed: 96, kind: 5 }))).rejects.toThrow(
+      /saveReshareEvent for kind 5/,
+    );
+  });
+
   test('round-trip and upsert idempotence (first write wins)', async () => {
     const { port } = await migratedDb();
     const store = new OpSqliteStore(port);
