@@ -20,9 +20,12 @@ import {
 } from './diagnosticsLog';
 
 export const DIAGNOSTICS_LOG_FILE_NAME = 'airplane-diagnostics.log';
+/** Status marker when no document directory exists: never a bare filename. */
+export const DIAGNOSTICS_LOG_FILE_UNAVAILABLE = 'unavailable';
 
 function logFileUri(): string {
-  const dir = FileSystem.documentDirectory ?? '';
+  const dir = FileSystem.documentDirectory;
+  if (!dir) return DIAGNOSTICS_LOG_FILE_UNAVAILABLE;
   return `${dir}${DIAGNOSTICS_LOG_FILE_NAME}`;
 }
 
@@ -30,11 +33,18 @@ function createExpoDiagnosticsLogPort(): DiagnosticsLogFilePort {
   const uri = logFileUri();
   return {
     read: async () => {
+      // No directory: skip the read instead of probing a bare filename.
+      if (uri === DIAGNOSTICS_LOG_FILE_UNAVAILABLE) return null;
       const info = await FileSystem.getInfoAsync(uri);
       if (!info.exists) return null;
       return FileSystem.readAsStringAsync(uri);
     },
     write: async (content: string) => {
+      // No directory: fail loudly so the write status reports it,
+      // instead of silently pretending the flush landed.
+      if (uri === DIAGNOSTICS_LOG_FILE_UNAVAILABLE) {
+        throw new Error('document directory unavailable');
+      }
       // Atomic replace on the same volume: a kill mid-write leaves
       // either the old file or the new file, never a truncation.
       // The tmp name is constant, so no user input reaches the path.
@@ -139,6 +149,9 @@ export async function shareDiagnosticsLogFile(): Promise<void> {
     await startDiagnosticsLogFile();
   }
   await writer?.flushComplete();
+  if (logFileUri() === DIAGNOSTICS_LOG_FILE_UNAVAILABLE) {
+    throw new Error('log file unavailable');
+  }
   const available = await Sharing.isAvailableAsync();
   if (!available) throw new Error('sharing unavailable');
   await Sharing.shareAsync(logFileUri(), {
