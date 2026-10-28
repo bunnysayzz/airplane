@@ -602,6 +602,22 @@ describe('world confirmation', () => {
     unconfirmed = await store.getUnconfirmed();
     expect(unconfirmed).toEqual([bytesToHex(p2.id)]);
   });
+
+  test('listWorldConfirmed returns the confirmed subset in one call', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    const p1 = makeEvent({ seed: 61 });
+    const p2 = makeEvent({ seed: 62 });
+    await store.saveEvent(p1);
+    await store.saveEvent(p2);
+    await store.markWorldConfirmed(bytesToHex(p1.id));
+    const confirmed = await store.listWorldConfirmed([
+      bytesToHex(p1.id),
+      bytesToHex(p2.id),
+    ]);
+    expect([...confirmed]).toEqual([bytesToHex(p1.id)]);
+    expect(await store.listWorldConfirmed([])).toEqual(new Set());
+  });
 });
 
 describe('upsertPeer', () => {

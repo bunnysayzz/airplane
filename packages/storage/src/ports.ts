@@ -111,6 +111,12 @@ export interface StorePort {
   isWorldConfirmed(eventId: Hex64): Promise<boolean>;
 
   /**
+   * Batch form of isWorldConfirmed: the confirmed subset of `ids` in one
+   * query. Feed pages must use this (one query per page, not per card).
+   */
+  listWorldConfirmed(ids: Hex64[]): Promise<Set<Hex64>>;
+
+  /**
    * Event IDs of kind-1 posts known locally but not yet World-confirmed.
    * Used by the sync engine to decide what to push / query.
    */

@@ -176,13 +176,15 @@ async function mapPostsToCards(
   // --- RESHARE: every listed post is marked known, so pending reshares for
   // it apply; the cluster is then read onto its (single, original) card.
   const ownHex = await resolveOwnPubkeyHex();
-  // Look up World confirmation status for each post (client-side tracking).
+  // One batched World-confirmation lookup for the whole page, not one
+  // query per card.
+  const confirmed = await store.listWorldConfirmed(ranked.map((p) => toHex(p.event.id) as Hex64));
   return Promise.all(
     ranked.map(async (p) => {
       const eventId = toHex(p.event.id);
       markStarPostKnown(eventId);
       markResharePostKnown(eventId);
-      const worldConfirmed = await store.isWorldConfirmed(eventId);
+      const worldConfirmed = confirmed.has(eventId as Hex64);
       const star = starViewFor(eventId, ownHex);
       return toPostCardModel(p, worldConfirmed, {
         stars: star.count,

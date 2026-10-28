@@ -578,6 +578,16 @@ export class OpSqliteStore implements StorePort {
     return rows.length > 0 && rows[0].n > 0;
   }
 
+  async listWorldConfirmed(ids: Hex64[]): Promise<Set<Hex64>> {
+    if (ids.length === 0) return new Set();
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = await this.db.query<{ event_id: Uint8Array }>(
+      `SELECT event_id FROM world_confirmed WHERE event_id IN (${placeholders})`,
+      ids.map((id) => hexToBytes(id.toLowerCase())),
+    );
+    return new Set(rows.map((r) => bytesToHex(r.event_id)));
+  }
+
   async getUnconfirmed(): Promise<Hex64[]> {
     const now = Math.floor(Date.now() / 1000);
     const rows = await this.db.query<{ id: Uint8Array }>(

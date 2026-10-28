@@ -290,6 +290,15 @@ describe('listFeedPosts', () => {
     expect(page2.nextCursor).toBeNull();
   });
 
+  it('marks confirmed cards via the batched lookup', async () => {
+    const post = await publishPost('confirmed post', { geohash5: 'tdr1v' });
+    const store = getStore();
+    await store.markWorldConfirmed(post);
+    const cards = await listFeedPosts({ cells: ['tdr1v'] });
+    expect(cards).toHaveLength(1);
+    expect(cards[0].worldConfirmed).toBe(true);
+  });
+
   it('scopes by cell and applies the before cursor', async () => {
     await publishPost('here', { geohash5: 'tdr1v' });
     await publishPost('there', { geohash5: 'abcde' });

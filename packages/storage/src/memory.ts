@@ -357,6 +357,15 @@ export class MemoryEventStore implements StorePort {
     return this.worldConfirmed.has(eventId.toLowerCase());
   }
 
+  async listWorldConfirmed(ids: Hex64[]): Promise<Set<Hex64>> {
+    const out = new Set<Hex64>();
+    for (const id of ids) {
+      const key = id.toLowerCase();
+      if (this.worldConfirmed.has(key)) out.add(key);
+    }
+    return out;
+  }
+
   async getUnconfirmed(): Promise<Hex64[]> {
     const now = Math.floor(Date.now() / 1000);
     const out: Hex64[] = [];
