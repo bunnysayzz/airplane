@@ -9,7 +9,7 @@ import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow, DmThreadRow } from '@airplane/transport';
-import { getDmService, dmPeerLabel, sendDm } from '../../services/airplane/dm';
+import { getDmService, dmPeerLabel, dmUserErrorMessage, sendDm } from '../../services/airplane/dm';
 import { isNearBottom } from '../../src/lib/dmThread';
 import { DmBubble } from '../../components/DmBubble';
 import { useTheme } from '../../src/theme/themeContext';
@@ -17,11 +17,19 @@ import { useTheme } from '../../src/theme/themeContext';
 export default function DmThreadScreen() {
     const { peer } = useLocalSearchParams<{ peer: string }>();
     const peerHex = (peer ?? '').toLowerCase();
+    // Screen boundary for peer validation: a garbage route id must never
+    // create a phantom conversation or render actions for one.
+    const peerValid = /^[0-9a-f]{64}$/.test(peerHex);
     const insets = useSafeAreaInsets();
     const { colors, type } = useTheme();
     const [thread, setThread] = useState<DmThreadRow[]>([]);
     const [conv, setConv] = useState<DmConversationRow | null>(null);
     const [draft, setDraft] = useState('');
+    // A rapid double-tap used to send the same text twice as two distinct
+    // envelopes; the Send button is disabled while a send is in flight.
+    const [sending, setSending] = useState(false);
+    // A failed refresh used to leave a stale thread with no error shown.
+    const [refreshError, setRefreshError] = useState(false);
 
     // F4: the thread lands on the latest message and follows new arrivals,
     // but only while the user is already near the bottom, so reading history
@@ -48,33 +56,73 @@ export default function DmThreadScreen() {
         }
     }, []);
 
+    // Returns the inner promise so act() waits for the refresh and its
+    // catch Alerts on a refresh failure too. Callers that do not need the
+    // failure (initial load, live updates, send) swallow it: the retry
+    // affordance above already records it via setRefreshError.
     const refresh = useCallback(() => {
-        void getDmService().then(async svc => {
-            setThread(await svc.getThread(peerHex));
-            const inbox = await svc.listInbox();
-            const requests = await svc.listRequests();
-            const blocked = await svc.listBlocked();
-            setConv([...inbox, ...requests, ...blocked].find(c => c.peerHex === peerHex) ?? null);
-        });
-    }, [peerHex]);
+        if (!peerValid) {
+            setThread([]);
+            setConv(null);
+            return Promise.resolve();
+        }
+        return getDmService()
+            .then(async svc => {
+                setThread(await svc.getThread(peerHex));
+                // Direct lookup, not the inbox/requests/blocked lists: an
+                // ignored conversation is in none of those lists, yet its
+                // thread must still resolve (with its actions) when opened.
+                setConv(await svc.getConversation(peerHex));
+                setRefreshError(false);
+            })
+            .catch((e: unknown) => {
+                // A getDmService rejection (or a refresh failure) shows the
+                // retry affordance instead of leaving a stale thread, and
+                // rethrows so act() can Alert and report failure.
+                setRefreshError(true);
+                throw e;
+            });
+    }, [peerHex, peerValid]);
 
     useEffect(() => {
-        refresh();
+        if (!peerValid) {
+            setThread([]);
+            setConv(null);
+            return;
+        }
+        void refresh().catch(() => {});
         let unsub: (() => void) | undefined;
-        void getDmService().then(svc => {
-            unsub = svc.subscribe(refresh);
-            void svc.markRead(peerHex);
-        });
+        void getDmService()
+            .then(svc => {
+                unsub = svc.subscribe(() => {
+                    void refresh().catch(() => {});
+                });
+                // F23(a) left as-is per the finding's smaller-safe-change
+                // note: opening a request clears its unread count.
+                void svc.markRead(peerHex);
+            })
+            .catch(() => {
+                setRefreshError(true);
+            });
         return () => unsub?.();
-    }, [refresh, peerHex]);
+    }, [refresh, peerHex, peerValid]);
 
     const send = () => {
         const text = draft.trim();
-        if (!text) return;
-        setDraft('');
+        if (!text || sending) return;
+        setSending(true);
+        // The draft clears only on success: a failed send used to lose the
+        // typed text, leaving the user to retype after the error Alert.
         sendDm(peerHex, text)
-            .then(refresh)
-            .catch((e: unknown) => Alert.alert('Could not send', e instanceof Error ? e.message : 'Unknown error'));
+            .then(() => {
+                setDraft('');
+                setSending(false);
+                void refresh().catch(() => {});
+            })
+            .catch((e: unknown) => {
+                setSending(false);
+                Alert.alert('Could not send', dmUserErrorMessage(e));
+            });
     };
 
     // F5: stable retry + renderItem so keystrokes in the draft input do not
@@ -86,7 +134,8 @@ export default function DmThreadScreen() {
             void getDmService()
                 .then(svc => svc.retryMessage(peerHex, messageId))
                 .then(() => getDmService().then(svc => svc.flushOutbox()))
-                .then(refresh);
+                .then(refresh)
+                .catch((e: unknown) => Alert.alert('Action failed', dmUserErrorMessage(e)));
         },
         [peerHex, refresh],
     );
@@ -104,14 +153,14 @@ export default function DmThreadScreen() {
             .then(refresh)
             .then(() => true)
             .catch((e: unknown) => {
-                Alert.alert('Action failed', e instanceof Error ? e.message : 'Unknown error');
+                Alert.alert('Action failed', dmUserErrorMessage(e));
                 return false;
             });
 
     const confirmDelete = () => {
         Alert.alert(
             'Delete conversation?',
-            'This only deletes from your device. The relay copy and the other person\'s copy stay exactly where they are. Unsend is not possible.',
+            'This only deletes from your device. The relay copy and the other person\'s copy stay exactly where they are. Unsend is not possible. Unsent messages in this conversation are discarded.',
             [
                 { text: 'Cancel', style: 'cancel' },
                 {
@@ -127,6 +176,24 @@ export default function DmThreadScreen() {
     };
 
     const isRequest = conv?.state === 'request';
+    const isBlocked = conv?.state === 'blocked';
+
+    if (!peerValid) {
+        return (
+            <View style={[styles.root, { backgroundColor: colors.background }]}>
+                <View style={[styles.header, { borderBottomColor: colors.borderColor, paddingTop: insets.top + 16 }]}>
+                    <Pressable onPress={() => router.back()}>
+                        <Text style={[type.meta, { color: colors.accentText }]}>Back</Text>
+                    </Pressable>
+                    <Text style={[type.name, { color: colors.textPrimary }]}>Invalid conversation</Text>
+                    <View style={styles.headerSpacer} />
+                </View>
+                <View style={styles.list}>
+                    <Text style={[type.meta, { color: colors.textMuted }]}>This conversation key is not valid.</Text>
+                </View>
+            </View>
+        );
+    }
 
     // F10: the keyboard must never cover the input and Send button. iOS has
     // no window resize, so a padding avoiding view lifts the send row; on
@@ -190,6 +257,28 @@ export default function DmThreadScreen() {
                 </Pressable>
             </View>
 
+            {isBlocked ? (
+                <View style={[styles.requestBar, { borderBottomColor: colors.borderColor }]}>
+                    <Text style={[type.meta, { color: colors.textMuted }]}>This conversation is blocked.</Text>
+                    <Pressable onPress={() => act(svc => svc.unblockPeer(peerHex))}>
+                        <Text style={[type.meta, { color: colors.accentText }]}>Unblock</Text>
+                    </Pressable>
+                </View>
+            ) : null}
+
+            {refreshError ? (
+                <View style={[styles.requestBar, { borderBottomColor: colors.borderColor }]}>
+                    <Text style={[type.meta, { color: colors.textMuted }]}>Could not load conversation.</Text>
+                    <Pressable
+                        onPress={() => {
+                            void refresh().catch(() => {});
+                        }}
+                    >
+                        <Text style={[type.meta, { color: colors.accentText }]}>Retry</Text>
+                    </Pressable>
+                </View>
+            ) : null}
+
             <FlatList
                 ref={listRef}
                 data={thread}
@@ -202,19 +291,21 @@ export default function DmThreadScreen() {
                 keyboardShouldPersistTaps="handled"
             />
 
-            <View style={[styles.sendRow, { borderTopColor: colors.borderColor, paddingBottom: insets.bottom + 12 }]}>
-                <TextInput
-                    value={draft}
-                    onChangeText={setDraft}
-                    placeholder="Message (text only)"
-                    placeholderTextColor={colors.textMuted}
-                    multiline
-                    style={[styles.input, { color: colors.textPrimary, borderColor: colors.borderColor }]}
-                />
-                <Pressable onPress={send} style={[styles.send, { backgroundColor: colors.accentColor }]}>
-                    <Text style={{ color: colors.buttonTextColor }}>Send</Text>
-                </Pressable>
-            </View>
+            {isBlocked ? null : (
+                <View style={[styles.sendRow, { borderTopColor: colors.borderColor, paddingBottom: insets.bottom + 12 }]}>
+                    <TextInput
+                        value={draft}
+                        onChangeText={setDraft}
+                        placeholder="Message (text only)"
+                        placeholderTextColor={colors.textMuted}
+                        multiline
+                        style={[styles.input, { color: colors.textPrimary, borderColor: colors.borderColor }]}
+                    />
+                    <Pressable onPress={send} disabled={sending} style={[styles.send, { backgroundColor: colors.accentColor }]}>
+                        <Text style={{ color: colors.buttonTextColor }}>Send</Text>
+                    </Pressable>
+                </View>
+            )}
         </KeyboardAvoidingView>
     );
 }

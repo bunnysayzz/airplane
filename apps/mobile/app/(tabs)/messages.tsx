@@ -8,7 +8,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow } from '@airplane/transport';
 import { DM_UNDECRYPTABLE_PLACEHOLDER } from '@airplane/transport';
-import { getDmService, dmPeerLabel } from '../../services/airplane/dm';
+import { getDmService, dmPeerLabel, dmUserErrorMessage } from '../../services/airplane/dm';
 import { useTheme } from '../../src/theme/themeContext';
 
 export default function MessagesTab() {
@@ -26,28 +26,34 @@ export default function MessagesTab() {
     const [refreshError, setRefreshError] = useState(false);
 
     const refresh = useCallback(() => {
-        void getDmService().then(async svc => {
-            try {
-                const nextInbox = await svc.listInbox();
-                const nextRequests = await svc.listRequests();
-                const nextBlocked = await svc.listBlocked();
-                const convs = [...nextInbox, ...nextRequests];
-                // Previews used to load one conversation at a time (each a
-                // potential decrypt); one parallel batch instead.
-                const previewValues = await Promise.all(convs.map(c => svc.previewFor(c.peerHex)));
-                const nextPreviews: Record<string, string | null> = {};
-                convs.forEach((c, i) => {
-                    nextPreviews[c.peerHex] = previewValues[i];
-                });
-                setInbox(nextInbox);
-                setRequests(nextRequests);
-                setBlocked(nextBlocked);
-                setPreviews(nextPreviews);
-                setRefreshError(false);
-            } catch {
+        void getDmService()
+            .then(async svc => {
+                try {
+                    const nextInbox = await svc.listInbox();
+                    const nextRequests = await svc.listRequests();
+                    const nextBlocked = await svc.listBlocked();
+                    const convs = [...nextInbox, ...nextRequests];
+                    // Previews used to load one conversation at a time (each a
+                    // potential decrypt); one parallel batch instead.
+                    const previewValues = await Promise.all(convs.map(c => svc.previewFor(c.peerHex)));
+                    const nextPreviews: Record<string, string | null> = {};
+                    convs.forEach((c, i) => {
+                        nextPreviews[c.peerHex] = previewValues[i];
+                    });
+                    setInbox(nextInbox);
+                    setRequests(nextRequests);
+                    setBlocked(nextBlocked);
+                    setPreviews(nextPreviews);
+                    setRefreshError(false);
+                } catch {
+                    setRefreshError(true);
+                }
+            })
+            .catch(() => {
+                // A getDmService rejection used to bypass the inner catch
+                // entirely and leave stale lists with no retry affordance.
                 setRefreshError(true);
-            }
-        });
+            });
     }, []);
 
     useFocusEffect(refresh);
@@ -73,7 +79,7 @@ export default function MessagesTab() {
                 setPaste('');
                 open(key);
             })
-            .catch((e: unknown) => Alert.alert('Could not start conversation', e instanceof Error ? e.message : 'Unknown error'));
+            .catch((e: unknown) => Alert.alert('Could not start conversation', dmUserErrorMessage(e)));
     };
 
     const row = (c: DmConversationRow) => (
@@ -147,7 +153,10 @@ export default function MessagesTab() {
                             <Text style={[type.name, { color: colors.textPrimary }]}>{dmPeerLabel(c.peerHex)}</Text>
                             <Pressable
                                 onPress={() =>
-                                    void getDmService().then(svc => svc.unblockPeer(c.peerHex)).then(refresh)
+                                    void getDmService()
+                                        .then(svc => svc.unblockPeer(c.peerHex))
+                                        .then(refresh)
+                                        .catch((e: unknown) => Alert.alert('Action failed', dmUserErrorMessage(e)))
                                 }
                             >
                                 <Text style={[type.meta, { color: colors.accentText }]}>Unblock</Text>

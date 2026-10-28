@@ -40,6 +40,14 @@ export interface DmMessageRow {
   status: DmDelivery;
   attempts: number;
   nextAttemptAtMs: number;
+  /**
+   * Sender timestamp in epoch seconds (envelope.createdAt), set on
+   * incoming rows only. Orders messages within one conversation; never
+   * trusted globally, since a sender clock can lie. NOTE: this field is
+   * in-memory only today and MUST persist when the SQLite DM store lands,
+   * or ordering regresses to receive time on restart.
+   */
+  senderCreatedAtSec?: number;
 }
 
 export interface DmConversationRow {
@@ -52,6 +60,13 @@ export interface DmConversationRow {
   lastMessageAtMs: number;
   lastSealed: string | null;
   lastDirection: 'out' | 'in' | null;
+  /**
+   * Conversation state before blockPeer, restored by unblockPeer. Null
+   * (or absent on old rows) means inbox. NOTE: in-memory only today and
+   * MUST persist when the SQLite DM store lands, or unblock after a
+   * restart restores every request straight to inbox again.
+   */
+  priorState?: 'inbox' | 'request' | null;
 }
 
 /** Decrypted-on-read thread row. `text === null` renders the placeholder. */
@@ -101,6 +116,7 @@ export class MemoryDmStore implements DmStorePort {
   async addMessage(m: DmMessageRow): Promise<void> {
     const list = this.messages.get(m.peerHex) ?? [];
     list.push({ ...m });
+    while (list.length > DM_MAX_MESSAGES_PER_CONVERSATION) list.shift();
     this.messages.set(m.peerHex, list);
   }
 
@@ -108,7 +124,10 @@ export class MemoryDmStore implements DmStorePort {
     const list = this.messages.get(m.peerHex) ?? [];
     const idx = list.findIndex(x => x.id === m.id);
     if (idx >= 0) list[idx] = { ...m };
-    else list.push({ ...m });
+    else {
+      list.push({ ...m });
+      while (list.length > DM_MAX_MESSAGES_PER_CONVERSATION) list.shift();
+    }
   }
 
   async listMessages(peerHex: string): Promise<DmMessageRow[]> {
@@ -147,6 +166,17 @@ export class MemoryDmRelay implements DmRelayPort {
   }
 }
 
+/**
+ * Inbound memory caps. History is ephemeral in-memory today, so capping
+ * drops nothing durable: the oldest messages in a conversation fall away
+ * past the per-conversation cap, and the service maps evict their oldest
+ * entries past the map cap. The SQLite DM store, when it lands, owns
+ * durable history and must apply its own retention there.
+ */
+export const DM_MAX_MESSAGES_PER_CONVERSATION = 1000;
+export const DM_MAX_SEEN_EVENT_IDS_PER_CONVERSATION = 5000;
+export const DM_MAX_DM_MAP_ENTRIES = 5000;
+
 /** Relay that always refuses (offline / relay down): outbox must queue, never drop. */
 export class FailingDmRelay implements DmRelayPort {
   async publish(): Promise<boolean> {
@@ -172,6 +202,20 @@ function newId(): string {
   return dmToHex(x25519.utils.randomSecretKey().slice(0, 16));
 }
 
+/** Evict oldest entries (Map insertion order) past the DM map cap. */
+function capMapEntries<K, V>(map: Map<K, V>): void {
+  while (map.size > DM_MAX_DM_MAP_ENTRIES) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+  }
+}
+
+/** Reject garbage peer ids before any row is created or read. */
+function assertPeerHex(peerHex: string, method: string): void {
+  if (!isHex64(peerHex)) throw new Error(`${method}: peer pubkey must be 64 lowercase hex chars`);
+}
+
 export class DmService {
   private readonly store: DmStorePort;
   private readonly relay: DmRelayPort;
@@ -180,6 +224,10 @@ export class DmService {
   private readonly now: () => number;
   private readonly listeners = new Set<() => void>();
   private unsub: (() => void) | null = null;
+  /** Single outbox flush timer, armed for the earliest next attempt (P1-09). */
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** In-flight flush: concurrent flushOutbox calls share one run (F14-retry). */
+  private flushInFlight: Promise<void> | null = null;
 
   constructor(opts: DmServiceOpts) {
     this.store = opts.store;
@@ -206,13 +254,59 @@ export class DmService {
     this.unsub = this.relay.subscribe(this.ownMeshHex(), envelope => {
       void this.receiveEnvelope(envelope);
     });
+    // Flush once on start: a failed DM must not wait for the next user action.
+    void this.flushOutbox().catch(() => {});
   }
 
   stop(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
     if (this.unsub) {
       this.unsub();
       this.unsub = null;
     }
+  }
+
+  /**
+   * One flush scheduler: a single timer for the earliest nextAttemptAtMs
+   * across Sending rows, re-armed when the outbox changes (send, retry,
+   * delete) or when a flush attempts a row. Clearing before and after
+   * the store reads keeps exactly one timer live even when schedule
+   * calls overlap. Blocked conversations are skipped, matching
+   * flushOutbox. Timers do not reliably fire while backgrounded, so the
+   * app layer also flushes on foreground (see the AppState hook in
+   * _layout, which flushes only if the service exists).
+   */
+  private async scheduleFlush(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    const now = this.now();
+    const convs = await this.store.listConversations();
+    let earliest: number | null = null;
+    for (const conv of convs) {
+      if (conv.state === 'blocked') continue;
+      const messages = await this.store.listMessages(conv.peerHex);
+      for (const m of messages) {
+        if (m.direction !== 'out' || m.status !== 'Sending') continue;
+        if (earliest === null || m.nextAttemptAtMs < earliest) earliest = m.nextAttemptAtMs;
+      }
+    }
+    if (earliest === null) return;
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.flushTimer = setTimeout(
+      () => {
+        this.flushTimer = null;
+        void this.flushOutbox().catch(() => {});
+      },
+      Math.max(0, earliest - now),
+    );
   }
 
   /** Open (or create) a conversation with a peer. Own-initiated = inbox, never requests. */
@@ -220,7 +314,19 @@ export class DmService {
     if (!isHex64(peerHex)) throw new Error('startConversation: peer pubkey must be 64 lowercase hex chars');
     if (peerHex === this.ownMeshHex()) throw new Error('startConversation: cannot DM yourself');
     const existing = await this.store.getConversation(peerHex);
-    if (existing) return existing;
+    if (existing) {
+      // Own-initiated contact always lands in inbox: a request the user
+      // previously ignored must not stay invisible in both lists when the
+      // user now messages that peer. Blocked rows are untouched here;
+      // sendMessage rejects them below.
+      if (existing.state === 'request') {
+        const promoted: DmConversationRow = { ...existing, state: 'inbox', ignored: false };
+        await this.store.upsertConversation(promoted);
+        this.emit();
+        return promoted;
+      }
+      return existing;
+    }
     const row: DmConversationRow = {
       peerHex,
       state: 'inbox',
@@ -241,7 +347,7 @@ export class DmService {
     if (new TextEncoder().encode(text).length > DM_TEXT_MAX_BYTES) {
       throw new Error(`sendMessage: DM longer than ${DM_TEXT_MAX_BYTES} bytes`);
     }
-    if (text.length === 0) throw new Error('sendMessage: empty DM');
+    if (text.trim().length === 0) throw new Error('sendMessage: empty DM');
     const conv = await this.startConversation(peerHex);
     if (conv.state === 'blocked') throw new Error('sendMessage: peer is blocked');
     const nowMs = this.now();
@@ -263,22 +369,38 @@ export class DmService {
     // memory-only outbox map so retries can re-send the identical bytes.
     this.outboxEnvelopes.set(row.id, envelope);
     this.outgoingPlaintext.set(row.id, text);
+    capMapEntries(this.outboxEnvelopes);
+    capMapEntries(this.outgoingPlaintext);
     await this.store.addMessage(row);
     await this.touchConversation(peerHex, row);
     this.emit();
+    void this.scheduleFlush();
     return row;
   }
 
   /**
    * Flush the outbox. Per-conversation FIFO: within one conversation the
    * oldest due message goes first and a failure stops that conversation's
-   * queue. Conversations are independent, so they flush concurrently
-   * (a slow first conversation no longer delays every other one); the
-   * sequential first-OK-wins relay order inside one publish is kept.
-   * Never silently drops: a message that exhausts DM_MAX_ATTEMPTS
-   * becomes Failed, not deleted.
+    * queue (other conversations are unaffected). Conversations are
+    * independent, so they flush concurrently (a slow first conversation
+    * no longer delays every other one); the sequential first-OK-wins
+    * relay order inside one publish is kept. Concurrent callers share
+    * a single in-flight run, so two flushes can never publish the same
+    * Sending row twice. Never silently drops: a message that exhausts
+    * DM_MAX_ATTEMPTS becomes Failed, not deleted.
    */
   async flushOutbox(nowMs?: number): Promise<void> {
+    if (this.flushInFlight) return this.flushInFlight;
+    const run = this.flushOutboxInner(nowMs);
+    this.flushInFlight = run;
+    try {
+      await run;
+    } finally {
+      if (this.flushInFlight === run) this.flushInFlight = null;
+    }
+  }
+
+  private async flushOutboxInner(nowMs?: number): Promise<void> {
     const now = nowMs ?? this.now();
     const convs = await this.store.listConversations();
     const results = await Promise.all(
@@ -291,14 +413,27 @@ export class DmService {
         for (const m of messages) {
           if (m.direction !== 'out' || m.status !== 'Sending') continue;
           if (m.nextAttemptAtMs > now) continue;
+          // A missing envelope is permanent (in-memory outbox lost, e.g.
+          // after restart): tryPublish marks it Failed, and the queue must
+          // continue past it instead of head-blocking on a dead row. A
+          // transient publish failure still stops this conversation's queue.
+          const envelopeMissing = !this.outboxEnvelopes.has(m.id);
           const ok = await this.tryPublish(m, now);
           changed = true;
-          if (!ok) break; // FIFO head-of-line: stop this conversation's queue
+          if (!ok && !envelopeMissing) break; // FIFO head-of-line
         }
         return changed;
       }),
     );
-    if (results.some(Boolean)) this.emit();
+    const changed = results.some(Boolean);
+    if (changed) this.emit();
+    // Re-arm only when the flush attempted a row: an attempt moves that
+    // row's next attempt later (or to Failed), so the old timer is stale
+    // and the next attempt needs a timer. A flush that skipped everything
+    // (nothing due) must NOT re-arm, or a timer that fires early would
+    // re-arm forever without progress; the flush that made the timer
+    // stale already re-armed for the new earliest attempt.
+    if (changed) void this.scheduleFlush();
   }
 
   private async tryPublish(m: DmMessageRow, now: number): Promise<boolean> {
@@ -340,6 +475,7 @@ export class DmService {
 
   /** Tap-to-retry a Failed message: back to Sending, attempts reset, due now. */
   async retryMessage(peerHex: string, messageId: string): Promise<void> {
+    assertPeerHex(peerHex, 'retryMessage');
     const messages = await this.store.listMessages(peerHex);
     const m = messages.find(x => x.id === messageId);
     if (!m || m.direction !== 'out' || m.status !== 'Failed') return;
@@ -348,17 +484,36 @@ export class DmService {
     m.nextAttemptAtMs = this.now();
     await this.store.updateMessage(m);
     this.emit();
+    void this.scheduleFlush();
   }
 
   /** Route one incoming sealed envelope. Returns what happened (for tests/logs). */
   async receiveEnvelope(envelope: DmEnvelope): Promise<'inbox' | 'request' | 'dropped' | 'ignored'> {
     if (envelope.recipientHex !== this.ownMeshHex()) return 'ignored';
-    const rumor = unsealDm(envelope, this.ownKeys());
+    const rumor = unsealDm(envelope, this.ownKeys(), this.ownMeshHex());
     if (!rumor) return 'ignored'; // not for us / corrupt: never surface, never crash
     const senderHex = rumor.pubkey;
     if (senderHex === this.ownMeshHex()) return 'ignored';
     const existing = await this.store.getConversation(senderHex);
     if (existing?.state === 'blocked') return 'dropped'; // silent drop: no row, no badge
+    // Dedup by relay event id, never by text or sender: the same event
+    // delivered twice (two relays, relay replay) renders once, with one
+    // unread increment. Envelopes without an event id (in-process relay)
+    // carry no dedup key and are always delivered.
+    if (envelope.relayEventId) {
+      let seen = this.seenRelayEventIds.get(senderHex);
+      if (!seen) {
+        seen = new Set<string>();
+        this.seenRelayEventIds.set(senderHex, seen);
+      }
+      if (seen.has(envelope.relayEventId)) return 'ignored';
+      seen.add(envelope.relayEventId);
+      while (seen.size > DM_MAX_SEEN_EVENT_IDS_PER_CONVERSATION) {
+        const oldest = seen.values().next();
+        if (oldest.done) break;
+        seen.delete(oldest.value);
+      }
+    }
     const nowMs = this.now();
     const row: DmMessageRow = {
       id: newId(),
@@ -369,9 +524,11 @@ export class DmService {
       status: 'Sent', // inbound: already delivered to this device
       attempts: 0,
       nextAttemptAtMs: nowMs,
+      senderCreatedAtSec: envelope.createdAt,
     };
     await this.store.addMessage(row);
     this.incomingEnvelopes.set(row.id, envelope);
+    capMapEntries(this.incomingEnvelopes);
     if (!existing) {
       // Unknown sender -> requests folder, NEVER straight to inbox (orders).
       await this.store.upsertConversation({
@@ -402,6 +559,7 @@ export class DmService {
   }
 
   async acceptRequest(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'acceptRequest');
     const c = await this.store.getConversation(peerHex);
     if (c && c.state === 'request') {
       await this.store.upsertConversation({ ...c, state: 'inbox', ignored: false });
@@ -410,6 +568,7 @@ export class DmService {
   }
 
   async ignoreRequest(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'ignoreRequest');
     const c = await this.store.getConversation(peerHex);
     if (c && c.state === 'request') {
       await this.store.upsertConversation({ ...c, ignored: true });
@@ -418,9 +577,14 @@ export class DmService {
   }
 
   async blockPeer(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'blockPeer');
     const c = await this.store.getConversation(peerHex);
     if (c) {
-      await this.store.upsertConversation({ ...c, state: 'blocked', ignored: false, unread: 0 });
+      // Remember where the conversation came from, unless it is already
+      // blocked (blocking twice must not overwrite the original state
+      // with 'blocked', which priorState cannot represent).
+      const priorState = c.state === 'blocked' ? c.priorState ?? null : c.state;
+      await this.store.upsertConversation({ ...c, state: 'blocked', ignored: false, unread: 0, priorState });
     } else {
       await this.store.upsertConversation({
         peerHex,
@@ -431,12 +595,24 @@ export class DmService {
         lastMessageAtMs: 0,
         lastSealed: null,
         lastDirection: null,
+        priorState: null,
       });
     }
+    // Rows queued to this peer must not sit in Sending forever: flush
+    // skips blocked conversations and retry only acts on Failed rows, so
+    // mark them Failed now. After unblock, tap-to-retry sends them again.
+    const messages = await this.store.listMessages(peerHex);
+    for (const m of messages) {
+      if (m.direction === 'out' && m.status === 'Sending') {
+        await this.store.updateMessage({ ...m, status: 'Failed' });
+      }
+    }
     this.emit();
+    void this.scheduleFlush();
   }
 
   async unblockPeer(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'unblockPeer');
     const c = await this.store.getConversation(peerHex);
     if (c && c.state === 'blocked') {
       if (c.lastMessageAtMs === 0) {
@@ -445,13 +621,17 @@ export class DmService {
         // (requests folder), exactly as if never blocked.
         await this.store.deleteConversation(peerHex);
       } else {
-        await this.store.upsertConversation({ ...c, state: 'inbox' });
+        // Restore the pre-block state: a blocked request returns to the
+        // requests folder, not straight to inbox. Old rows without a
+        // prior state default to inbox, preserving prior behaviour.
+        await this.store.upsertConversation({ ...c, state: c.priorState ?? 'inbox', priorState: null });
       }
       this.emit();
     }
   }
 
   async mutePeer(peerHex: string, muted: boolean): Promise<void> {
+    assertPeerHex(peerHex, 'mutePeer');
     const c = await this.store.getConversation(peerHex);
     if (c) {
       await this.store.upsertConversation({ ...c, muted });
@@ -465,6 +645,7 @@ export class DmService {
    * — unsend is impossible, and the UI must say so.
    */
   async deleteConversationLocalOnly(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'deleteConversationLocalOnly');
     const messages = await this.store.listMessages(peerHex);
     for (const m of messages) {
       this.outboxEnvelopes.delete(m.id);
@@ -473,14 +654,23 @@ export class DmService {
     }
     await this.store.deleteConversation(peerHex);
     this.emit();
+    // Deleting may have removed the row the armed timer was waiting for.
+    void this.scheduleFlush();
   }
 
   async markRead(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'markRead');
     const c = await this.store.getConversation(peerHex);
     if (c && c.unread !== 0) {
       await this.store.upsertConversation({ ...c, unread: 0 });
       this.emit();
     }
+  }
+
+  /** Single conversation row, any state (including ignored requests). */
+  async getConversation(peerHex: string): Promise<DmConversationRow | null> {
+    assertPeerHex(peerHex, 'getConversation');
+    return this.store.getConversation(peerHex);
   }
 
   async listInbox(): Promise<DmConversationRow[]> {
@@ -517,7 +707,16 @@ export class DmService {
    *  plaintext cache (memory only, never disk). Unknown rows get null text
    *  (the UI renders the "Encrypted message" placeholder). */
   async getThread(peerHex: string): Promise<DmThreadRow[]> {
-    const rows = (await this.store.listMessages(peerHex)).sort((a, b) => a.createdAtMs - b.createdAtMs);
+    assertPeerHex(peerHex, 'getThread');
+    // Order by sender time within the conversation, with receive time as
+    // the tiebreak for same-second sends. Outgoing rows carry no sender
+    // timestamp, so their send time stands in for it.
+    const rows = (await this.store.listMessages(peerHex)).sort((a, b) => {
+      const aSender = a.senderCreatedAtSec ?? Math.floor(a.createdAtMs / 1000);
+      const bSender = b.senderCreatedAtSec ?? Math.floor(b.createdAtMs / 1000);
+      if (aSender !== bSender) return aSender - bSender;
+      return a.createdAtMs - b.createdAtMs;
+    });
     return rows.map(m => this.decryptRow(m));
   }
 
@@ -543,11 +742,15 @@ export class DmService {
   /** Last-message preview for a conversation row: decrypted text, or null
    *  when the last message is undecryptable (UI shows the placeholder). */
   async previewFor(peerHex: string): Promise<string | null> {
+    assertPeerHex(peerHex, 'previewFor');
     const rows = (await this.store.listMessages(peerHex)).sort((a, b) => a.createdAtMs - b.createdAtMs);
     const last = rows[rows.length - 1];
     if (!last) return null;
     return this.decryptRow(last).text;
   }
+
+  /** Per-conversation seen relay event ids for inbound dedup (P1-06). */
+  private readonly seenRelayEventIds = new Map<string, Set<string>>();
 
   /** Memory-only plaintext for outgoing rows (never persisted). */
   private readonly outgoingPlaintext = new Map<string, string>();
@@ -558,7 +761,7 @@ export class DmService {
     // payload, and the envelope header arrives with it at receive time.
     const envelope = this.incomingEnvelopes.get(m.id);
     if (!envelope) return null;
-    const rumor: DmRumor | null = unsealDm(envelope, this.ownKeys());
+    const rumor: DmRumor | null = unsealDm(envelope, this.ownKeys(), this.ownMeshHex());
     return rumor ? rumor.content : null;
   }
 

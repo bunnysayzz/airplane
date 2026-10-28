@@ -273,9 +273,18 @@ export async function rotateDeviceKey(): Promise<RotationResult> {
     await store.storeKeypair(next);
   } catch (err) {
     // Wiped but not re-stored: clear every cache so the next load mints a
-    // fresh key rather than serving the burned one.
+    // fresh key rather than serving the burned one, and notify listeners
+    // (notably the DM singleton reset) before rethrowing, or the DM
+    // service keeps serving the burned identity after a failed burn.
     cached = null;
     inflight = null;
+    identityChangeListeners.forEach((listener) => {
+      try {
+        listener();
+      } catch {
+        // One listener's failure must not mask the rotation failure.
+      }
+    });
     throw err;
   }
   cached = next;

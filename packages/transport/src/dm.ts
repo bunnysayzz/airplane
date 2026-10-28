@@ -362,6 +362,13 @@ export interface DmEnvelope {
   /** NIP-44-style sealed rumor JSON. */
   sealed: string;
   createdAt: number; // epoch seconds
+  /**
+   * Nostr event id of the relay delivery carrying this envelope, set by the
+   * relay layer. The inbound dedup key: repeat deliveries of the same event
+   * id are ignored. Absent on the in-process relay path, where no dedup
+   * applies. Never dedup by text or sender: identical texts are distinct.
+   */
+  relayEventId?: string;
 }
 
 /** Seal a DM for `recipientMeshHex`. `senderMeshHex` is recorded in the rumor. */
@@ -371,21 +378,29 @@ export function sealDm(
   recipientMeshHex: string,
   createdAtSec?: number,
 ): DmEnvelope {
-  const recipient = dmFromHex(recipientMeshHex);
+  // Normalize case at the seal boundary: the service rejects uppercase
+  // hex, but the hex parser accepts it, so an uppercase recipient used to
+  // seal an envelope no lowercase subscribe check would ever match.
+  const sender = senderMeshHex.toLowerCase();
+  const recipientHex = recipientMeshHex.toLowerCase();
+  // The recipient side rejects a malformed sender on unseal, so sealing
+  // with one used to report Sent while the recipient silently dropped it.
+  if (!isHex64(sender)) throw new Error('sealDm: bad sender pubkey');
+  const recipient = dmFromHex(recipientHex);
   if (!recipient || recipient.length !== 32) throw new Error('sealDm: bad recipient pubkey');
   const ephemeralSecret = x25519.utils.randomSecretKey();
   const ephemeralPubkey = x25519.getPublicKey(ephemeralSecret);
   const convKey = dmConversationKeyX(ephemeralSecret, meshPubkeyToX25519(recipient));
   const rumor: DmRumor = {
     kind: 14,
-    pubkey: senderMeshHex,
+    pubkey: sender,
     created_at: createdAtSec ?? Math.floor(Date.now() / 1000),
-    tags: [['p', recipientMeshHex]],
+    tags: [['p', recipientHex]],
     content: text,
   };
   return {
     ephemeralPubkeyHex: dmToHex(ephemeralPubkey),
-    recipientHex: recipientMeshHex,
+    recipientHex: recipientHex,
     sealed: nip44Encrypt(JSON.stringify(rumor), convKey),
     createdAt: rumor.created_at,
   };
@@ -395,8 +410,18 @@ export function sealDm(
  * Unseal an envelope addressed to this device. Returns the rumor, or null
  * when the envelope is not for us, corrupt, or tampered with (relay view and
  * any third party get null — gibberish, never plaintext).
+ * When `expectedRecipientHex` is given, the rumor tags must contain the
+ * matching p tag, or the rumor is rejected. Content over DM_TEXT_MAX_BYTES
+ * is always rejected: the cap was previously sender-side only, so ingress
+ * accepted arbitrarily large messages. Rejection returns null, which the
+ * receive path already treats as ignored. No protocol change: honest
+ * clients already seal within the cap with a correct p tag.
  */
-export function unsealDm(envelope: DmEnvelope, ownDmKeys: DmKeypair): DmRumor | null {
+export function unsealDm(
+  envelope: DmEnvelope,
+  ownDmKeys: DmKeypair,
+  expectedRecipientHex?: string,
+): DmRumor | null {
   try {
     const ephemeral = dmFromHex(envelope.ephemeralPubkeyHex);
     if (!ephemeral || ephemeral.length !== 32) return null;
@@ -406,6 +431,12 @@ export function unsealDm(envelope: DmEnvelope, ownDmKeys: DmKeypair): DmRumor | 
     const rumor = JSON.parse(json) as DmRumor;
     if (rumor.kind !== 14 || typeof rumor.content !== 'string' || typeof rumor.pubkey !== 'string') return null;
     if (!isHex64(rumor.pubkey)) return null;
+    if (new TextEncoder().encode(rumor.content).length > DM_TEXT_MAX_BYTES) return null;
+    if (expectedRecipientHex !== undefined) {
+      if (!Array.isArray(rumor.tags)) return null;
+      const tagged = rumor.tags.some(tag => tag[0] === 'p' && tag[1] === expectedRecipientHex);
+      if (!tagged) return null;
+    }
     return rumor;
   } catch {
     return null;

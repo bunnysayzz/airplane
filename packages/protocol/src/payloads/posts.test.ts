@@ -33,7 +33,7 @@ describe('normalizeContent', () => {
 
   test('rejects empty content', () => {
     expect(() => normalizeContent('')).toThrow(PayloadError);
-    expect(() => normalizeContent('   ')).not.toThrow(); // whitespace is content
+    expect(() => normalizeContent('   ')).toThrow(PayloadError); // whitespace-only is blank (D11)
   });
 
   test('rejects content over the char limit', () => {
