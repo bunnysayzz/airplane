@@ -24,6 +24,7 @@ import Constants from 'expo-constants';
 import { Linking, Platform } from 'react-native';
 import {
   checkForUpdate,
+  isAllowedUpdateUrl,
   type UpdateCheckResult,
   type UpdateInfo,
 } from '../../services/airplane/updater';
@@ -53,6 +54,12 @@ const promptedTags = new Set<string>();
 const promptForUpdate = (update: UpdateInfo): void => {
   const t = defaultTranslator().t;
   const downloadUrl = update.downloadUrl ?? update.releaseUrl;
+  // Belt and braces on top of the updater allowlist: never open a URL
+  // that fails it, even if an UpdateInfo was built by another path.
+  if (!isAllowedUpdateUrl(downloadUrl, { downloadHost: true })) {
+    dialog.toast(t('settings.updateOpenFailed'));
+    return;
+  }
   dialog.alert(
     t('settings.updateTitle', { version: update.version }),
     t('settings.updateMessage', { version: update.version }),
