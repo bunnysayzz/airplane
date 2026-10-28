@@ -7,6 +7,7 @@ import { I18nProvider, useI18n } from '../src/i18n/i18nContext';
 import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
 import { startTransport, stopTransport, pruneExpiredStore } from '../services/airplane';
+import { revalidateBleRadio } from '../services/airplane/transport';
 import { flushDmOutboxIfStarted } from '../services/airplane/dm';
 import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
 import {
