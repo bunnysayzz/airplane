@@ -143,6 +143,8 @@ type ClientMsg = ['EVENT', NostrEvent] | ['REQ', string, object] | ['CLOSE', str
 export interface WebSocketLike {
   send(data: string): void;
   close(): void;
+  /** Optional WebSocket ping (not exposed by React Native WebSocket). */
+  ping?: () => void;
   onopen: ((ev: unknown) => void) | null;
   onmessage: ((ev: { data: string }) => void) | null;
   onerror: ((ev: unknown) => void) | null;
@@ -166,6 +168,13 @@ export interface NostrTransportOpts {
   reconnectMs?: number;
   /** Cap for the exponential reconnect backoff, ms. Default 60000. */
   reconnectMaxMs?: number;
+  /**
+   * Silence interval, ms. Default 90000. A socket that receives no frame
+   * for this long is force-closed and reconnected: a blackholed socket
+   * must not stay "open" forever. Where the socket offers ping, one ping
+   * is tried first with a short grace before the close.
+   */
+  silenceTimeoutMs?: number;
 }
 
 /** Connection state per relay. */
@@ -205,6 +214,13 @@ export class NostrTransport {
   private readonly keys: NostrKeypair;
   private readonly reconnectMs: number;
   private readonly reconnectMaxMs: number;
+  private readonly silenceTimeoutMs: number;
+  /** Last inbound frame time per relay (liveness proof for silence detection). */
+  private lastFrameAtMs = new Map<string, number>();
+  /** Armed silence timer per relay. */
+  private silenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Relays already given one ping grace in the current silence window. */
+  private silencePinged = new Set<string>();
   private sockets = new Map<string, WebSocketLike>();
   private states = new Map<string, RelayState>();
   private started = false;
@@ -228,6 +244,7 @@ export class NostrTransport {
     this.keys = opts.keys ?? generateNostrKeypair();
     this.reconnectMs = opts.reconnectMs ?? 5000;
     this.reconnectMaxMs = opts.reconnectMaxMs ?? 60000;
+    this.silenceTimeoutMs = opts.silenceTimeoutMs ?? 90000;
   }
 
   /** Relay URLs this transport manages. */
@@ -258,6 +275,9 @@ export class NostrTransport {
     this.started = false;
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
+    this.silenceTimers.clear();
+    this.lastFrameAtMs.clear();
+    this.silencePinged.clear();
     this.reconnectAttempts.clear();
     // A stop must never leave a publish hanging on an OK that can no
     // longer arrive: resolve every waiter with no OK.
@@ -290,10 +310,15 @@ export class NostrTransport {
       return;
     }
     this.sockets.set(url, ws);
+    this.lastFrameAtMs.set(url, Date.now());
+    this.armSilenceTimer(url);
     ws.onopen = () => {
       // A socket that opens after stop() must not resurrect the relay:
       // the transport is stopped, so this open is stale and ignored.
       if (!this.started) return;
+      this.lastFrameAtMs.set(url, Date.now());
+      this.silencePinged.delete(url);
+      this.armSilenceTimer(url);
       this.states.set(url, 'open');
       // A successful connection resets the backoff - the next drop starts
       // again from the base delay.
@@ -316,8 +341,60 @@ export class NostrTransport {
     ws.onclose = () => this.handleClose(url);
   }
 
+  /** Arm (or re-arm) the silence timer for one relay. */
+  private armSilenceTimer(url: string, delayMs?: number): void {
+    const old = this.silenceTimers.get(url);
+    if (old) {
+      clearTimeout(old);
+      this.timers.delete(old);
+    }
+    const timer = setTimeout(() => {
+      this.silenceTimers.delete(url);
+      this.timers.delete(timer);
+      this.onSilenceTimeout(url);
+    }, delayMs ?? this.silenceTimeoutMs);
+    this.silenceTimers.set(url, timer);
+    this.timers.add(timer);
+  }
+
+  /** A relay went silent: ping once if possible, else close and reconnect. */
+  private onSilenceTimeout(url: string): void {
+    if (!this.started) return;
+    const ws = this.sockets.get(url);
+    if (!ws) return;
+    const last = this.lastFrameAtMs.get(url) ?? 0;
+    if (Date.now() - last < this.silenceTimeoutMs) {
+      this.armSilenceTimer(url);
+      return;
+    }
+    if (ws.ping && !this.silencePinged.has(url)) {
+      this.silencePinged.add(url);
+      try {
+        ws.ping();
+      } catch {
+        // ping failure is itself a liveness signal: fall through to close
+      }
+      // One short grace for the pong (or any frame) before closing.
+      this.armSilenceTimer(url, 10000);
+      return;
+    }
+    try {
+      ws.close();
+    } catch {
+      // fall through to the direct close path below
+    }
+    if (this.sockets.get(url) === ws) this.handleClose(url);
+  }
+
   /** Shared close path for onclose and for errors without a close. */
   private handleClose(url: string): void {
+    const timer = this.silenceTimers.get(url);
+    if (timer) {
+      clearTimeout(timer);
+      this.timers.delete(timer);
+      this.silenceTimers.delete(url);
+    }
+    this.silencePinged.delete(url);
     this.sockets.delete(url);
     this.states.set(url, 'closed');
     this.noteRelayGone(url);
@@ -497,6 +574,10 @@ export class NostrTransport {
 
   private handleMessage(relayUrl: string, data: string): void {
     if (!this.started) return;
+    // Any frame proves the socket is alive: reset the silence window.
+    this.lastFrameAtMs.set(relayUrl, Date.now());
+    this.silencePinged.delete(relayUrl);
+    this.armSilenceTimer(relayUrl);
     let msg: unknown[];
     try {
       msg = JSON.parse(data) as unknown[];

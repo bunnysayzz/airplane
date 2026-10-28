@@ -337,6 +337,52 @@ describe('NostrTransport reconnect', () => {
     await t.stop();
   });
 
+  test('a silent socket is force-closed and reconnected', async () => {
+    const sockets: FakeSocket[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://silent.relay'],
+      reconnectMs: 10,
+      silenceTimeoutMs: 30,
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+    });
+    await t.start();
+    await tick(20);
+    expect(t.getRelayState('wss://silent.relay')).toBe('open');
+    await tick(120); // silence window (30ms) plus reconnect (10ms)
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    await t.stop();
+  });
+
+  test('frames keep a socket alive past the silence window', async () => {
+    const sockets: FakeSocket[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://chatty.relay'],
+      reconnectMs: 10,
+      silenceTimeoutMs: 30,
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+    });
+    await t.start();
+    await tick(20);
+    // A frame every 20ms, inside the 30ms window, keeps resetting it.
+    for (let i = 0; i < 5; i++) {
+      sockets[0].receive(['NOTICE', 'still here']);
+      await tick(20);
+    }
+    expect(sockets).toHaveLength(1);
+    expect(t.getRelayState('wss://chatty.relay')).toBe('open');
+    await t.stop();
+  });
+
   test('stop before start is a safe no-op', async () => {
     const { t } = makeTransport();
     await expect(t.stop()).resolves.toBeUndefined();
