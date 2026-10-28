@@ -139,7 +139,10 @@ export class DiagnosticsLogWriter {
       this.pushLine(line);
     }
     this.byteCount = this.lines.reduce((sum, line) => sum + line.length + 1, 0);
-    if (pending.length > 0) {
+    // The final flush runs whenever a flush was requested during load
+    // (dirty), not only when pending lines exist: without it, a flush
+    // requested during the load window would never land.
+    if (pending.length > 0 || this.dirty) {
       void this.flush();
     }
   }
@@ -250,6 +253,13 @@ export class DiagnosticsLogWriter {
   }
 
   async flush(): Promise<void> {
+    if (!this.loadComplete) {
+      // The file is still loading and this.lines is empty: writing now
+      // would blank the surviving file. Mark dirty so load's final
+      // flush writes the loaded lines plus anything appended since.
+      this.dirty = true;
+      return;
+    }
     // Coalesced sink lines belong in this flush, not the next one:
     // drain them into the line list before deciding anything else.
     this.drainCoalesced();

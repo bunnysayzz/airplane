@@ -190,6 +190,35 @@ describe('diagnostics log restart survival', () => {
     expect(failingWriter.getLastWriteStatus().ok).toBe(false);
     expect(failingWriter.getLastWriteStatus().error).toBe('no storage');
   });
+
+  test('flush during load never blanks the surviving file', async () => {
+    const writes: string[] = [];
+    let resolveRead!: (value: string | null) => void;
+    const port: DiagnosticsLogFilePort & { content: string } = {
+      content: '2026-10-27T00:00:00.000Z app started\n',
+      read: () => new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+      write: async (content: string) => {
+        writes.push(content);
+        port.content = content;
+      },
+    };
+    const writer = new DiagnosticsLogWriter(port);
+    const loading = writer.load();
+    // A flush requested inside the load window must not write the
+    // still-empty line list over the surviving file.
+    await writer.flush();
+    expect(writes).toEqual([]);
+    resolveRead(port.content);
+    await loading;
+    for (let i = 0; i < 20 && !port.content.includes('app started'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(writes.every((w) => w.length > 0)).toBe(true);
+    expect(port.content).toContain('app started');
+    expect(writer.getLoadedFromFileCount()).toBe(1);
+  });
 });
 describe('diagnostics log sink wiring and privacy', () => {
   beforeEach(() => {
