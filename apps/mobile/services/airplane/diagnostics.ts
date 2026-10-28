@@ -344,6 +344,17 @@ export function recordPeerConnected(
   notifyThrottled();
 }
 
+/**
+ * Stage-tagged auto-connect failure line. Log-only on purpose: a single
+ * peer failing to connect must not flip the scanning state (that is what
+ * recordScanFailure is for, and it does flip it). The port schedules one
+ * bounded retry for the same bleId; this line is its only trail.
+ */
+export function recordConnectFailure(code: string): void {
+  logEvent('peer', `connect failed ${code}`);
+  notifyThrottled();
+}
+
 export function recordPeerDisconnected(peerId: string): void {
   const peer = peers.get(peerId);
   if (!peer) return;

@@ -48,6 +48,7 @@ import { FRAG_WIRE_MAX, fromHex, toHex } from '@airplane/protocol';
 import {
   recordAdvertiseFailure,
   recordAdvertiseStopped,
+  recordConnectFailure,
   recordAdvertiseSuccess,
   recordFragmentsReceived,
   recordFragmentsSent,
@@ -159,6 +160,9 @@ function isProvisionalKey(key: string): boolean {
  * drop the registered conn) and throws, so the transport falls back to
  * Nostr-only. No new dependency.
  */
+/** Single auto-connect retry delay (ms). One retry only, never a loop. */
+export const AUTO_CONNECT_RETRY_MS = 2000;
+
 export const BLE_TIMEOUT_MS = {
   ready: 10_000,
   start: 10_000,
@@ -211,6 +215,8 @@ export class GattBlePort implements TransportPort {
   private advertisePromise: Promise<void> | null = null;
   /** bleIds with a handshake in flight: reserved before the first await, freed in finally. */
   private readonly pendingConnects = new Set<string>();
+  /** One scheduled auto-connect retry per bleId (single retry, about 2s). */
+  private readonly autoConnectRetries = new Map<string, ReturnType<typeof setTimeout>>();
   private peripheral: PeripheralAdapter | null = null;
   private readonly peripheralUnsubs: (() => void)[] = [];
   private centralUnsubs: (() => void)[] = [];
@@ -399,9 +405,42 @@ export class GattBlePort implements TransportPort {
     if (this.bleIndex.has(id) || this.pendingConnects.has(id)) return; // already connecting/connected
     // Tie-break: smaller (or equal) tag initiates the central connection.
     if (this.ownTag && compareTags(this.ownTag, tag) <= 0) {
-      void this.connectCentral(id, tag).catch(() => {
-        // connect failures are routine (peer walked away); stay silent
+      void this.connectCentral(id, tag).catch((err) => {
+        // Auto-connect failures used to be swallowed with an empty catch
+        // and, with allowDuplicates false, the peer was never retried for
+        // the session. Record a stage-tagged failure and schedule exactly
+        // one bounded retry; the retry itself stays silent on failure.
+        recordConnectFailure(`auto-connect ${id}: ${err instanceof Error ? err.message : String(err)}`);
+        this.scheduleAutoConnectRetry(id, tag);
       });
+    }
+  }
+
+  /**
+   * Schedule the single bounded auto-connect retry for a bleId (about 2s
+   * out). No retry is scheduled when one is already pending or the peer
+   * limit is hit; the timer is cancelled on disconnect (see dropConn) and
+   * on close, and the retry never schedules a further retry.
+   */
+  private scheduleAutoConnectRetry(bleId: string, tag: Uint8Array): void {
+    if (this.autoConnectRetries.has(bleId)) return;
+    if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) return;
+    const timer = setTimeout(() => {
+      this.autoConnectRetries.delete(bleId);
+      if (this.bleIndex.has(bleId) || this.pendingConnects.has(bleId)) return;
+      if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) return;
+      void this.connectCentral(bleId, tag).catch(() => {
+        // Single retry spent; a further failure stays silent.
+      });
+    }, AUTO_CONNECT_RETRY_MS);
+    this.autoConnectRetries.set(bleId, timer);
+  }
+
+  private cancelAutoConnectRetry(bleId: string): void {
+    const timer = this.autoConnectRetries.get(bleId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.autoConnectRetries.delete(bleId);
     }
   }
 
@@ -687,6 +726,7 @@ export class GattBlePort implements TransportPort {
   private dropConn(key: string): void {
     const conn = this.conns.get(key);
     if (!conn) return;
+    this.cancelAutoConnectRetry(conn.bleId);
     recordPeerDisconnected(key);
     this.conns.delete(key);
     if (this.bleIndex.get(conn.bleId) === key) this.bleIndex.delete(conn.bleId);
@@ -711,6 +751,8 @@ export class GattBlePort implements TransportPort {
         await this.deps.central?.disconnect(conn.bleId).catch(() => {});
       }
     }
+    for (const timer of this.autoConnectRetries.values()) clearTimeout(timer);
+    this.autoConnectRetries.clear();
     this.discovered.clear();
     await this.stopAdvertise();
   }

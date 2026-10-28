@@ -47,6 +47,7 @@ class FakeCentral implements CentralAdapter {
   notifyCb: ((ev: { id: string; value: Uint8Array }) => void) | null = null;
   disconnectCb: ((id: string) => void) | null = null;
   connects: string[] = [];
+  connectAttempts: string[] = [];
   disconnects: string[] = [];
   notificationsStarted: string[] = [];
   writes: { id: string; char: string; chunk: Uint8Array }[] = [];
@@ -75,6 +76,7 @@ class FakeCentral implements CentralAdapter {
     };
   }
   async connect(id: string): Promise<void> {
+    this.connectAttempts.push(id);
     if (this.failConnect.has(id)) throw new Error('connect refused');
     this.connects.push(id);
   }
@@ -323,6 +325,7 @@ describe('discovery + central connect flow', () => {
     central.discoverCb!({ id: 'ble-2', rssi: -60, tag: PEER_TAG });
     await tick(50);
     expect(port.peerCount).toBe(1);
+    await port.close();
   });
 });
 
@@ -788,6 +791,46 @@ describe('in-flight guards (audit P1-20)', () => {
     central.discoverCb!({ id: 'ble-9', rssi: -60, tag: peerTagOf(pub9) });
     await tick(30);
     expect(central.connects.length).toBe(connectsBefore);
+    await port.close();
+  });
+});
+
+describe('auto-connect bounded retry (audit P1-19)', () => {
+  test('a failed auto-connect is recorded and retried exactly once', async () => {
+    const { deps, central } = makeDeps();
+    central.failConnect.add('ble-1');
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(lines.some((l) => l.includes('connect failed auto-connect ble-1'))).toBe(true);
+    expect(port.peerCount).toBe(0);
+    // The single retry fires after about 2s and fails again (still refused).
+    await new Promise((r) => setTimeout(r, 2200));
+    expect(central.connectAttempts).toEqual(['ble-1', 'ble-1']);
+    // No further retries: another window passes with no new attempt.
+    await new Promise((r) => setTimeout(r, 2200));
+    expect(central.connectAttempts).toEqual(['ble-1', 'ble-1']);
+    resetDiagnosticsForTests();
+    await port.close();
+  });
+
+  test('the retry succeeds when the transient failure clears', async () => {
+    const { deps, central } = makeDeps();
+    central.failConnect.add('ble-1');
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(0);
+    central.failConnect.clear();
+    await new Promise((r) => setTimeout(r, 2200));
+    expect(port.peerCount).toBe(1);
     await port.close();
   });
 });
