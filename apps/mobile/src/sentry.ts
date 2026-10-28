@@ -11,10 +11,13 @@
  * Sentry envelope format over plain fetch instead: events land in the same
  * Sentry project dashboard, with zero native code and zero new dependency.
  *
- * SCOPE: publish-path diagnostics only. initSentry() runs at app startup
- * (imported from apps/mobile/index.js, after fatalShim). captureError() is
- * called from the compose modal's publish catch. NOTHING else is reported
- * yet, and no global error handler is installed (fatalShim owns that).
+ * SCOPE: publish failures, feed-cell resolution failures, and
+ * keystore/connectivity breadcrumbs. initSentry() runs at app startup
+ * (imported from apps/mobile/index.js, after fatalShim). captureError()
+ * is called from the compose modal's publish catch and from feed-cell
+ * resolution (feedCells), and breadcrumbs are added for keystore
+ * fallback (identity) and connectivity changes (transport). No global
+ * error handler is installed (fatalShim owns that).
  *
  * PRIVACY: an event carries ONLY the error name/message/stack, the publish
  * stage tag, and breadcrumbs. Post text, location, pubkeys, and secrets are
