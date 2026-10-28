@@ -360,6 +360,9 @@ export function recordPeerResolved(oldKey: string, peerId: string): void {
     if ((old.lastSeenAtMs ?? -1) > (next.lastSeenAtMs ?? -1)) next.lastSeenAtMs = old.lastSeenAtMs;
     if (next.advertisementHex === null) next.advertisementHex = old.advertisementHex;
     if (next.rssi === null) next.rssi = old.rssi;
+    if (next.mtu === null) next.mtu = old.mtu;
+    if (next.cccdSubscribed === null) next.cccdSubscribed = old.cccdSubscribed;
+    if (next.gattState === 'seen' && old.gattState !== 'seen') next.gattState = old.gattState;
     peers.delete(oldKey);
   } else {
     peers.delete(oldKey);

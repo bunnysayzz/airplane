@@ -114,6 +114,21 @@ describe('diagnostics collector', () => {
     expect(snap.peers.some((p) => p.peerId === 'tag:ffffffffffffffff')).toBe(true);
   });
 
+  test('peer resolve carries over connection state the survivor lacks', () => {
+    recordPeerSeen('tag:0102030405060708', -70, '0102030405060708');
+    recordPeerConnected('tag:0102030405060708', 256, true);
+    recordPeerSeen('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', -60, '0807060504030201');
+    recordPeerResolved(
+      'tag:0102030405060708',
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    );
+    const snap = getDiagnosticsSnapshot();
+    expect(snap.peers).toHaveLength(1);
+    expect(snap.peers[0].gattState).toBe('connected');
+    expect(snap.peers[0].mtu).toBe(256);
+    expect(snap.peers[0].cccdSubscribed).toBe(true);
+  });
+
   test('peer upsert keeps the newest sighting and survives a resolve', () => {
     recordPeerSeen('tag:0102030405060708', -70, '0102030405060708');
     recordPeerSeen('tag:0102030405060708', -55, '0102030405060708');
