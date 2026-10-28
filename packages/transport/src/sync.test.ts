@@ -163,6 +163,28 @@ describe('WorldSync', () => {
     expect(nostr.published).toHaveLength(1); // only the first run published
   });
 
+  test('concurrent sync calls share one in-flight pass, not two pushes', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    const sync = new WorldSync(nostr as never, store);
+    store.add(makePost('overlap 1'));
+    store.add(makePost('overlap 2'));
+    const [r1, r2] = await Promise.all([sync.sync(), sync.sync()]);
+    expect(r1.pushed).toEqual(r2.pushed);
+    expect(nostr.published).toHaveLength(2);
+    expect(nostr.queried).toHaveLength(1);
+  });
+
+  test('a pass is bounded: a backlog larger than the cap waits for later passes', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    const sync = new WorldSync(nostr as never, store);
+    for (let i = 0; i < 60; i++) store.add(makePost(`backlog ${i}`));
+    const report = await sync.sync();
+    expect(report.pushed).toHaveLength(50);
+    expect(nostr.queried[0]).toHaveLength(50);
+  });
+
   test('confirmation persists across WorldSync restarts sharing a store', async () => {
     // The durable store (SQLite on device) outlives the engine: a restart is
     // a brand-new WorldSync on the same store. Confirmations must survive.

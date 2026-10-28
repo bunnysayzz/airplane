@@ -40,32 +40,72 @@ export interface SyncReport {
  * One sync pass. Safe to call repeatedly; idempotent per event ID.
  * Does nothing when the transport has no open relay.
  */
+/** Max unconfirmed ids handled in one pass, so a pass stays bounded. */
+export const SYNC_MAX_PER_PASS = 50;
+
+/** Store reads are batched in pages of this size, not one by one. */
+export const SYNC_PAGE_SIZE = 20;
+
 export class WorldSync {
+  /** In-flight pass, shared by concurrent callers so ticks cannot overlap. */
+  private inFlight: Promise<SyncReport> | null = null;
+
   constructor(
     private readonly nostr: NostrTransport,
     private readonly store: WorldConfirmStore,
   ) {}
 
-  async sync(): Promise<SyncReport> {
+  /**
+   * One sync pass. Concurrent callers share the in-flight pass instead
+   * of starting a second one (the 60s timer and the connectivity-online
+   * transition both call this, and a slow pass used to overlap the next).
+   */
+  sync(): Promise<SyncReport> {
+    if (this.inFlight) return this.inFlight;
+    const run = this.doSync().finally(() => {
+      if (this.inFlight === run) this.inFlight = null;
+    });
+    this.inFlight = run;
+    return run;
+  }
+
+  private async doSync(): Promise<SyncReport> {
     const report: SyncReport = { pushed: [], confirmed: [], skipped: [] };
     if (!this.nostr.online) return report;
 
-    const unconfirmed = await this.store.getUnconfirmed();
+    // Bounded pass: only the first SYNC_MAX_PER_PASS ids are handled;
+    // the rest wait for the next tick instead of growing this pass.
+    const unconfirmed = (await this.store.getUnconfirmed()).slice(0, SYNC_MAX_PER_PASS);
 
-    // 1. Push each unconfirmed event to relays.
+    // 1. Push each unconfirmed event to relays. Store reads for a page
+    //    run concurrently (batched), and pushes for a page run
+    //    concurrently too; pages stay sequential so one pass cannot
+    //    flood the store or the relays with the whole backlog at once.
     const pushedIds: Hex64[] = [];
-    for (const idHex of unconfirmed) {
-      if (await this.store.isWorldConfirmed(idHex)) {
-        report.skipped.push(idHex);
-        continue;
-      }
-      const event = await this.store.getEvent(idHex);
-      if (!event) {
-        report.skipped.push(idHex);
-        continue;
-      }
-      const relays = await this.nostr.publish(event);
-      if (relays.length > 0) pushedIds.push(idHex);
+    for (let i = 0; i < unconfirmed.length; i += SYNC_PAGE_SIZE) {
+      const page = unconfirmed.slice(i, i + SYNC_PAGE_SIZE);
+      const events = await Promise.all(
+        page.map(async (idHex) => {
+          if (await this.store.isWorldConfirmed(idHex)) {
+            report.skipped.push(idHex);
+            return null;
+          }
+          const event = await this.store.getEvent(idHex);
+          if (!event) {
+            report.skipped.push(idHex);
+            return null;
+          }
+          return { idHex, event };
+        }),
+      );
+      const pushed = await Promise.all(
+        events.map(async (row) => {
+          if (!row) return null;
+          const relays = await this.nostr.publish(row.event);
+          return relays.length > 0 ? row.idHex : null;
+        }),
+      );
+      for (const idHex of pushed) if (idHex) pushedIds.push(idHex);
     }
     report.pushed = pushedIds;
 
