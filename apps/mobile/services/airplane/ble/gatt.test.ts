@@ -739,3 +739,55 @@ describe('connectCentral cleanup + IDENT tag binding (audit P1-16)', () => {
     await port.close();
   });
 });
+
+describe('in-flight guards (audit P1-20)', () => {
+  test('concurrent advertise calls share one in-flight promise, no second advertiser', async () => {
+    const { deps, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    const otherPub = new Uint8Array(32).fill(0x0d);
+    await Promise.all([port.advertise(OWN_HEX), port.advertise(toHex(otherPub))]);
+    expect(peripheral.advIdent).toBe(OWN_HEX);
+    await port.stopAdvertise();
+  });
+
+  test('concurrent connects to the same bleId run one handshake', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    // Two discoveries of the same bleId in one tick: the second must not
+    // start a second native connect while the first handshake is pending.
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connects).toEqual(['ble-1']);
+    expect(port.peerCount).toBe(1);
+    await port.close();
+  });
+
+  test('peer limit counts pending handshakes, not just registered conns', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    // MAX_BLE_PEERS is 8: fill it with 8 connected peers, then a 9th
+    // discovery must not start a connect.
+    for (let i = 0; i < 8; i++) {
+      const pub = new Uint8Array(32).fill(0x10 + i);
+      const tag = peerTagOf(pub);
+      // Each peer tag must sort above our own tag (0x0a) to auto-connect,
+      // and IDENT must match the tag: point ident at this peer.
+      central.identHex = toHex(pub);
+      central.discoverCb!({ id: `ble-${i}`, rssi: -60, tag });
+      await tick(20);
+    }
+    expect(port.peerCount).toBe(8);
+    const connectsBefore = central.connects.length;
+    const pub9 = new Uint8Array(32).fill(0x30);
+    central.identHex = toHex(pub9);
+    central.discoverCb!({ id: 'ble-9', rssi: -60, tag: peerTagOf(pub9) });
+    await tick(30);
+    expect(central.connects.length).toBe(connectsBefore);
+    await port.close();
+  });
+});

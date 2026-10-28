@@ -207,6 +207,10 @@ export class GattBlePort implements TransportPort {
   private readonly scanSubs = new Set<(peer: PeerInfo) => void>();
   private scanUnsub: (() => void) | null = null;
   private centralStarted = false;
+  /** In-flight advertise promise: a second concurrent advertise returns this instead of starting a second advertiser. */
+  private advertisePromise: Promise<void> | null = null;
+  /** bleIds with a handshake in flight: reserved before the first await, freed in finally. */
+  private readonly pendingConnects = new Set<string>();
   private peripheral: PeripheralAdapter | null = null;
   private readonly peripheralUnsubs: (() => void)[] = [];
   private centralUnsubs: (() => void)[] = [];
@@ -221,6 +225,20 @@ export class GattBlePort implements TransportPort {
    * denied, peripheral lib missing/broken) - the caller runs Nostr-only.
    */
   async advertise(peerId: string): Promise<void> {
+    // In-flight guard: two concurrent calls used to both pass the
+    // idempotent check, both create adapters, and the second assignment
+    // leaked the first advertiser (still advertising, never destroyed).
+    if (this.advertisePromise) return this.advertisePromise;
+    const p = this.advertiseInner(peerId);
+    this.advertisePromise = p;
+    try {
+      await p;
+    } finally {
+      if (this.advertisePromise === p) this.advertisePromise = null;
+    }
+  }
+
+  private async advertiseInner(peerId: string): Promise<void> {
     if (!HEX64_RE.test(peerId)) throw new Error('ble: advertise needs a 64-char hex peerId');
     if (this.peripheral && this.ownPeerId === peerId) return;
     await this.stopAdvertise();
@@ -377,8 +395,8 @@ export class GattBlePort implements TransportPort {
         }
       }
     }
-    if (this.conns.size >= MAX_BLE_PEERS) return;
-    if (this.bleIndex.has(id)) return; // already connecting/connected
+    if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) return;
+    if (this.bleIndex.has(id) || this.pendingConnects.has(id)) return; // already connecting/connected
     // Tie-break: smaller (or equal) tag initiates the central connection.
     if (this.ownTag && compareTags(this.ownTag, tag) <= 0) {
       void this.connectCentral(id, tag).catch(() => {
@@ -405,8 +423,25 @@ export class GattBlePort implements TransportPort {
     const central = this.deps.central;
     if (!central) throw new Error('ble: central role unavailable');
     if (this.bleIndex.has(bleId)) return;
+    if (this.pendingConnects.has(bleId)) return;
     if (!this.ownPeerId) throw new Error('ble: advertise() must run before connect');
-    if (this.conns.size >= MAX_BLE_PEERS) throw new Error('ble: peer limit reached');
+    // The peer-limit check counts reservations, not just registered conns:
+    // two handshakes that both passed a conns-only check could together
+    // exceed the limit. The reservation is made before the first await.
+    if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) throw new Error('ble: peer limit reached');
+    this.pendingConnects.add(bleId);
+    try {
+      await this.connectCentralInner(central, bleId, tag);
+    } finally {
+      this.pendingConnects.delete(bleId);
+    }
+  }
+
+  private async connectCentralInner(central: NonNullable<BleNativeDeps['central']>, bleId: string, tag: Uint8Array): Promise<void> {
+    // Re-checked here because the outer guard narrowed it before the await
+    // boundary; the inner method must not trust that narrowing.
+    const ownPeerId = this.ownPeerId;
+    if (!ownPeerId) throw new Error('ble: advertise() must run before connect');
     await withBleTimeout(central.connect(bleId), BLE_TIMEOUT_MS.connect, 'central connect');
     // Set only once a connection is registered in this call, so the catch
     // below drops exactly the stale registration this call created.
@@ -443,7 +478,7 @@ export class GattBlePort implements TransportPort {
       });
       registeredKey = peerId;
       // Announce ourselves: the peripheral side learns our identity + MTU.
-      const hello = encodeHello(fromHex(this.ownPeerId), mtu);
+      const hello = encodeHello(fromHex(ownPeerId), mtu);
       for (const chunk of chunkBytes(hello, mtu - ATT_OVERHEAD)) {
         await withBleTimeout(central.write(bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk), BLE_TIMEOUT_MS.write, 'hello write');
       }
