@@ -154,6 +154,37 @@ describe('StarCounter', () => {
   });
 });
 
+describe('StarCounter dedup cap', () => {
+  test('the seen set is LRU-capped: the oldest id evicts past 10000', () => {
+    const counter = new StarCounter();
+    counter.markPostKnown(POST);
+    const pubkey = new Uint8Array(32).fill(9);
+    const fakeStar = (n: number): Parameters<StarCounter['apply']>[0] => {
+      const id = new Uint8Array(32);
+      id[0] = (n >> 24) & 0xff;
+      id[1] = (n >> 16) & 0xff;
+      id[2] = (n >> 8) & 0xff;
+      id[3] = n & 0xff;
+      return {
+        id,
+        pubkey,
+        created_at: NOW + n,
+        kind: 4,
+        geohash: 'tdr1v',
+        tags: [['e', POST]],
+        content: 'star',
+        sig: new Uint8Array(64),
+      } as never;
+    };
+    const first = fakeStar(0);
+    expect(counter.apply(first, () => true, NOW + 20000)).toBe('applied');
+    for (let n = 1; n <= 10000; n++) counter.apply(fakeStar(n), () => true, NOW + 20000);
+    // The first id has been evicted: re-applying it is no longer a
+    // duplicate (it loses latest-wins as the oldest, but is recognised).
+    expect(counter.apply(first, () => true, NOW + 20000)).not.toBe('duplicate');
+  });
+});
+
 describe('formatStarCount', () => {
   test('partial / lower-bound display: positive counts get "+", zero gets no numeral', () => {
     expect(formatStarCount(0)).toBe('');

@@ -182,12 +182,29 @@ function syncDiagnosticsAdapterState(): void {
   );
 }
 
+/**
+ * Trailing feed-notify coalescing for inbound bursts: a cold-cache relay
+ * replay delivers many events in seconds, and one notify per event
+ * re-rendered the timeline per event while scrolled down. One timer per
+ * burst notifies once, 250ms after the last event in the burst (the same
+ * window the timeline already uses at top).
+ */
+let feedNotifyTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleFeedNotify(): void {
+  if (feedNotifyTimer) return;
+  feedNotifyTimer = setTimeout(() => {
+    feedNotifyTimer = null;
+    notifyFeedListeners();
+  }, 250);
+}
+
 async function handleIncoming(event: SignedEvent, source: string): Promise<void> {
   // STAR MVP: kind-4 events never reach the events table — its schema
   // CHECKs kind IN (1,2,3). They go to the in-memory star counter instead
   // (same BLE + Nostr ingress path, same event-id dedup upstream).
   if (event.kind === EVENT_KIND_STAR) {
-    if (applyIncomingStar(event)) notifyFeedListeners();
+    if (applyIncomingStar(event)) scheduleFeedNotify();
     return;
   }
   // T19: kind-5 reshare/unreshare events never reach the events table
@@ -204,7 +221,7 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
     } catch {
       // The count already applied; rehydration reconciles later.
     }
-    notifyFeedListeners();
+    scheduleFeedNotify();
     return;
   }
   // Diagnostics: 'local' is our own publish echo (already logged as
@@ -228,14 +245,35 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
   }
   const store = getStore();
   // Store the event (deduped by HybridTransport already).
-  // saveEvent is idempotent.
-  await store.saveEvent(event);
+  // saveEvent is idempotent. A store failure is surfaced in
+  // Diagnostics and the feed is NOT notified: an unhandled rejection
+  // here used to drop the event while Hybrid already marked it seen.
+  try {
+    await store.saveEvent(event);
+  } catch {
+    recordMessage({
+      id: toHex(event.id),
+      sequence: null,
+      sizeBytes: encodeEvent(event).length,
+      direction: 'inbound',
+      attempts: [
+        {
+          transport: source === 'nostr' ? 'relay' : 'ble',
+          atMs: Date.now(),
+          outcome: 'failed',
+          detail: 'store save failed',
+        },
+      ],
+      finalStatus: 'receive failed',
+    });
+    return;
+  }
   // A post arriving may release stars and reshares held pending for it.
   if (event.kind === EVENT_KIND_POST) {
     markStarPostKnown(toHex(event.id));
     markResharePostKnown(toHex(event.id));
   }
-  notifyFeedListeners();
+  scheduleFeedNotify();
 }
 
 /**
@@ -245,15 +283,26 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
  * known and releases the pending reshare. Best-effort and once per post
  * per launch: when offline the query sends nowhere, and a mesh-only post
  * stays pending until a BLE peer delivers it. Never throws.
+ *
+ * The target is marked pulled only when the query actually reached a
+ * relay: marking before the query used to block retry for the whole
+ * launch after one offline pull. The set is bounded (oldest evicted
+ * past 1000) so it cannot grow for the life of the launch.
  */
 const pulledPostIds = new Set<string>();
+const PULLED_POST_IDS_CAP = 1000;
 
 async function pullOriginalForReshare(event: SignedEvent): Promise<void> {
   const target = reshareTargetId(event);
   if (!target || pulledPostIds.has(target)) return;
-  pulledPostIds.add(target);
   try {
-    await hybrid?.nostr.queryByIds([target]);
+    const sent = await hybrid?.nostr.queryByIds([target]);
+    if (!sent) return; // offline: not pulled, so a later reshare retries
+    if (pulledPostIds.size >= PULLED_POST_IDS_CAP) {
+      const oldest = pulledPostIds.values().next().value as string | undefined;
+      if (oldest !== undefined) pulledPostIds.delete(oldest);
+    }
+    pulledPostIds.add(target);
   } catch {
     // Best-effort: the pending reshare still applies when the post arrives.
   }
@@ -308,6 +357,19 @@ export async function startTransport(): Promise<void> {
     ble,
     {
       relays: await loadRelayUrls(),
+      // This list is the user's explicit Settings list, so a private
+      // relay the user added on purpose is allowed through here; the
+      // package default (no flag) still drops private targets.
+      allowPrivateRelays: true,
+      // Relay frames that used to vanish: NOTICEs/CLOSEDs land in the
+      // diagnostics breadcrumb trail, and an AUTH challenge is surfaced
+      // there too (the client does not answer NIP-42 challenges yet).
+      onRelayNotice: (relayUrl, frame, message) => {
+        addBreadcrumb(`relay ${frame} ${relayUrl}`, { message });
+      },
+      onAuthChallenge: (relayUrl, challenge) => {
+        addBreadcrumb(`relay AUTH challenge ${relayUrl}`, { challenge });
+      },
     },
     {
       onDedupDrop: (_source, peerId) => recordDedupDrop(peerId),
@@ -322,6 +384,10 @@ export async function startTransport(): Promise<void> {
       networkValidated: () => lastOnline !== false,
     },
   );
+  if (pendingSubscribeCells) {
+    hybrid.nostr.setSubscribeCells(pendingSubscribeCells);
+    pendingSubscribeCells = null;
+  }
   sync = new WorldSync(hybrid.nostr, {
     markWorldConfirmed: (id: Hex64) => getStore().markWorldConfirmed(id),
     isWorldConfirmed: (id: Hex64) => getStore().isWorldConfirmed(id),
@@ -533,6 +599,23 @@ export function __getHybridForTests(): HybridTransport | null {
 }
 
 /**
+ * Narrow the relay subscribe filter to the viewer's in-scope cells
+ * (feed tab owns the current cells). The next reconnect subscribes with
+ * the `#g` filter; until cells are known the filter stays global, so
+ * coverage is never lost. Cells resolved before startTransport are
+ * applied when the transport starts.
+ */
+let pendingSubscribeCells: string[] | null = null;
+
+export function setRelaySubscribeCells(cells: string[]): void {
+  if (hybrid) {
+    hybrid.nostr.setSubscribeCells(cells);
+  } else {
+    pendingSubscribeCells = [...cells];
+  }
+}
+
+/**
  * Apply one connectivity state to the transport. Single funnel for both
  * the NetInfo listener and the initial fetch, so both paths behave the
  * same: online (re)starts the relay sockets, runs a WorldSync pass, and
@@ -595,6 +678,10 @@ function wireConnectivity(): void {
 
 /** Stop the transport. Call on app teardown (rarely needed on mobile). */
 export async function stopTransport(): Promise<void> {
+  if (feedNotifyTimer) {
+    clearTimeout(feedNotifyTimer);
+    feedNotifyTimer = null;
+  }
   if (syncTimer) {
     clearInterval(syncTimer);
     syncTimer = null;
@@ -623,7 +710,17 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
   // BLE fan-out targets the currently connected peers. Previously this
   // call passed no peer ids at all, so local posts NEVER went out over
   // BLE — only Nostr — even with phones connected over GATT.
-  const result = await hybrid!.publish(event, blePeerIdsForPublish(blePort?.port));
+  const blePeersAtPublish = blePeerIdsForPublish(blePort?.port);
+  const result = await hybrid!.publish(event, blePeersAtPublish);
+  // Relay OK is the confirmation: mark it now instead of waiting for
+  // the post to be observed back over a subscription, which left the
+  // globe dark and WorldSync re-pushing every minute. The inbound
+  // observation path still confirms other phones' relaying.
+  if (result.transport === 'relay') {
+    await getStore()
+      .markWorldConfirmed(toHex(event.id))
+      .catch(() => {});
+  }
   const nowMs = Date.now();
   // Diagnostics record exactly the stages the router actually ran: a
   // relay win never touches BLE, a skipped relay stage is marked
@@ -635,7 +732,12 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
       transport: 'relay',
       atMs: nowMs,
       outcome: 'ok',
-      detail: `published to ${result.relays.length} relays (OK)`,
+      // P3-1: result.relays is the first-OK list, not every relay that
+      // holds the event (the event was sent to every open relay before
+      // any OK arrived). The fuller ack set is NOT collected: waiting
+      // for it would delay the router past its first-OK resolution and
+      // break the mesh fallback timing. The wording says exactly that.
+      detail: `relay OK from ${result.relays.length} relay(s); event sent to open relays`,
     });
   } else {
     attempts.push({
@@ -650,6 +752,15 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
         atMs: nowMs,
         outcome: 'ok',
         detail: `sent to ${result.blePeers} connected peers (no peer ack in current transport)`,
+      });
+    } else if (blePeersAtPublish.length > 0) {
+      // Peers were connected but the router reports queued, so every
+      // BLE send failed: record failed, not skipped and not ok.
+      attempts.push({
+        transport: 'ble',
+        atMs: nowMs,
+        outcome: 'failed',
+        detail: 'BLE send failed for all connected peers',
       });
     } else {
       attempts.push({

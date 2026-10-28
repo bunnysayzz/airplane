@@ -307,6 +307,201 @@ describe('NostrTransport reconnect', () => {
     await t.stop();
   });
 
+  test('a stale onopen after stop does not resurrect the relay as open', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    expect(t.online).toBe(true);
+    const sentBefore = sockets[0].sent.length;
+    await t.stop();
+    sockets[0].open(); // stale open on the discarded socket
+    expect(t.getRelayState('wss://test.relay')).toBe('closed');
+    expect(t.online).toBe(false);
+    expect(sockets[0].sent.length).toBe(sentBefore); // no resubscribe sent
+    await t.stop();
+  });
+
+  test('a socket error reconnects even when onclose never fires', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    // Break the close-to-onclose link: this socket errors and its close
+    // fires nothing, the case the old code stalled on forever.
+    sockets[0].close = () => {
+      sockets[0].closed = true;
+    };
+    sockets[0].onerror?.({});
+    await tick(40);
+    expect(sockets).toHaveLength(2);
+    expect(t.getRelayState('wss://test.relay')).toBe('open');
+    await t.stop();
+  });
+
+  test('a silent socket is force-closed and reconnected', async () => {
+    const sockets: FakeSocket[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://silent.relay'],
+      reconnectMs: 10,
+      silenceTimeoutMs: 30,
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+    });
+    await t.start();
+    await tick(20);
+    expect(t.getRelayState('wss://silent.relay')).toBe('open');
+    await tick(120); // silence window (30ms) plus reconnect (10ms)
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    await t.stop();
+  });
+
+  test('frames keep a socket alive past the silence window', async () => {
+    const sockets: FakeSocket[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://chatty.relay'],
+      reconnectMs: 10,
+      silenceTimeoutMs: 30,
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+    });
+    await t.start();
+    await tick(20);
+    // A frame every 20ms, inside the 30ms window, keeps resetting it.
+    for (let i = 0; i < 5; i++) {
+      sockets[0].receive(['NOTICE', 'still here']);
+      await tick(20);
+    }
+    expect(sockets).toHaveLength(1);
+    expect(t.getRelayState('wss://chatty.relay')).toBe('open');
+    await t.stop();
+  });
+
+  test('an oversize relay frame is dropped before parsing', async () => {
+    const { t, sockets } = makeTransport();
+    const keys = generateNostrKeypair();
+    await t.start();
+    await tick(20);
+    let count = 0;
+    t.onReceive(() => {
+      count++;
+    });
+    const wrapped = wrapEvent(makePost('oversize'), keys);
+    const frame = JSON.stringify(['EVENT', 'sub1', wrapped]) + ' '.repeat(70000);
+    expect(frame.length).toBeGreaterThan(65536);
+    sockets[0].onmessage?.({ data: frame });
+    await tick(10);
+    expect(count).toBe(0);
+    await t.stop();
+  });
+
+  test('queryByIds closes on EOSE instead of waiting for the timer', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    const sent = await t.queryByIds(['aa'.repeat(32)]);
+    expect(sent).toBe(true);
+    const req = sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ' && m[2] && '#e' in m[2]);
+    expect(req).toBeDefined();
+    sockets[0].receive(['EOSE', req[1]]);
+    await tick(10);
+    const closes = sockets[0].sent.map((s) => JSON.parse(s)).filter((m) => m[0] === 'CLOSE');
+    expect(closes).toEqual([['CLOSE', req[1]]]);
+    await t.stop();
+  });
+
+  test('queryByIds re-issues a pending query on reconnect', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    await t.queryByIds(['bb'.repeat(32)]);
+    const req = sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ' && m[2] && '#e' in m[2]);
+    expect(req).toBeDefined();
+    sockets[0].close(); // reconnect in 10ms, auto-opens
+    await tick(50);
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    const reissued = sockets[1].sent
+      .map((s) => JSON.parse(s))
+      .find((m) => m[0] === 'REQ' && m[1] === req[1]);
+    expect(reissued).toBeDefined();
+    expect(reissued[2]['#e']).toEqual(['bb'.repeat(32)]);
+    await t.stop();
+  });
+
+  test('AUTH, NOTICE and CLOSED frames are surfaced; CLOSED resubscribes', async () => {
+    const notices: { frame: string; message: string }[] = [];
+    const auths: string[] = [];
+    const sockets: FakeSocket[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://strict.relay'],
+      reconnectMs: 10,
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+      onRelayNotice: (_url, frame, message) => {
+        notices.push({ frame, message });
+      },
+      onAuthChallenge: (_url, challenge) => {
+        auths.push(challenge);
+      },
+    });
+    await t.start();
+    await tick(20);
+    const mainReq = sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    expect(mainReq).toBeDefined();
+    sockets[0].receive(['NOTICE', 'slow down']);
+    sockets[0].receive(['AUTH', 'challenge-abc']);
+    sockets[0].receive(['CLOSED', mainReq[1], 'auth-required: please auth']);
+    await tick(10);
+    expect(notices).toEqual([
+      { frame: 'NOTICE', message: 'slow down' },
+      { frame: 'CLOSED', message: 'auth-required: please auth' },
+    ]);
+    expect(auths).toEqual(['challenge-abc']);
+    // Resubscribe sent a fresh REQ on the same socket.
+    const reqs = sockets[0].sent.map((s) => JSON.parse(s)).filter((m) => m[0] === 'REQ');
+    expect(reqs.length).toBeGreaterThanOrEqual(2);
+    await t.stop();
+  });
+
+  test('subscribe filter narrows to cells and reconnect since does not replay 24h', async () => {
+    const sockets: FakeSocket[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://cell.relay'],
+      reconnectMs: 10,
+      cells: ['abcde', 'fghij'],
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+    });
+    await t.start();
+    await tick(20);
+    const firstReq = sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    expect(firstReq[2]['#g']).toEqual(['abcde', 'fghij']);
+    expect(firstReq[2].limit).toBe(500);
+    const firstSince = firstReq[2].since as number;
+    expect(firstSince).toBeLessThan(Math.floor(Date.now() / 1000) - 80000);
+    sockets[0].close(); // reconnect, auto-opens
+    await tick(50);
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    const secondReq = sockets[1].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    expect(secondReq[2]['#g']).toEqual(['abcde', 'fghij']);
+    expect(secondReq[2].since as number).toBeGreaterThan(firstSince + 80000);
+    await t.stop();
+  });
+
   test('stop before start is a safe no-op', async () => {
     const { t } = makeTransport();
     await expect(t.stop()).resolves.toBeUndefined();

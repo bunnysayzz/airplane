@@ -84,6 +84,13 @@ describe('relay URL validation', () => {
       sanitizeRelayList(['wss://a.relay', 'ws://bad.relay', 'wss://a.relay/', 'wss://b.relay']),
     ).toEqual(['wss://a.relay', 'wss://b.relay']);
   });
+
+  it('rejects credentials and bad ports, dedupes case and port variants', () => {
+    expect(normalizeRelayUrl('wss://user:pass@a.relay')).toBeNull();
+    expect(normalizeRelayUrl('wss://a.relay:99999')).toBeNull();
+    expect(normalizeRelayUrl('WSS://A.RELAY:443/')).toBe('wss://a.relay');
+    expect(sanitizeRelayList(['wss://A.relay', 'wss://a.relay:443'])).toEqual(['wss://a.relay']);
+  });
 });
 
 describe('add/remove behaviour', () => {

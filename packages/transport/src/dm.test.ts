@@ -266,6 +266,38 @@ describe('DmService routing + outbox', () => {
     expect(sent.map(t => t.status)).toEqual(['Sent', 'Sent', 'Sent']);
   });
 
+  test('flushOutbox runs conversations concurrently but keeps per-conversation order', async () => {
+    // A relay that takes 100ms per publish: sequential conversations
+    // would take 300ms for 3 messages, concurrent conversations ~200ms
+    // (conversation A has 2 messages in order, B has 1 alongside).
+    const published: string[] = [];
+    const slowRelay = {
+      async publish(envelope: { recipientHex: string }): Promise<boolean> {
+        await new Promise<void>(r => setTimeout(r, 100));
+        published.push(envelope.recipientHex);
+        return true;
+      },
+      subscribe(): () => void {
+        return () => {};
+      },
+    };
+    const nowRef = { now: 50_000_000 };
+    const alice = makePersona(slowRelay as never, nowRef);
+    const peerA = dmToHex(ed25519.getPublicKey(ed25519.utils.randomSecretKey()));
+    const peerB = dmToHex(ed25519.getPublicKey(ed25519.utils.randomSecretKey()));
+    await alice.service.sendMessage(peerA, 'a1');
+    await alice.service.sendMessage(peerA, 'a2');
+    await alice.service.sendMessage(peerB, 'b1');
+    const started = Date.now();
+    await alice.service.flushOutbox();
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeLessThan(280);
+    expect(published).toHaveLength(3);
+    expect(published.filter(p => p === peerA)).toEqual([peerA, peerA]);
+    const sent = await alice.service.getThread(peerA);
+    expect(sent.map(t => t.status)).toEqual(['Sent', 'Sent']);
+  });
+
   test('validation: bad peer hex, self-DM, empty and over-cap text are rejected', async () => {
     const relay = new MemoryDmRelay();
     const nowRef = { now: 40_000_000 };

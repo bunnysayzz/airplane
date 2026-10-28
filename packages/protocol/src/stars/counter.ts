@@ -30,6 +30,7 @@
 // the MVP; the rest are future work (report §6).
 
 import { toHex } from '../hex';
+import { SeenCache } from '../flood/engine';
 import { EVENT_KIND_STAR, type Hex64, type SignedEvent, type UnixSec } from '../events/types';
 import { STAR_CONTENT, UNSTAR_CONTENT } from '../payloads/stars';
 
@@ -58,8 +59,12 @@ export interface StarView {
 
 /** Per-node view of star counts, with provenance. Not persisted in v1. */
 export class StarCounter {
-  /** Event ids already applied or held pending (dedup across transports). */
-  private readonly seenIds = new Set<Hex64>();
+  /**
+   * Event ids already applied or held pending (dedup across transports).
+   * LRU-capped like the transport SeenCache: the persistent star table
+   * already dedups on save, so eviction cannot resurrect a count.
+   */
+  private readonly seenIds = new SeenCache();
   /** Post ids known locally (a post row exists, or the caller said so). */
   private readonly knownPosts = new Set<Hex64>();
   /** (pubkeyHex, targetHex) -> latest state + retained history. */

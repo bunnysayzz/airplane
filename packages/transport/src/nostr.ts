@@ -28,6 +28,7 @@ import {
   type Hex64,
   type SignedEvent,
 } from '@airplane/protocol';
+import { sanitizeRelayList } from './relayUrls';
 
 // Lazily-created noble backend for inner signature verification.
 let nobleCrypto: NobleCrypto | null = null;
@@ -38,6 +39,14 @@ function crypto(): NobleCrypto {
 
 /** Nostr event kind for wrapped Airplane events (custom range). */
 export const AIRPLANE_NOSTR_KIND = 30000;
+
+/**
+ * Max relay frame accepted before parsing, bytes. A wrapped event is at
+ * most about 8 KB of hex plus envelope overhead, so 64 KB cannot reject
+ * any legitimate frame; it only stops a relay from making the client
+ * parse and allocate multi-megabyte frames before any validation runs.
+ */
+export const MAX_RELAY_FRAME_BYTES = 65536;
 
 /** Tag marking the envelope as an Airplane wrapper. */
 export const AIRPLANE_TAG = ['airplane', '1'];
@@ -143,6 +152,8 @@ type ClientMsg = ['EVENT', NostrEvent] | ['REQ', string, object] | ['CLOSE', str
 export interface WebSocketLike {
   send(data: string): void;
   close(): void;
+  /** Optional WebSocket ping (not exposed by React Native WebSocket). */
+  ping?: () => void;
   onopen: ((ev: unknown) => void) | null;
   onmessage: ((ev: { data: string }) => void) | null;
   onerror: ((ev: unknown) => void) | null;
@@ -166,6 +177,35 @@ export interface NostrTransportOpts {
   reconnectMs?: number;
   /** Cap for the exponential reconnect backoff, ms. Default 60000. */
   reconnectMaxMs?: number;
+  /**
+   * Silence interval, ms. Default 90000. A socket that receives no frame
+   * for this long is force-closed and reconnected: a blackholed socket
+   * must not stay "open" forever. Where the socket offers ping, one ping
+   * is tried first with a short grace before the close.
+   */
+  silenceTimeoutMs?: number;
+  /** Relay NOTICE/CLOSED frames (relay URL, frame type, relay message). */
+  onRelayNotice?: (relayUrl: string, frame: 'NOTICE' | 'CLOSED', message: string) => void;
+  /**
+   * Relay AUTH challenges (NIP-42). The client does not authenticate
+   * yet; the challenge is surfaced so an auth-required failure is
+   * diagnosable instead of a generic publish timeout.
+   */
+  onAuthChallenge?: (relayUrl: string, challenge: string) => void;
+  /**
+   * Viewer geohash-5 cells in scope (own cell plus neighbours). When
+   * known, the subscribe filter narrows to `#g` for these cells; when
+   * absent, the filter stays global so coverage is never lost on a
+   * relay that ignores tag filters (the client still drops out-of-cell
+   * events at the feed layer).
+   */
+  cells?: string[];
+  /**
+   * Allow private-network relay targets. Default false: a non-app caller
+   * passing a private target gets it dropped. The app passes true for
+   * its Settings list, which the user added explicitly.
+   */
+  allowPrivateRelays?: boolean;
 }
 
 /** Connection state per relay. */
@@ -205,6 +245,20 @@ export class NostrTransport {
   private readonly keys: NostrKeypair;
   private readonly reconnectMs: number;
   private readonly reconnectMaxMs: number;
+  private readonly silenceTimeoutMs: number;
+  private readonly onRelayNotice: NostrTransportOpts['onRelayNotice'];
+  private readonly onAuthChallenge: NostrTransportOpts['onAuthChallenge'];
+  private subscribeCells: string[];
+  /** Time of the last main subscribe, for reconnect `since` bounds. */
+  private lastSubscribeAtSec: number | null = null;
+  /** Main subscription id per socket, for CLOSED-triggered resubscribe. */
+  private mainSubIds = new Map<WebSocketLike, string>();
+  /** Last inbound frame time per relay (liveness proof for silence detection). */
+  private lastFrameAtMs = new Map<string, number>();
+  /** Armed silence timer per relay. */
+  private silenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Relays already given one ping grace in the current silence window. */
+  private silencePinged = new Set<string>();
   private sockets = new Map<string, WebSocketLike>();
   private states = new Map<string, RelayState>();
   private started = false;
@@ -216,9 +270,17 @@ export class NostrTransport {
   /** In-flight relay OK waiters, indexed by Nostr envelope id. */
   private okWaiters = new Map<string, Set<OkWaiter>>();
   private allOkWaiters = new Set<OkWaiter>();
+  /** One-shot queries awaiting EOSE, by subscription id. */
+  private pendingQueries = new Map<string, { filter: object; timer: ReturnType<typeof setTimeout> }>();
 
   constructor(opts: NostrTransportOpts = {}) {
-    this.relays = opts.relays ?? DEFAULT_RELAYS;
+    // Package-level validation: any caller inherits the scheme, host,
+    // credential, port, and private-target rules (invalid entries are
+    // dropped, case and port variants dedupe). Defaults are already valid.
+    this.relays =
+      opts.relays === undefined
+        ? [...DEFAULT_RELAYS]
+        : sanitizeRelayList(opts.relays, { allowPrivateRelays: opts.allowPrivateRelays });
     this.wsFactory =
       opts.wsFactory ??
       ((url: string) => {
@@ -228,6 +290,18 @@ export class NostrTransport {
     this.keys = opts.keys ?? generateNostrKeypair();
     this.reconnectMs = opts.reconnectMs ?? 5000;
     this.reconnectMaxMs = opts.reconnectMaxMs ?? 60000;
+    this.silenceTimeoutMs = opts.silenceTimeoutMs ?? 90000;
+    this.onRelayNotice = opts.onRelayNotice;
+    this.onAuthChallenge = opts.onAuthChallenge;
+    this.subscribeCells = [...(opts.cells ?? [])].filter((c) => c.length > 0);
+  }
+
+  /**
+   * Update the in-scope cells for future subscribes. The next reconnect
+   * narrows to these cells; an empty list restores the global filter.
+   */
+  setSubscribeCells(cells: string[]): void {
+    this.subscribeCells = [...cells].filter((c) => c.length > 0);
   }
 
   /** Relay URLs this transport manages. */
@@ -258,6 +332,10 @@ export class NostrTransport {
     this.started = false;
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
+    this.silenceTimers.clear();
+    this.lastFrameAtMs.clear();
+    this.silencePinged.clear();
+    this.mainSubIds.clear();
     this.reconnectAttempts.clear();
     // A stop must never leave a publish hanging on an OK that can no
     // longer arrive: resolve every waiter with no OK.
@@ -268,6 +346,7 @@ export class NostrTransport {
     }
     this.allOkWaiters.clear();
     this.okWaiters.clear();
+    this.pendingQueries.clear();
     for (const [url, ws] of this.sockets) {
       this.states.set(url, 'closed');
       try {
@@ -290,7 +369,15 @@ export class NostrTransport {
       return;
     }
     this.sockets.set(url, ws);
+    this.lastFrameAtMs.set(url, Date.now());
+    this.armSilenceTimer(url);
     ws.onopen = () => {
+      // A socket that opens after stop() must not resurrect the relay:
+      // the transport is stopped, so this open is stale and ignored.
+      if (!this.started) return;
+      this.lastFrameAtMs.set(url, Date.now());
+      this.silencePinged.delete(url);
+      this.armSilenceTimer(url);
       this.states.set(url, 'open');
       // A successful connection resets the backoff - the next drop starts
       // again from the base delay.
@@ -299,14 +386,78 @@ export class NostrTransport {
     };
     ws.onmessage = (ev) => this.handleMessage(url, ev.data);
     ws.onerror = () => {
-      // onclose follows; reconnect there
+      // Never assume onclose follows an error: close the socket, which
+      // drives the normal close path (and its reconnect). If this
+      // WebSocket implementation does not fire onclose for the close,
+      // run the close path directly so the relay is not stalled.
+      try {
+        ws.close();
+      } catch {
+        // fall through to the direct close path below
+      }
+      if (this.sockets.get(url) === ws) this.handleClose(url);
     };
-    ws.onclose = () => {
-      this.sockets.delete(url);
-      this.states.set(url, 'closed');
-      this.noteRelayGone(url);
-      this.scheduleReconnect(url);
-    };
+    ws.onclose = () => this.handleClose(url);
+  }
+
+  /** Arm (or re-arm) the silence timer for one relay. */
+  private armSilenceTimer(url: string, delayMs?: number): void {
+    const old = this.silenceTimers.get(url);
+    if (old) {
+      clearTimeout(old);
+      this.timers.delete(old);
+    }
+    const timer = setTimeout(() => {
+      this.silenceTimers.delete(url);
+      this.timers.delete(timer);
+      this.onSilenceTimeout(url);
+    }, delayMs ?? this.silenceTimeoutMs);
+    this.silenceTimers.set(url, timer);
+    this.timers.add(timer);
+  }
+
+  /** A relay went silent: ping once if possible, else close and reconnect. */
+  private onSilenceTimeout(url: string): void {
+    if (!this.started) return;
+    const ws = this.sockets.get(url);
+    if (!ws) return;
+    const last = this.lastFrameAtMs.get(url) ?? 0;
+    if (Date.now() - last < this.silenceTimeoutMs) {
+      this.armSilenceTimer(url);
+      return;
+    }
+    if (ws.ping && !this.silencePinged.has(url)) {
+      this.silencePinged.add(url);
+      try {
+        ws.ping();
+      } catch {
+        // ping failure is itself a liveness signal: fall through to close
+      }
+      // One short grace for the pong (or any frame) before closing.
+      this.armSilenceTimer(url, 10000);
+      return;
+    }
+    try {
+      ws.close();
+    } catch {
+      // fall through to the direct close path below
+    }
+    if (this.sockets.get(url) === ws) this.handleClose(url);
+  }
+
+  /** Shared close path for onclose and for errors without a close. */
+  private handleClose(url: string): void {
+    const timer = this.silenceTimers.get(url);
+    if (timer) {
+      clearTimeout(timer);
+      this.timers.delete(timer);
+      this.silenceTimers.delete(url);
+    }
+    this.silencePinged.delete(url);
+    this.sockets.delete(url);
+    this.states.set(url, 'closed');
+    this.noteRelayGone(url);
+    this.scheduleReconnect(url);
   }
 
   private scheduleReconnect(url: string): void {
@@ -346,7 +497,7 @@ export class NostrTransport {
     }
   }
 
-  /** Publish one event to all open relays. Returns URLs that accepted it. */
+  /** Publish one event to all open relays. Returns URLs the envelope was sent to (no acceptance waited for); use publishWithAck when acceptance matters. */
   async publish(event: SignedEvent): Promise<string[]> {
     const envelope = wrapEvent(event, this.keys);
     const msg: ClientMsg = ['EVENT', envelope];
@@ -449,38 +600,82 @@ export class NostrTransport {
   }
 
   /**
-   * Query relays for specific event IDs (Nostr REQ with `ids` filter).
-   * Responses arrive via onReceive; matches our wrapped events by the `e` tag.
+   * Query relays for specific event IDs (Nostr REQ with an `#e` filter).
+   * Responses arrive via onReceive; matches our wrapped events by the `e`
+   * tag. Returns true when the query reached at least one open relay.
+   * An empty id list is rejected early (no REQ is sent). The subscription
+   * closes on EOSE, with the 5s timer only as a fallback cap, and a
+   * query still awaiting EOSE is re-issued when a socket reconnects.
    */
-  async queryByIds(eventIdsHex: Hex64[]): Promise<void> {
-    if (eventIdsHex.length === 0) return;
+  async queryByIds(eventIdsHex: Hex64[]): Promise<boolean> {
+    if (eventIdsHex.length === 0) return false;
     const subId = `q${++this.subIdCounter}`;
-    const filter = { ids: [] as string[], kinds: [AIRPLANE_NOSTR_KIND], '#e': eventIdsHex };
     // Note: we filter by our event IDs via the `e` tag (Nostr `ids` would
-    // match the *envelope* id, which differs per publisher).
+    // match the *envelope* id, which differs per publisher), so no `ids`
+    // entry is sent at all: an empty `ids` array risks a strict relay
+    // matching nothing.
+    const filter = { kinds: [AIRPLANE_NOSTR_KIND], '#e': eventIdsHex };
     const msg: ClientMsg = ['REQ', subId, filter];
-    for (const url of this.relays) this.sendMsg(url, msg);
-    // Close the subscription shortly after; relays send EOSE then matching
-    // EVENTs. We keep it simple: one-shot query, close after 5s.
+    let sent = false;
+    for (const url of this.relays) if (this.sendMsg(url, msg)) sent = true;
+    if (!sent) return false;
     const timer = setTimeout(() => {
-      this.timers.delete(timer);
-      for (const url of this.relays) this.sendMsg(url, ['CLOSE', subId]);
+      this.closeQuery(subId);
     }, 5000);
     this.timers.add(timer);
+    this.pendingQueries.set(subId, { filter, timer });
+    return true;
+  }
+
+  /** Close one pending query (on EOSE or on the fallback timer). */
+  private closeQuery(subId: string): void {
+    const pending = this.pendingQueries.get(subId);
+    if (!pending) return;
+    this.pendingQueries.delete(subId);
+    clearTimeout(pending.timer);
+    this.timers.delete(pending.timer);
+    for (const url of this.relays) this.sendMsg(url, ['CLOSE', subId]);
   }
 
   /** Subscribe to new Airplane events from all open relays. */
   private resubscribe(ws: WebSocketLike): void {
     const subId = `sub${++this.subIdCounter}`;
-    const msg: ClientMsg = ['REQ', subId, { kinds: [AIRPLANE_NOSTR_KIND], since: Math.floor(Date.now() / 1000) - 86400 }];
+    this.mainSubIds.set(ws, subId);
+    const nowSec = Math.floor(Date.now() / 1000);
+    // First subscribe replays the last 24h. A reconnect replays only
+    // since the previous subscribe (capped at 24h back), never the
+    // whole window again: reconnects must not replay-everything.
+    const since = this.lastSubscribeAtSec === null
+      ? nowSec - 86400
+      : Math.max(this.lastSubscribeAtSec, nowSec - 86400);
+    this.lastSubscribeAtSec = nowSec;
+    const filter: Record<string, unknown> = { kinds: [AIRPLANE_NOSTR_KIND], since, limit: 500 };
+    if (this.subscribeCells.length > 0) filter['#g'] = [...this.subscribeCells];
+    const msg: ClientMsg = ['REQ', subId, filter];
     try {
       ws.send(JSON.stringify(msg));
     } catch {
       // will retry on reconnect
     }
+    // Re-issue any query still awaiting EOSE on this reconnected socket.
+    for (const [queryId, pending] of this.pendingQueries) {
+      try {
+        ws.send(JSON.stringify(['REQ', queryId, pending.filter] as ClientMsg));
+      } catch {
+        // will retry on the next reconnect
+      }
+    }
   }
 
   private handleMessage(relayUrl: string, data: string): void {
+    if (!this.started) return;
+    // Size gate BEFORE parsing: a hostile frame must not cost a parse
+    // and an allocation before the first validation runs.
+    if (data.length > MAX_RELAY_FRAME_BYTES) return;
+    // Any frame proves the socket is alive: reset the silence window.
+    this.lastFrameAtMs.set(relayUrl, Date.now());
+    this.silencePinged.delete(relayUrl);
+    this.armSilenceTimer(relayUrl);
     let msg: unknown[];
     try {
       msg = JSON.parse(data) as unknown[];
@@ -491,6 +686,36 @@ export class NostrTransport {
     // Relay acknowledgement for a published envelope: ["OK", id, accepted, message].
     if (msg[0] === 'OK') {
       this.handleOk(relayUrl, msg[1], msg[2]);
+      return;
+    }
+    // End of stored events for a one-shot query: close it now instead
+    // of waiting out the fallback timer. EOSE for the main subscription
+    // is the normal end of stored events, not an error: nothing to do.
+    if (msg[0] === 'EOSE') {
+      if (typeof msg[1] === 'string') this.closeQuery(msg[1]);
+      return;
+    }
+    // Relay notices (rate limits, bans, errors) are surfaced, never
+    // silently dropped: they explain otherwise generic failures.
+    if (msg[0] === 'NOTICE') {
+      if (typeof msg[1] === 'string') this.onRelayNotice?.(relayUrl, 'NOTICE', msg[1].slice(0, 200));
+      return;
+    }
+    // The relay killed a subscription: log it and, for the main
+    // subscription, resubscribe on the same socket at once.
+    if (msg[0] === 'CLOSED') {
+      if (typeof msg[1] === 'string') {
+        if (typeof msg[2] === 'string') this.onRelayNotice?.(relayUrl, 'CLOSED', msg[2].slice(0, 200));
+        if (this.pendingQueries.has(msg[1])) this.closeQuery(msg[1]);
+        const ws = this.sockets.get(relayUrl);
+        if (ws && this.mainSubIds.get(ws) === msg[1] && this.started) this.resubscribe(ws);
+      }
+      return;
+    }
+    // Auth challenge (NIP-42): surfaced, not answered. Without this
+    // branch an auth-required relay just produced generic timeouts.
+    if (msg[0] === 'AUTH') {
+      if (typeof msg[1] === 'string') this.onAuthChallenge?.(relayUrl, msg[1].slice(0, 200));
       return;
     }
     if (msg[0] !== 'EVENT') return;

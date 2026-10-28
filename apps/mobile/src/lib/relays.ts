@@ -36,14 +36,65 @@ export const DEFAULT_RELAYS: string[] = [
  * relay address. Only secure WebSockets are accepted: a ws:// relay would
  * send wrapped (still signed) posts in the clear over the local network path.
  * Trailing slashes are stripped so the same relay entered two ways dedupes.
+ * Also enforced, mirroring the package validator: no embedded credentials,
+ * a sane host (domain or IP literal, no underscores), a sane port
+ * (1-65535, default 443 dropped), and a canonical lowercase host so
+ * case and port variants of one relay dedupe. Private targets ARE allowed
+ * here: this list is explicitly user-added in Settings, and the package
+ * layer's private-target drop applies to non-explicit callers.
  */
 export function normalizeRelayUrl(input: string): string | null {
-  const url = input.trim().replace(/\/+$/, '');
-  if (!url.startsWith('wss://')) return null;
-  if (url.length <= 'wss://'.length) return null;
-  // Reject anything with whitespace or a second scheme-looking fragment.
-  if (/\s/.test(url)) return null;
-  return url;
+  const trimmed = input.trim().replace(/\/+$/, '');
+  if (trimmed.length === 0 || /\s/.test(trimmed)) return null;
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'wss:') return null;
+  if (url.username !== '' || url.password !== '') return null;
+  const host = url.hostname.toLowerCase();
+  if (!host || host.includes('_') || host.length > 253) return null;
+  if (!host.includes(':')) {
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+      if (
+        !host.split('.').every((p) => {
+          const n = Number(p);
+          return Number.isInteger(n) && n >= 0 && n <= 255 && p === String(n);
+        })
+      ) {
+        return null;
+      }
+    } else if (
+      !host.split('.').every((label) => {
+        return label.length >= 1 && label.length <= 63 && /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label);
+      })
+    ) {
+      return null;
+    }
+  }
+  const authority = trimmed.slice('wss://'.length).split('/')[0];
+  const hostport = authority.includes('@') ? authority.slice(authority.lastIndexOf('@') + 1) : authority;
+  let portText = '';
+  if (hostport.startsWith('[')) {
+    const close = hostport.indexOf(']');
+    if (close === -1) return null;
+    const rest = hostport.slice(close + 1);
+    if (rest.startsWith(':')) portText = rest.slice(1);
+    else if (rest !== '') return null;
+  } else if (hostport.includes(':')) {
+    portText = hostport.slice(hostport.lastIndexOf(':') + 1);
+  }
+  let portSuffix = '';
+  if (portText !== '') {
+    if (!/^\d+$/.test(portText)) return null;
+    const port = Number(portText);
+    if (port < 1 || port > 65535) return null;
+    if (port !== 443) portSuffix = `:${port}`;
+  }
+  const path = url.pathname === '/' ? '' : url.pathname.replace(/\/+$/, '');
+  return `wss://${host}${portSuffix}${path}`;
 }
 
 /** Dedupe (preserving first-seen order) and drop invalid entries. */
@@ -120,7 +171,10 @@ export async function resetRelayUrls(): Promise<void> {
  */
 export function addRelayUrl(current: readonly string[], input: string): string[] | null {
   const url = normalizeRelayUrl(input);
-  if (url === null || current.includes(url)) return null;
+  if (url === null) return null;
+  // Compare canonical forms: a case or default-port variant of an
+  // existing relay is a duplicate, not a new entry.
+  if (current.some((c) => normalizeRelayUrl(c) === url)) return null;
   return [...current, url];
 }
 

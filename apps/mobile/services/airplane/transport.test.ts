@@ -32,6 +32,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 import NetInfo from '@react-native-community/netinfo';
 import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus } from './transport';
 import { getStore, __resetStoreForTests } from './store';
+import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
 import {
   __resetResharesForTests,
@@ -39,7 +40,7 @@ import {
   reshareViewFor,
   toggleReshare,
 } from './reshares';
-import { NobleCrypto, createReshare, fromHex } from '@airplane/protocol';
+import { NobleCrypto, createReshare, fromHex, toHex } from '@airplane/protocol';
 import type { PostCardModel } from './types';
 import { DEFAULT_RELAYS, RELAYS_KEY } from '../../src/lib/relays';
 
@@ -207,6 +208,46 @@ describe('transport manager', () => {
     expect(result).toHaveProperty('blePeers');
     expect(result).toHaveProperty('relays');
     expect(Array.isArray(result.relays)).toBe(true);
+  });
+
+  test('a relay win marks the post World-confirmed at publish time', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const event = makeSignedEvent();
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'relay',
+      status: 'relayed',
+      blePeers: 0,
+      relays: ['wss://test.relay'],
+      relayTried: true,
+      relayDetail: null,
+    });
+    await publishViaTransport(event);
+    expect(await getStore().isWorldConfirmed(toHex(event.id))).toBe(true);
+  });
+
+  test('an inbound burst coalesces to a single feed notify', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    let count = 0;
+    const unsub = subscribeFeed(() => {
+      count++;
+    });
+    for (let i = 0; i < 3; i++) {
+      const event = makeSignedEvent();
+      event.id = new Uint8Array(32).fill(10 + i);
+      hybrid!.ingress(event, 'nostr');
+    }
+    // Let the async handleIncoming runs reach the coalescing timer.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(count).toBe(0);
+    jest.advanceTimersByTime(250);
+    expect(count).toBe(1);
+    unsub();
   });
 
   test('online event schedules the periodic sync timer exactly once', async () => {
@@ -380,6 +421,42 @@ describe('transport manager', () => {
     const stored = await getStore().listReshareEvents();
     expect(stored).toHaveLength(1);
     expect(await getStore().getEvent(postId)).not.toBeNull();
+  });
+
+  test('an offline pull does not block retry: pulled is marked only on query success', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const crypto = new NobleCrypto();
+    const other = crypto.generateKeypair();
+    const postId = 'e'.repeat(64);
+    const author = 'a'.repeat(64);
+    const mkReshare = (createdAt: number) =>
+      createReshare({
+        crypto,
+        secretKey: other.secretKey,
+        pubkey: other.publicKey,
+        geohash5: 'tdr1v',
+        originalPostId: fromHex(postId),
+        originalAuthorPubkey: fromHex(author),
+        createdAt,
+      });
+    const querySpy = jest
+      .spyOn(hybrid!.nostr, 'queryByIds')
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    hybrid!.ingress(mkReshare(1_700_000_001), 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(querySpy).toHaveBeenCalledTimes(1);
+    // A second reshare for the same still-unknown post retries the pull:
+    // the first, offline pull did not mark it pulled for the launch.
+    hybrid!.ingress(mkReshare(1_700_000_002), 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(querySpy).toHaveBeenCalledTimes(2);
+    // And now that a query succeeded, a third reshare does not re-pull.
+    hybrid!.ingress(mkReshare(1_700_000_003), 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(querySpy).toHaveBeenCalledTimes(2);
   });
 
   test('own reshare published via publishViaTransport echoes locally as a duplicate, not a double count', async () => {

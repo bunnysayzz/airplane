@@ -171,6 +171,36 @@ describe('counting: one per key, dedup across transports', () => {
   });
 });
 
+describe('counting dedup cap', () => {
+  test('the seen set is LRU-capped: the oldest id evicts past 10000', () => {
+    const counter = new ReshareCounter();
+    const originalId = bytes32(21);
+    counter.markPostKnown(toHex(originalId));
+    const pubkey = new Uint8Array(32).fill(7);
+    const fake = (n: number): SignedEvent => {
+      const id = new Uint8Array(32);
+      id[0] = (n >> 24) & 0xff;
+      id[1] = (n >> 16) & 0xff;
+      id[2] = (n >> 8) & 0xff;
+      id[3] = n & 0xff;
+      return {
+        id,
+        pubkey,
+        created_at: 1000 + n,
+        kind: EVENT_KIND_RESHARE,
+        geohash: GEOHASH,
+        tags: [['e', toHex(originalId)]],
+        content: '',
+        sig: new Uint8Array(64),
+      };
+    };
+    const first = fake(0);
+    expect(counter.add(first, () => true)).toBe('counted');
+    for (let n = 1; n <= 10000; n++) counter.add(fake(n), () => true);
+    expect(counter.add(first, () => true)).not.toBe('duplicate');
+  });
+});
+
 describe('latest-wins undo, including out-of-order arrival', () => {
   test('unreshare drops the count; a late older reshare cannot resurrect it', () => {
     const author = keypair();

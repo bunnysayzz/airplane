@@ -66,16 +66,16 @@ describe('publishPost stage tagging', () => {
     saveSpy.mockRestore();
   });
 
-  test('notify failure throws PublishError with stage notify, after the event is saved', async () => {
+  test('a throwing feed listener no longer fails the publish (guarded notify)', async () => {
     subscribeFeed(() => {
       throw new Error('listener boom');
     });
-    const err = await publishPost('stage test', {
+    const id = await publishPost('stage test', {
       geohash5: 'tdr1v',
-    }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(PublishError);
-    expect((err as PublishError).stage).toBe('notify');
-    // The post landed in the store before notify threw.
+    });
+    expect(id).toMatch(/^[0-9a-f]{64}$/);
+    // The post landed in the store; the listener failure is swallowed by
+    // the guarded notify, not reported as a publish failure.
     expect(await getStore().listFeed({ cells: ['tdr1v'], limit: 50 })).toHaveLength(1);
   });
 

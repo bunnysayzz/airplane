@@ -36,6 +36,8 @@ class FakeConfirmStore implements WorldConfirmStore {
 /** Mock NostrTransport: controllable online state, records publishes. */
 class FakeNostr {
   online = true;
+  /** When false, sends succeed but no relay ever OKs (silent drop). */
+  ackOk = true;
   published: SignedEvent[] = [];
   queried: Hex64[][] = [];
 
@@ -43,6 +45,14 @@ class FakeNostr {
     if (!this.online) return [];
     this.published.push(event);
     return ['wss://mock.relay'];
+  }
+
+  async publishWithAck(event: SignedEvent): Promise<{ ok: string[]; rejected: string[]; timedOut: boolean }> {
+    if (!this.online) return { ok: [], rejected: [], timedOut: false };
+    this.published.push(event);
+    return this.ackOk
+      ? { ok: ['wss://mock.relay'], rejected: [], timedOut: false }
+      : { ok: [], rejected: [], timedOut: true };
   }
 
   async queryByIds(ids: Hex64[]): Promise<void> {
@@ -137,6 +147,21 @@ describe('WorldSync', () => {
     expect(seen).toEqual(['nostr', 'ble']);
   });
 
+  test('confirmListener forwards even when the confirmation write fails', async () => {
+    const store = new FakeConfirmStore();
+    store.markWorldConfirmed = async () => {
+      throw new Error('store gone');
+    };
+    const nostr = new FakeNostr();
+    const sync = new WorldSync(nostr as never, store);
+    const forwarded: string[] = [];
+    const wrapped = sync.confirmListener((e, source) => {
+      forwarded.push(source);
+    });
+    await expect(wrapped(makePost('deliver anyway'), 'nostr')).resolves.toBeUndefined();
+    expect(forwarded).toEqual(['nostr']);
+  });
+
   test('markConfirmed is sticky and idempotent', async () => {
     const store = new FakeConfirmStore();
     const nostr = new FakeNostr();
@@ -161,6 +186,39 @@ describe('WorldSync', () => {
     const report2 = await sync.sync();
     expect(report2.pushed).toEqual([]);
     expect(nostr.published).toHaveLength(1); // only the first run published
+  });
+
+  test('concurrent sync calls share one in-flight pass, not two pushes', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    const sync = new WorldSync(nostr as never, store);
+    store.add(makePost('overlap 1'));
+    store.add(makePost('overlap 2'));
+    const [r1, r2] = await Promise.all([sync.sync(), sync.sync()]);
+    expect(r1.pushed).toEqual(r2.pushed);
+    expect(nostr.published).toHaveLength(2);
+    expect(nostr.queried).toHaveLength(1);
+  });
+
+  test('a pass is bounded: a backlog larger than the cap waits for later passes', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    const sync = new WorldSync(nostr as never, store);
+    for (let i = 0; i < 60; i++) store.add(makePost(`backlog ${i}`));
+    const report = await sync.sync();
+    expect(report.pushed).toHaveLength(50);
+    expect(nostr.queried[0]).toHaveLength(50);
+  });
+
+  test('send success without a relay OK is not reported as pushed', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    nostr.ackOk = false;
+    const sync = new WorldSync(nostr as never, store);
+    const id = store.add(makePost('silent drop'));
+    const report = await sync.sync();
+    expect(report.pushed).toEqual([]);
+    expect(nostr.queried[0]).toContain(id);
   });
 
   test('confirmation persists across WorldSync restarts sharing a store', async () => {

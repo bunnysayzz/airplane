@@ -7,6 +7,7 @@ import { ComposeOpenContext } from '../../components/ComposeModal/composeContext
 import { BlePrime } from '../../components/BlePrime/blePrime';
 import { useTheme } from '../../src/theme/themeContext';
 import { resolveFeedCells } from '../../services/airplane/feedCells';
+import { setRelaySubscribeCells } from '../../services/airplane/transport';
 import { subscribeFeed } from '../../services/airplane/feed';
 import { isDoublePush } from '../../src/lib/navGuard';
 
@@ -53,6 +54,9 @@ export default function FeedTab() {
         if (key !== cellsKeyRef.current) {
             cellsKeyRef.current = key;
             setCells(next);
+            // Narrow the relay subscribe filter to these cells on the
+            // next reconnect; the feed query itself is unchanged.
+            if (next.length > 0) setRelaySubscribeCells(next);
         }
         // A real scope was just resolved; the subscribe path below may now
         // skip re-resolution for a while (see lastScopedResolveAtRef).

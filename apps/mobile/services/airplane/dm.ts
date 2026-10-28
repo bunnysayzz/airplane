@@ -24,6 +24,7 @@ import {
   dmToHex,
 } from '@airplane/transport';
 import { getDeviceKeypair, onIdentityChange } from './identity';
+import { loadRelayUrls } from '../../src/lib/relays';
 
 let service: DmService | null = null;
 let servicePromise: Promise<DmService> | null = null;
@@ -47,7 +48,9 @@ export async function getDmService(): Promise<DmService> {
     const ownHex = dmToHex(kp.publicKey);
     const svc = new DmService({
       store: new MemoryDmStore(),
-      relay: new WsDmRelay(),
+      // Same configured list as the post path: DMs must not silently
+      // keep using package defaults the user removed in Settings.
+      relay: new WsDmRelay({ relays: await loadRelayUrls(), allowPrivateRelays: true }),
       ownKeys: () => dmKeypairFromDeviceSecret(kp.secretKey),
       ownMeshHex: () => ownHex,
     });

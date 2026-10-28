@@ -280,8 +280,14 @@ export function subscribeFeed(cb: FeedListener): () => void {
 
 /** Notify all subscribers that the feed changed. */
 export function notifyFeedListeners(): void {
-  for (const cb of listeners) {
-    cb();
+  // One throwing listener must not break the rest of the chain
+  // (matching the Diagnostics collector's notify).
+  for (const cb of [...listeners]) {
+    try {
+      cb();
+    } catch {
+      // listener failure is local to that subscriber
+    }
   }
 }
 

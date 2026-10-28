@@ -15,12 +15,15 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { dmToHex, type DmEnvelope } from './dm';
 import type { DmRelayPort } from './dmService';
 import { DEFAULT_RELAYS, type WebSocketLike } from './nostr';
+import { sanitizeRelayList } from './relayUrls';
 
 export interface WsDmRelayOpts {
   relays?: string[];
   wsFactory?: (url: string) => WebSocketLike;
   /** Per-attempt publish timeout, ms. Default 10000. */
   publishTimeoutMs?: number;
+  /** Allow private-network relay targets (explicit user-added list). */
+  allowPrivateRelays?: boolean;
 }
 
 interface NostrDmEvent {
@@ -76,7 +79,10 @@ export class WsDmRelay implements DmRelayPort {
   private subSockets: WebSocketLike[] = [];
 
   constructor(opts: WsDmRelayOpts = {}) {
-    this.relays = opts.relays ?? DEFAULT_RELAYS;
+    this.relays =
+      opts.relays === undefined
+        ? [...DEFAULT_RELAYS]
+        : sanitizeRelayList(opts.relays, { allowPrivateRelays: opts.allowPrivateRelays });
     this.wsFactory =
       opts.wsFactory ??
       ((url: string) => {
@@ -151,7 +157,15 @@ export class WsDmRelay implements DmRelayPort {
 
   /** Open one subscription per relay for kind-1059 events addressed to ownHex. */
   subscribe(ownMeshHex: string, onEnvelope: (e: DmEnvelope) => void): () => void {
-    const filter = JSON.stringify({ kinds: [1059], '#p': [ownMeshHex] });
+    // Bounded replay: the last 24h, not the relay's full stored history
+    // for this recipient on every fresh subscribe. No limit is set: a
+    // limit could silently truncate the newest events without an
+    // ordering guarantee from the relay.
+    const filter = JSON.stringify({
+      kinds: [1059],
+      '#p': [ownMeshHex],
+      since: Math.floor(Date.now() / 1000) - 86400,
+    });
     const sockets: WebSocketLike[] = [];
     for (const url of this.relays) {
       try {

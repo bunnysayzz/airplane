@@ -27,6 +27,9 @@ export type { HybridTransportOpts, HybridDiagnosticsOpts, IngressSource, RouterO
 export { WorldSync } from './sync';
 export type { SyncReport, WorldConfirmStore } from './sync';
 
+export { normalizeRelayUrl, sanitizeRelayList } from './relayUrls';
+export type { RelayUrlOpts } from './relayUrls';
+
 export {
   DM_TEXT_MAX_BYTES,
   DM_MAX_ATTEMPTS,

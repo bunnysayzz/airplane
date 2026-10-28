@@ -135,10 +135,13 @@ export class BleTransport {
    * The event is fragmented to each peer's port frame size (MTU-aware);
    * every frame goes through port.send() which must fit the link MTU.
    * Marks the id seen so our own broadcast isn't re-emitted on receipt.
+   * Returns the count of peers that completed without error, so the
+   * router can tell "sent to N peers" from "failed on every peer".
    */
-  async broadcast(event: SignedEvent, peerIds: string[]): Promise<void> {
+  async broadcast(event: SignedEvent, peerIds: string[]): Promise<number> {
     const bytes = encodeEvent(event);
     this.seen.add(toHex(event.id));
+    let sent = 0;
     for (const peerId of peerIds) {
       try {
         const frameSize = this.port.frameSizeFor?.(peerId) ?? FRAG_WIRE_MAX;
@@ -146,11 +149,13 @@ export class BleTransport {
         for (const frame of frames) {
           await this.port.send(peerId, frame);
         }
+        sent += 1;
       } catch {
         // per-peer send failures are non-fatal (peer may have dropped,
         // or the port reported an unusable frame size)
       }
     }
+    return sent;
   }
 
   /** Has this event id been seen on BLE (sent or received)? */
@@ -289,14 +294,29 @@ export class HybridTransport {
       this.diagnosticsOpts?.onDedupDrop?.(source, peerId ?? null);
       return false;
     }
-    this.seen.add(idHex);
+    // Seen is marked only on successful delivery: a handler that throws
+    // leaves the event unmarked, so a redelivery can retry it instead of
+    // being dropped as a duplicate of a delivery that never happened.
+    let syncFailed = false;
     for (const h of this.handlers) {
       try {
-        h(event, source);
+        // The handler type is sync, but a handler may return a promise
+        // (confirmListener is async): a rejection must be caught here,
+        // since the sync try/catch above cannot catch an async rejection,
+        // and it unmarks the event so a redelivery can retry.
+        const result = h(event, source) as unknown;
+        if (result && typeof (result as { catch?: unknown }).catch === 'function') {
+          (result as Promise<void>).catch(() => {
+            this.seen.delete(idHex);
+          });
+        }
       } catch {
-        // handler errors must not break the transport
+        syncFailed = true;
+        // handler errors must not break the transport: later handlers
+        // still run, but the event is not marked seen
       }
     }
+    if (!syncFailed) this.seen.add(idHex);
     return true;
   }
 
@@ -381,11 +401,21 @@ export class HybridTransport {
         relayDetail: relay.detail,
       };
     }
-    await this.ble.broadcast(event, blePeerIds);
+    const sent = await this.ble.broadcast(event, blePeerIds);
+    if (sent === 0) {
+      return {
+        transport: 'none',
+        status: 'queued',
+        blePeers: 0,
+        relays: [],
+        relayTried: relay.tried,
+        relayDetail: relay.detail,
+      };
+    }
     return {
       transport: 'mesh',
       status: 'sent',
-      blePeers: blePeerIds.length,
+      blePeers: sent,
       relays: [],
       relayTried: relay.tried,
       relayDetail: relay.detail,
