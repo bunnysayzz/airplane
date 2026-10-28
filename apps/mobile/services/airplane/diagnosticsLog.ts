@@ -67,6 +67,13 @@ export function rotateDiagnosticsLogLines(lines: string[]): string[] {
  * Appends that land while the file is still loading are buffered and
  * drained in order once the read finishes, so the load can never wipe
  * lines that arrived during its own async window.
+ * Sink appends (via appendCoalesced) are coalesced on the same trailing
+ * 250ms window as the collector notify throttle: lines arriving in a
+ * burst are held and written once, and per-chunk frame lines are
+ * collapsed to one summary line per peer per window with the fragment
+ * counts summed. The collector snapshot counters stay exact; only the
+ * file lines are coalesced. flush() always drains the coalesced
+ * queue first, so share and background paths never miss the tail.
  */
 export interface DiagnosticsLogWriteStatus {
   /** Null until the first write attempt finishes. */
@@ -91,6 +98,18 @@ export class DiagnosticsLogWriter {
   /** Null until load() finishes; false when the file could not be read. */
   private loadOk: boolean | null = null;
   private lastWrite: DiagnosticsLogWriteStatus = { ok: null, atMs: null, error: null };
+  /**
+   * Sink coalescing queue (P1-21). Fragment entries aggregate by peer
+   * label and direction; plain entries pass through in order.
+   */
+  private coalesced: Array<{
+    label: string | null;
+    direction: string | null;
+    prefix: string | null;
+    count: number;
+    plain: string | null;
+  }> = [];
+  private coalesceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(port: DiagnosticsLogFilePort) {
     this.port = port;
@@ -162,6 +181,59 @@ export class DiagnosticsLogWriter {
     return [...this.lines];
   }
 
+  /**
+   * Coalesced sink append: hold the line for at most one trailing
+   * 250ms window, collapsing per-chunk fragment lines for the same
+   * peer and direction into a single summed summary line. Falls back
+   * to the plain append path while the file is still loading, so the
+   * load buffer contract still holds.
+   */
+  appendCoalesced(line: string): void {
+    if (!this.loadComplete) {
+      this.append(line);
+      return;
+    }
+    const fragment = /^(\S+ frames \S+) (fragments-sent|fragments-received) (\d+)$/.exec(line);
+    if (fragment) {
+      const [, prefix, direction, countText] = fragment;
+      const label = prefix.split(' ').pop() ?? prefix;
+      const existing = this.coalesced.find(
+        (entry) => entry.label === label && entry.direction === direction,
+      );
+      if (existing) {
+        existing.count += Number(countText);
+      } else {
+        this.coalesced.push({ label, direction, prefix, count: Number(countText), plain: null });
+      }
+    } else {
+      this.coalesced.push({ label: null, direction: null, prefix: null, count: 0, plain: line });
+    }
+    if (this.coalesceTimer === null) {
+      this.coalesceTimer = setTimeout(() => {
+        this.coalesceTimer = null;
+        this.drainCoalesced();
+        void this.flush();
+      }, DIAGNOSTICS_LOG_SINK_THROTTLE_MS);
+    }
+  }
+
+  /** Move coalesced lines into the line list, preserving order. */
+  private drainCoalesced(): void {
+    if (this.coalesceTimer !== null) {
+      clearTimeout(this.coalesceTimer);
+      this.coalesceTimer = null;
+    }
+    const queued = this.coalesced;
+    this.coalesced = [];
+    for (const entry of queued) {
+      if (entry.plain !== null) {
+        this.pushLine(entry.plain);
+      } else if (entry.prefix !== null && entry.direction !== null) {
+        this.pushLine(`${entry.prefix} ${entry.direction} ${entry.count}`);
+      }
+    }
+  }
+
   append(line: string): void {
     if (!this.loadComplete) {
       // The file is still loading: buffer, do not drop, and do not let
@@ -178,6 +250,9 @@ export class DiagnosticsLogWriter {
   }
 
   async flush(): Promise<void> {
+    // Coalesced sink lines belong in this flush, not the next one:
+    // drain them into the line list before deciding anything else.
+    this.drainCoalesced();
     if (this.flushing) {
       this.dirty = true;
       return;
@@ -217,14 +292,19 @@ export class DiagnosticsLogWriter {
   }
 }
 
+/** Trailing coalescing window for sink appends, matching the notify throttle. */
+const DIAGNOSTICS_LOG_SINK_THROTTLE_MS = 250;
+
 /**
  * Attach a writer as the collector sink. From this point every
  * collector event becomes one timestamped log line, with no call-site
- * changes beyond the hooks already in diagnostics.ts.
+ * changes beyond the hooks already in diagnostics.ts. Lines go through
+ * the coalesced append path, so per-chunk bursts cost one write per
+ * window instead of one write per chunk.
  */
 export function attachDiagnosticsLogWriter(writer: DiagnosticsLogWriter): void {
   setDiagnosticsLogSink((kind: string, detail: string) => {
-    writer.append(formatDiagnosticsLogLine(Date.now(), kind, detail));
+    writer.appendCoalesced(formatDiagnosticsLogLine(Date.now(), kind, detail));
   });
 }
 

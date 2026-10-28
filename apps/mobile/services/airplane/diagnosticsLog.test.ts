@@ -13,6 +13,7 @@ import {
   type DiagnosticsLogFilePort,
 } from './diagnosticsLog';
 import {
+  getDiagnosticsSnapshot,
   recordAdvertiseFailure,
   recordDedupDrop,
   recordFragmentsReceived,
@@ -251,5 +252,42 @@ describe('diagnostics log sink wiring and privacy', () => {
     // The snapshot still keys the peer by the full id; only the log
     // label is redacted.
     expect(joined).not.toContain('disconnected ' + fullId);
+  });
+
+  test('sink coalesces per-chunk frame lines into one summed summary line', async () => {
+    const port = memoryPort();
+    const writer = new DiagnosticsLogWriter(port);
+    await writer.load();
+    attachDiagnosticsLogWriter(writer);
+
+    recordFragmentsReceived('tag:0123456789abcdef', 2);
+    recordFragmentsReceived('tag:0123456789abcdef', 3);
+    recordFragmentsReceived('tag:0123456789abcdef', 1);
+    recordFragmentsSent('tag:0123456789abcdef', 4);
+    await writer.flush();
+
+    const lines = writer.getLines();
+    const received = lines.filter((l) => l.includes('fragments-received'));
+    const sent = lines.filter((l) => l.includes('fragments-sent'));
+    expect(received).toHaveLength(1);
+    expect(received[0]).toContain('fragments-received 6');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain('fragments-sent 4');
+    // Snapshot counters stay exact: coalescing only affects file lines.
+    const peer = getDiagnosticsSnapshot().peers.find((p) => p.peerId === 'tag:0123456789abcdef');
+    expect(peer?.frames.fragmentsReceived).toBe(6);
+    expect(peer?.frames.fragmentsSent).toBe(4);
+  });
+
+  test('coalesced sink lines land on the trailing window without an explicit flush', async () => {
+    const port = memoryPort();
+    const writer = new DiagnosticsLogWriter(port);
+    await writer.load();
+    attachDiagnosticsLogWriter(writer);
+
+    recordAdvertiseFailure('window test failure');
+    expect(writer.getLines()).toHaveLength(0);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(writer.getLines().some((l) => l.includes('window test failure'))).toBe(true);
   });
 });
