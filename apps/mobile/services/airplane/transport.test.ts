@@ -419,6 +419,18 @@ describe('transport manager', () => {
     await startTransport();
     const postId = 'd'.repeat(64);
     markResharePostKnown(postId);
+    // The toggle requires a stored kind-1 post; seed it (the point of
+    // this test is the publish echo dedup, not toggle validation).
+    await getStore().saveEvent({
+      id: fromHex(postId),
+      pubkey: fromHex('a'.repeat(64)),
+      created_at: Math.floor(Date.now() / 1000),
+      kind: 1,
+      geohash: 'tdr1v',
+      tags: [],
+      content: 'seed post',
+      sig: new Uint8Array(64),
+    });
     const card: PostCardModel = {
       eventId: postId,
       createdAtMs: Date.now(),

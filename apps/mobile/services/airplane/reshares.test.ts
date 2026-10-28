@@ -39,10 +39,20 @@ function makeCard(postId: string): PostCardModel {
   };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   __resetResharesForTests();
   __resetDeviceKeypairForTests();
   __resetStoreForTests();
+  await getStore().saveEvent({
+    id: fromHex(POST),
+    pubkey: fromHex(AUTHOR),
+    created_at: Math.floor(Date.now() / 1000),
+    kind: 1,
+    geohash: 'tdr1v',
+    tags: [],
+    content: 'seed post',
+    sig: new Uint8Array(64),
+  });
 });
 
 afterEach(() => {
@@ -93,6 +103,22 @@ describe('toggleReshare (optimistic own reshare)', () => {
     await expect(toggleReshare(card, { publish: jest.fn() })).rejects.toThrow(
       /authorPubkeyHex/,
     );
+  });
+
+  test('toggle rejects an unknown or malformed post id without publishing', async () => {
+    const publish = jest.fn();
+    await expect(toggleReshare(makeCard('c'.repeat(64)), { publish })).rejects.toThrow(
+      /unknown post id/,
+    );
+    await expect(toggleReshare(makeCard('not-hex'), { publish })).rejects.toThrow(
+      /invalid post id/,
+    );
+    const badAuthor = makeCard(POST);
+    badAuthor.authorPubkeyHex = 'zz';
+    await expect(toggleReshare(badAuthor, { publish })).rejects.toThrow(
+      /invalid author pubkey/,
+    );
+    expect(publish).not.toHaveBeenCalled();
   });
 });
 

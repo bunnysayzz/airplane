@@ -31,6 +31,7 @@
 //   forbid self-stars is an open product decision, not settled here.
 
 import {
+  EVENT_KIND_POST,
   EVENT_KIND_STAR,
   STAR_CONTENT,
   StarCounter,
@@ -220,6 +221,17 @@ export async function toggleStar(
   const publicKey = await getDevicePublicKey();
   ownPubkeyHex = toHex(publicKey) as Hex64;
   const id = postIdHex.toLowerCase();
+  // Validate before any state change or publish: a malformed or unknown
+  // id previously produced a signed star for a phantom post and reported
+  // success even when the counter rejected it.
+  if (!/^[0-9a-f]{64}$/.test(id)) {
+    throw new Error('toggleStar: invalid post id');
+  }
+  const { getStore } = await import('./store');
+  const existing = await getStore().getEvent(id);
+  if (!existing || existing.kind !== EVENT_KIND_POST) {
+    throw new Error('toggleStar: unknown post id');
+  }
   // Hydrate first so the toggle reads the durable state, not just this
   // session's: without it, a restart could flip star to unstar backwards.
   // A hydration failure must not break starring, so it is swallowed here;
@@ -256,8 +268,12 @@ export async function toggleStar(
     content: currentlyStarred ? UNSTAR_CONTENT : STAR_CONTENT,
   });
   // Optimistic local apply: verified (we just signed it) and immediate,
-  // regardless of whether the flood/relay publish below succeeds.
-  counter.apply(event, (e) => verifyEvent(crypto, e));
+  // regardless of whether the flood/relay publish below succeeds. A
+  // rejected apply (invalid or unverified) is an error, not a success.
+  const applied = counter.apply(event, (e) => verifyEvent(crypto, e));
+  if (applied === 'invalid' || applied === 'unverified') {
+    throw new Error('toggleStar: star event rejected');
+  }
   // Durable first, then publish: even if the publish fails, the star
   // survives a restart from this row.
   await persistStarEvent(event);
