@@ -1031,13 +1031,41 @@ function base64ToBytes(s: string): Uint8Array | null {
   }
 }
 
+/**
+ * react-native-multi-ble-peripheral 0.1.8 startAdvertising contract, pinned
+ * from the installed package source (lib/typescript/index.d.ts and
+ * lib/commonjs/index.js), replacing the old unknown/unknown typing that
+ * let a wrong shape through TypeScript unchecked. The JS layer takes
+ * (servicesOrOpts, options): when options is undefined it forwards the
+ * first argument as the options and null as the services, and the Android
+ * native module only adds service UUIDs when the services map is non-null.
+ * The app always calls it with (options object, undefined), so no service
+ * UUID is added to the packet: the packet is manufacturer data only plus
+ * the Android Flags field (see the 15-byte figure in advertiseInner).
+ * Kept as a type pin, not a library replacement: the keep-vs-replace
+ * decision still needs a measured on-air packet plus a device run.
+ */
+export interface PeripheralAdvertiseOptions {
+  mode?: number;
+  txPowerLevel?: number;
+  connectable?: boolean;
+  includeDeviceName?: boolean;
+  includeTxPowerLevel?: boolean;
+  manufacturerId?: number;
+  manufacturerData?: Buffer;
+}
+export type PeripheralAdvertiseServices = Record<string, Buffer>;
+
 function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
   let PeripheralClass: new () => {
     once(ev: string, cb: (arg?: unknown) => void): void;
     addService(uuid: string, primary: boolean): Promise<unknown>;
     addCharacteristic(svc: string, uuid: string, props: number, perms: number): Promise<unknown>;
     updateValue(svc: string, uuid: string, value: unknown): Promise<unknown>;
-    startAdvertising(services: unknown, options: unknown): Promise<unknown>;
+    startAdvertising(
+      servicesOrOpts?: PeripheralAdvertiseServices | PeripheralAdvertiseOptions,
+      options?: PeripheralAdvertiseOptions,
+    ): Promise<unknown>;
     stopAdvertising(): Promise<unknown>;
     on(ev: string, cb: (arg: never) => void): void;
     sendNotification(svc: string, uuid: string, value: unknown, confirm: boolean): Promise<unknown>;
@@ -1109,8 +1137,12 @@ function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
             throw new Error(`ble: advertise failed at ${stage}: ${describeAdvertiseError(err).replace('ble: advertise failed: ', '')}`);
           }
         }
-        // Advertise manufacturer data only (12 bytes): the 128-bit service
-        // UUID cannot share the 31-byte legacy packet with service data.
+        // Advertise manufacturer data only: the 128-bit service UUID is
+        // not passed (services are null on this call path, see the type
+        // pin above), so the library adds no service UUID or service
+        // data. The manufacturer AD field itself is 12 bytes; the full
+        // legacy packet is 15 bytes minimum once Android Flags are added
+        // (see advertiseInner).
       },
       stopAdvertising: async () => {
         await inst.stopAdvertising();
