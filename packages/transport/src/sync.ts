@@ -10,6 +10,10 @@
 // Confirmation is client-side only (never in the signed payload). A post is
 // "on World" once ANY copy is observed on a relay - it may have been relayed
 // by another phone, not necessarily this one.
+//
+// RETRY POLICY: this engine itself has no backoff. Its caller ticks it on
+// a fixed 60 s timer with no backoff (see services/airplane/transport.ts
+// SYNC_INTERVAL_MS); a failed pass simply retries on the next tick.
 
 import type { Hex64, SignedEvent } from '@airplane/protocol';
 import { toHex } from '@airplane/protocol';
@@ -148,6 +152,10 @@ export class WorldSync {
         } catch {
           // Confirmation is a secondary write; the event is already
           // delivered, and WorldSync re-confirms on a later pass.
+          // Confirmation is a hint, delivery is the requirement: a failed
+          // confirmation write must never drop the inbound event. The
+          // event still flows to the handler below, and the next sync
+          // pass re-checks confirmation for it.
         }
       }
     };

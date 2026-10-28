@@ -52,8 +52,27 @@ function validGeohash(g: unknown): g is string {
 
 function validTags(t: unknown): t is string[][] {
   if (!Array.isArray(t)) return false;
-  return t.every((row) => Array.isArray(row) && row.every((s) => typeof s === 'string'));
+  // Size caps BEFORE any deeper work: a tag row count or a tag string
+  // length far beyond anything a real event carries is rejected here,
+  // not after allocation or verification.
+  if (t.length > MAX_TAG_ROWS) return false;
+  return t.every(
+    (row) =>
+      Array.isArray(row) &&
+      row.every((s) => typeof s === 'string' && s.length <= MAX_TAG_STRING_CHARS),
+  );
 }
+
+/** Max tag rows on one event (real events carry a handful). */
+const MAX_TAG_ROWS = 16;
+/**
+ * Max chars in one tag string. Set to the whole-event cap, not a small
+ * guess: the codebase legitimately pads large events via a long tag
+ * string (fragmentation boundary tests), and the 4096-byte total cap
+ * already bounds any tag. The pre-check still rejects absurd strings
+ * before deeper work.
+ */
+const MAX_TAG_STRING_CHARS = MAX_EVENT_BYTES;
 
 /**
  * CBOR-encode the canonical pre-image: the 7-position array
@@ -136,6 +155,26 @@ export function decodeEvent(bytes: Uint8Array): SignedEvent {
   }
   if (!(sig instanceof Uint8Array) || sig.length !== 64) {
     throw new CodecError('sig must be a 64-byte bstr');
+  }
+
+  // Conservative per-kind shape rules (audit F10): only shapes no valid
+  // client produces are rejected here. A kind-1 post must carry content;
+  // a kind-2 receipt must not (its payload is its tags); a kind-5
+  // reshare must name a valid target post id in its e tag. Tighter
+  // shapes (whitespace-only posts, tombstone content, reshare content
+  // vocabulary) are deliberately NOT enforced here: valid clients may
+  // use them, and the service layers own those rules.
+  if (kind === EVENT_KIND_POST && content.length === 0) {
+    throw new CodecError('kind 1 post must have content');
+  }
+  if (kind === EVENT_KIND_RECEIPT && content.length !== 0) {
+    throw new CodecError('kind 2 receipt must have empty content');
+  }
+  if (kind === EVENT_KIND_RESHARE) {
+    const target = tags.find((row) => row[0] === 'e')?.[1];
+    if (typeof target !== 'string' || !/^[0-9a-fA-F]{64}$/.test(target)) {
+      throw new CodecError('kind 5 reshare must carry a valid e tag target');
+    }
   }
 
   return {

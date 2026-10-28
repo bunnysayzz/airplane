@@ -376,6 +376,9 @@ export class HybridTransport {
     }
     const ack = await this.nostr.publishWithAck(event, this.relayDeadlineMs);
     if (ack.ok.length > 0) return { ok: ack.ok, tried: true, detail: null };
+    // Cancelled by stop(): skipped, not a relay failure. The caller
+    // reports it as unattempted rather than failed.
+    if (ack.cancelled) return { ok: [], tried: false, detail: 'relay publish cancelled' };
     if (ack.rejected.length > 0) return { ok: [], tried: true, detail: 'relays rejected the event' };
     if (ack.timedOut) return { ok: [], tried: true, detail: `no relay OK within ${this.relayDeadlineMs}ms` };
     return { ok: [], tried: true, detail: 'relay unavailable' };

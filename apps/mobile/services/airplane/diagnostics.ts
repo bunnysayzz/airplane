@@ -291,6 +291,12 @@ export function setDiagnosticsAdapterState(state: DiagnosticsAdapterState): void
   notifyThrottled();
 }
 
+/** Transport start failure: one Diagnostics log line (no secret detail). */
+export function recordTransportFailure(code: string): void {
+  logEvent('transport', `start failed ${code}`);
+  notifyThrottled();
+}
+
 // ------------------------------------------------------------ advertising
 
 export function recordAdvertiseSuccess(advertisementLengthBytes: number): void {

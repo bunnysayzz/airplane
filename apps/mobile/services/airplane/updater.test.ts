@@ -6,6 +6,7 @@
 import {
   checkForUpdate,
   compareVersions,
+  isAllowedUpdateUrl,
   parseReleasePayload,
   parseVersion,
   pickApkAsset,
@@ -72,10 +73,23 @@ describe('pickApkAsset', () => {
   test('prefers a release build over a debug APK', () => {
     expect(
       pickApkAsset([
-        { name: 'app-debug.apk', browser_download_url: 'https://example.test/debug.apk' },
-        { name: 'app-release.apk', browser_download_url: 'https://example.test/release.apk' },
+        { name: 'app-debug.apk', browser_download_url: 'https://github.com/bunnysayzz/airplane/releases/download/v0.1.4/debug.apk' },
+        { name: 'app-release.apk', browser_download_url: 'https://github.com/bunnysayzz/airplane/releases/download/v0.1.4/release.apk' },
       ]),
-    ).toBe('https://example.test/release.apk');
+    ).toBe('https://github.com/bunnysayzz/airplane/releases/download/v0.1.4/release.apk');
+  });
+  test('refuses APK assets off the allowlist', () => {
+    expect(
+      pickApkAsset([
+        { name: 'app.apk', browser_download_url: 'https://evil.example/app.apk' },
+        { name: 'app2.apk', browser_download_url: 'http://github.com/bunnysayzz/airplane/releases/download/v0.1.4/app.apk' },
+      ]),
+    ).toBeNull();
+    expect(
+      pickApkAsset([
+        { name: 'app.apk', browser_download_url: 'https://objects.githubusercontent.com/abc/app.apk' },
+      ]),
+    ).toBe('https://objects.githubusercontent.com/abc/app.apk');
   });
   test('returns null with no APK asset', () => {
     expect(
@@ -107,6 +121,26 @@ describe('parseReleasePayload', () => {
     const parsed = parseReleasePayload(releasePayload({ assets: [] }));
     expect(parsed).not.toBeNull();
     expect(parsed?.downloadUrl).toBeNull();
+  });
+  test('refuses release pages and downloads off the allowlist', () => {
+    expect(parseReleasePayload(releasePayload({ html_url: 'https://evil.example/r' }))).toBeNull();
+    expect(
+      parseReleasePayload(releasePayload({ html_url: 'https://user:pass@github.com/x/y' })),
+    ).toBeNull();
+    const parsed = parseReleasePayload(
+      releasePayload({
+        assets: [
+          { name: 'app.apk', browser_download_url: 'https://evil.example/app.apk' },
+        ],
+      }),
+    );
+    expect(parsed).not.toBeNull();
+    expect(parsed?.downloadUrl).toBeNull();
+    expect(parsed?.releaseUrl).toContain('github.com');
+    expect(isAllowedUpdateUrl('https://github.com/bunnysayzz/airplane/releases/tag/v0.1.4')).toBe(true);
+    expect(isAllowedUpdateUrl('https://evil.example/x')).toBe(false);
+    expect(isAllowedUpdateUrl('http://github.com/x')).toBe(false);
+    expect(isAllowedUpdateUrl(null)).toBe(false);
   });
 });
 

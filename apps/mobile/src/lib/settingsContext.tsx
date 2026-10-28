@@ -18,12 +18,12 @@ interface SettingsContextType {
     relays: string[];
     /** True once the user has saved any custom list (including an empty one). */
     relaysCustomized: boolean;
-    /** Add a relay; false when the URL is invalid or already listed. Persists on success. */
+    /** Add a relay; false when the URL is invalid, already listed, or the save failed. Persists first. */
     addRelay: (url: string) => Promise<boolean>;
-    /** Remove a relay. Persists. */
-    removeRelay: (url: string) => Promise<void>;
-    /** Forget the custom list and restore the defaults. Persists. */
-    resetRelays: () => Promise<void>;
+    /** Remove a relay; false when the save failed. Persists first. */
+    removeRelay: (url: string) => Promise<boolean>;
+    /** Forget the custom list and restore the defaults; false when the save failed. Persists first. */
+    resetRelays: () => Promise<boolean>;
     loadingSettings: boolean;
 }
 
@@ -57,34 +57,58 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, []);
 
     const setCompactMode = async (value: boolean) => {
+        // Persist first, then set UI state: a failed save leaves the
+        // switch on its old value instead of diverging from disk.
+        try {
+            await saveSetting(COMPACT_KEY, value);
+        } catch {
+            return;
+        }
         setCompactModeState(value);
-        await saveSetting(COMPACT_KEY, value);
     };
 
     // The transport reads the same persisted list at launch (see
     // services/airplane/transport.ts); a relay change therefore applies on
     // the next app start, not mid-session — the Nostr client is built with
     // its relay list at construction and is never torn down live.
+    // Every mutation below persists FIRST and only then updates UI
+    // state, so a save failure leaves UI and disk in agreement (and
+    // returns false so the screen can show an error instead of
+    // clearing the draft and reporting success).
     const addRelay = async (url: string): Promise<boolean> => {
         const next = addRelayUrl(relays, url);
         if (next === null) return false;
+        try {
+            await saveRelayUrls(next);
+        } catch {
+            return false;
+        }
         setRelaysState(next);
         setRelaysCustomized(true);
-        await saveRelayUrls(next);
         return true;
     };
 
-    const removeRelay = async (url: string) => {
+    const removeRelay = async (url: string): Promise<boolean> => {
         const next = removeRelayUrl(relays, url);
+        try {
+            await saveRelayUrls(next);
+        } catch {
+            return false;
+        }
         setRelaysState(next);
         setRelaysCustomized(true);
-        await saveRelayUrls(next);
+        return true;
     };
 
-    const resetRelays = async () => {
+    const resetRelays = async (): Promise<boolean> => {
+        try {
+            await resetRelayUrls();
+        } catch {
+            return false;
+        }
         setRelaysState([...DEFAULT_RELAYS]);
         setRelaysCustomized(false);
-        await resetRelayUrls();
+        return true;
     };
 
     return (

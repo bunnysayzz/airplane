@@ -119,14 +119,40 @@ let memoryFallback: MemoryKeyStore | null = null;
 let fallbackActive = false;
 
 /**
+ * True when a secure-store failure means the native module itself is
+ * missing or unlinked at call time (the only class the session fallback
+ * exists for). Any other failure, including a corrupt stored value,
+ * means an existing key may be unreadable: minting an ephemeral key
+ * over it would silently swap the device identity, orphaning old posts
+ * (no tombstones) and changing receipts. Those errors fail loud so the
+ * caller sees the real failure and the next caller retries (the
+ * in-flight guard is cleared on failure in getDeviceKeypair); a cached
+ * last-known keypair, when one exists, is returned before this path is
+ * ever reached, so it survives a transient read failure.
+ */
+function isMissingModuleError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /not available|not linked|unlinked|missing native module|no native module/i.test(message);
+}
+
+/**
  * Load-or-generate through the default store, falling back to the in-memory
- * store when the secure store throws at call time. An explicitly injected
- * store (tests/dev) never falls back — it must fail loud.
+ * store ONLY when the secure store's native module is missing at call
+ * time. An explicitly injected store (tests/dev) never falls back; it
+ * must fail loud. A corrupt-value or other read error also fails loud:
+ * it is surfaced as a breadcrumb plus the rethrown error, never as a
+ * silent swap to an ephemeral identity.
  */
 async function loadDefaultKeypair(): Promise<DeviceKeypair> {
   try {
     return await loadOrGenerateKeypair(defaultKeyStore());
   } catch (err) {
+    if (!isMissingModuleError(err)) {
+      addBreadcrumb('keystore-read-error', {
+        reason: err instanceof Error ? err.name : 'unknown',
+      });
+      throw err;
+    }
     memoryFallback ??= new MemoryKeyStore();
     fallbackActive = true;
     addBreadcrumb('keystore-fallback', {
@@ -150,6 +176,11 @@ function activeKeyStore(): KeyStorePort {
 
 let cached: DeviceKeypair | null = null;
 
+/** Copy both byte arrays: callers must never hold the cached reference. */
+function copyKeypair(kp: DeviceKeypair): DeviceKeypair {
+  return { publicKey: kp.publicKey.slice(), secretKey: kp.secretKey.slice() };
+}
+
 /**
  * In-flight load-or-generate promise. DATA-LOSS-CLASS race fix: two
  * concurrent getDeviceKeypair() calls would both see `cached === null` and
@@ -165,16 +196,19 @@ let inflight: Promise<DeviceKeypair> | null = null;
 /**
  * The stable device keypair. Generated once on first launch and persisted
  * in the keystore; identical across restarts. Cached in module scope so a
- * launch never re-reads the keystore per signature.
+ * launch never re-reads the keystore per signature. Every call returns a
+ * COPY of the cached pair, never the cached reference: Uint8Array is
+ * mutable, so a caller holding the reference could read or corrupt the
+ * cached secret bytes for all later signing.
  */
 export async function getDeviceKeypair(): Promise<DeviceKeypair> {
-  if (cached) return cached;
-  if (inflight) return inflight;
+  if (cached) return copyKeypair(cached);
+  if (inflight) return inflight.then(copyKeypair);
   const promise = injected ? loadOrGenerateKeypair(injected) : loadDefaultKeypair();
   inflight = promise;
   try {
     cached = await promise;
-    return cached;
+    return copyKeypair(cached);
   } finally {
     // Clear in BOTH paths: on success cached now owns it; on failure the
     // next caller must retry rather than await a settled rejection forever.

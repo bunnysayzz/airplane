@@ -31,13 +31,38 @@ const Relays: React.FC<RelaysProps> = ({ onBack }) => {
     const [error, setError] = useState<string | null>(null);
 
     const handleAdd = async () => {
-        const ok = await addRelay(draft);
+        let ok = false;
+        try {
+            ok = await addRelay(draft);
+        } catch {
+            ok = false;
+        }
         if (ok) {
             setDraft('');
             setError(null);
         } else {
             setError(t('settings.relaysInvalid'));
         }
+    };
+
+    const handleRemove = async (url: string) => {
+        let ok = false;
+        try {
+            ok = await removeRelay(url);
+        } catch {
+            ok = false;
+        }
+        if (!ok) setError(t('settings.relaysInvalid'));
+    };
+
+    const handleReset = async () => {
+        let ok = false;
+        try {
+            ok = await resetRelays();
+        } catch {
+            ok = false;
+        }
+        if (!ok) setError(t('settings.relaysInvalid'));
     };
 
     return (
@@ -72,7 +97,7 @@ const Relays: React.FC<RelaysProps> = ({ onBack }) => {
                                         {url}
                                     </Text>
                                     <Pressable
-                                        onPress={() => void removeRelay(url)}
+                                        onPress={() => void handleRemove(url)}
                                         accessibilityRole="button"
                                         accessibilityLabel={t('settings.relaysRemove', { url })}
                                         hitSlop={12}
@@ -119,7 +144,7 @@ const Relays: React.FC<RelaysProps> = ({ onBack }) => {
                 {relaysCustomized && (
                     <Pressable
                         style={styles.resetRow}
-                        onPress={() => void resetRelays()}
+                        onPress={() => void handleReset()}
                         accessibilityRole="button"
                         accessibilityLabel={t('settings.relaysReset')}
                     >

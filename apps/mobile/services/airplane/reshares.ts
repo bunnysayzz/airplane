@@ -18,6 +18,7 @@
 // --- RESHARE (delimited block: end) ---
 
 import {
+  EVENT_KIND_POST,
   EVENT_KIND_RESHARE,
   RESHARE_CONTENT,
   ReshareCounter,
@@ -88,6 +89,20 @@ export async function toggleReshare(
   if (!card.authorPubkeyHex) {
     throw new Error('toggleReshare: card has no authorPubkeyHex');
   }
+  // Validate before any state change or publish: a malformed, unknown,
+  // or non-post id previously produced a reshare event and reported its
+  // id as success even when the counter ignored it.
+  const targetId = card.eventId.toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(targetId)) {
+    throw new Error('toggleReshare: invalid post id');
+  }
+  if (!/^[0-9a-f]{64}$/.test(card.authorPubkeyHex.toLowerCase())) {
+    throw new Error('toggleReshare: invalid author pubkey');
+  }
+  const existing = await getStore().getEvent(targetId);
+  if (!existing || existing.kind !== EVENT_KIND_POST) {
+    throw new Error('toggleReshare: unknown post id');
+  }
   const publicKey = await getDevicePublicKey();
   const myHex = toHex(publicKey);
   const already = counter.hasReshared(myHex, card.eventId);
@@ -115,7 +130,10 @@ export async function toggleReshare(
     content: already ? UNRESHARE_CONTENT : RESHARE_CONTENT,
   });
   counter.markPostKnown(card.eventId);
-  counter.add(event, (e) => verifyEvent(crypto, e));
+  const added = counter.add(event, (e) => verifyEvent(crypto, e));
+  if (added === 'ignored') {
+    throw new Error('toggleReshare: reshare event rejected');
+  }
   try {
     await getStore().saveReshareEvent(event);
   } catch {

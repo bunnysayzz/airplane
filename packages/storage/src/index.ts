@@ -8,6 +8,8 @@ export {
   MemoryKv,
   DEFAULT_RETENTION_SEC,
   RECEIPT_DAY_BUCKET_SEC,
+  FUTURE_SKEW_TOLERANCE_SEC,
+  clampFutureCreatedAt,
   rankScore,
   bytesToHex,
   hexToBytes,

@@ -20,11 +20,26 @@ import { getStore, __resetStoreForTests } from './store';
 const crypto = new NobleCrypto();
 const POST = 'b'.repeat(64);
 
-beforeEach(() => {
+/** Seed the post the toggles act on: toggles require a stored kind-1 post. */
+async function seedPost(): Promise<void> {
+  await getStore().saveEvent({
+    id: fromHex(POST),
+    pubkey: fromHex('a'.repeat(64)),
+    created_at: Math.floor(Date.now() / 1000),
+    kind: 1,
+    geohash: 'tdr1v',
+    tags: [],
+    content: 'seed post',
+    sig: new Uint8Array(64),
+  });
+}
+
+beforeEach(async () => {
   __resetStarsForTests();
   __resetDeviceKeypairForTests();
   __resetFeedListenersForTests();
   __resetStoreForTests();
+  await seedPost();
 });
 
 afterEach(() => {
@@ -68,6 +83,19 @@ describe('toggleStar (optimistic own star)', () => {
     // the old star state on restart.
     expect(await getStore().listStarEvents()).toHaveLength(1);
     expect(await getStore().listStarKnownPosts()).toContain(POST);
+  });
+
+  test('toggle rejects an unknown or malformed post id without publishing', async () => {
+    const publish = jest.fn();
+    await expect(toggleStar('c'.repeat(64), 'tdr1v', { publish })).rejects.toThrow(
+      /unknown post id/,
+    );
+    await expect(toggleStar('not-hex', 'tdr1v', { publish })).rejects.toThrow(
+      /invalid post id/,
+    );
+    expect(publish).not.toHaveBeenCalled();
+    const ownHex = await resolveOwnPubkeyHex();
+    expect(starViewFor('c'.repeat(64), ownHex).starredByMe).toBe(false);
   });
 
   test('a publish failure still leaves the optimistic local star in place', async () => {

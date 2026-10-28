@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Nostr transport: relay WebSocket client + Airplane event wrapper codec.
 //
+// RETRY POLICY (actual): reconnect base 5 s doubling, capped at 60 s,
+// plus/minus 20% jitter, while started; a successful open resets the
+// per-relay failure count. This is one of four distinct policies in the
+// app (DM outbox [0, 1, 5, 30, 120] s capped at 5, WorldSync fixed 60 s,
+// BLE none); there is no single shared ladder.
+//
 // DESIGN NOTE - why wrap instead of mapping 1:1:
 //
 // Our SignedEvent uses Ed25519 signatures over a CBOR canonical pre-image
@@ -25,6 +31,7 @@ import {
   NobleCrypto,
   toHex,
   fromHex,
+  MAX_EVENT_BYTES,
   type Hex64,
   type SignedEvent,
 } from '@airplane/protocol';
@@ -58,6 +65,15 @@ export const DEFAULT_RELAYS = [
   'wss://relay.nostr.band',
   'wss://relay.primal.net',
 ];
+
+/** Max inbound relay message, bytes: far above any real frame (4 KiB event plus envelope). */
+export const MAX_RELAY_MESSAGE_BYTES = 65536;
+
+/** Max event ids in one queryByIds filter (audit F38). */
+export const QUERY_BY_IDS_MAX = 100;
+
+/** Max owed query CLOSEs retained (audit F41). */
+export const MAX_PENDING_QUERY_CLOSES = 32;
 
 /** A Nostr event per NIP-01 (JSON-serializable). */
 export interface NostrEvent {
@@ -131,10 +147,19 @@ export function wrapEvent(event: SignedEvent, keys: NostrKeypair, createdAtSec?:
  * is what matters.
  */
 export function unwrapEvent(nostr: NostrEvent): SignedEvent | null {
-  if (nostr.kind !== AIRPLANE_NOSTR_KIND) return null;
-  if (!nostr.tags.some((t) => t[0] === 'airplane' && t[1] === '1')) return null;
   let event: SignedEvent;
   try {
+    // All frame validation lives inside this try: a hostile relay may
+    // send any shape (missing/null/non-array tags, non-string content),
+    // and a malformed frame must be ignored, never throw out of the
+    // socket handler and kill delivery of later frames.
+    if (nostr.kind !== AIRPLANE_NOSTR_KIND) return null;
+    if (!Array.isArray(nostr.tags)) return null;
+    if (!nostr.tags.some((t) => Array.isArray(t) && t[0] === 'airplane' && t[1] === '1')) return null;
+    if (typeof nostr.content !== 'string') return null;
+    // Pre-check BEFORE fromHex allocates: hex is 2 chars per byte, so a
+    // content longer than twice the event cap can never decode validly.
+    if (nostr.content.length > MAX_EVENT_BYTES * 2) return null;
     event = decodeEvent(fromHex(nostr.content));
   } catch {
     return null;
@@ -219,6 +244,12 @@ export interface RelayPublishAck {
   rejected: string[];
   /** True when the deadline expired before any OK arrived. */
   timedOut: boolean;
+  /**
+   * True when stop() resolved the waiter: the publish was cancelled,
+   * not failed by a relay. Callers must treat this as skipped, not as
+   * a relay failure (previously it was indistinguishable from one).
+   */
+  cancelled: boolean;
 }
 
 /** One in-flight OK waiter, shared by every concurrent publish of one envelope. */
@@ -272,6 +303,15 @@ export class NostrTransport {
   private allOkWaiters = new Set<OkWaiter>();
   /** One-shot queries awaiting EOSE, by subscription id. */
   private pendingQueries = new Map<string, { filter: object; timer: ReturnType<typeof setTimeout> }>();
+  /**
+   * Query CLOSEs owed to relays that received a queryByIds REQ but were
+   * not open when its 5 s close timer fired (dropped before the timer, or
+   * still connecting). They are sent when that relay's socket next opens,
+   * so a subscription opened before the timer can never outlive its
+   * window on a later socket. Bounded: oldest entries drop when full
+   * (losing a late CLOSE is no worse than today's behaviour).
+   */
+  private pendingQueryCloses: Array<{ subId: string; url: string }> = [];
 
   constructor(opts: NostrTransportOpts = {}) {
     // Package-level validation: any caller inherits the scheme, host,
@@ -342,11 +382,12 @@ export class NostrTransport {
     for (const w of this.allOkWaiters) {
       if (w.timer) clearTimeout(w.timer);
       w.timer = null;
-      w.resolve({ ok: [...w.ok], rejected: [...w.rejected], timedOut: false });
+      w.resolve({ ok: [...w.ok], rejected: [...w.rejected], timedOut: false, cancelled: true });
     }
     this.allOkWaiters.clear();
     this.okWaiters.clear();
     this.pendingQueries.clear();
+    this.pendingQueryCloses = [];
     for (const [url, ws] of this.sockets) {
       this.states.set(url, 'closed');
       try {
@@ -383,6 +424,21 @@ export class NostrTransport {
       // again from the base delay.
       this.reconnectAttempts.delete(url);
       this.resubscribe(ws);
+      // Owed query CLOSEs for this relay (its close timer fired while it
+      // was down): send them on the fresh socket, then drop them.
+      const owed = this.pendingQueryCloses.filter((entry) => entry.url === url);
+      if (owed.length > 0) {
+        this.pendingQueryCloses = this.pendingQueryCloses.filter((entry) => entry.url !== url);
+        for (let i = 0; i < owed.length; i++) {
+          try {
+            ws.send(JSON.stringify(['CLOSE', owed[i].subId] as ClientMsg));
+          } catch {
+            // Socket died again; the unsent remainder is owed again.
+            this.pendingQueryCloses.push(...owed.slice(i));
+            break;
+          }
+        }
+      }
     };
     ws.onmessage = (ev) => this.handleMessage(url, ev.data);
     ws.onerror = () => {
@@ -525,7 +581,7 @@ export class NostrTransport {
     for (const url of this.relays) {
       if (this.sendMsg(url, msg)) sent.push(url);
     }
-    if (sent.length === 0) return { ok: [], rejected: [], timedOut: false };
+    if (sent.length === 0) return { ok: [], rejected: [], timedOut: false, cancelled: false };
     return new Promise<RelayPublishAck>((resolve) => {
       const waiter: OkWaiter = {
         remaining: new Set(sent),
@@ -550,7 +606,7 @@ export class NostrTransport {
       };
       waiter.resolve = (ack) => finish(ack);
       const timer = setTimeout(() => {
-        finish({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: true });
+        finish({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: true, cancelled: false });
       }, deadlineMs);
       waiter.timer = timer;
       this.timers.add(timer);
@@ -574,7 +630,7 @@ export class NostrTransport {
       if (!waiter.remaining.has(url)) continue;
       waiter.remaining.delete(url);
       if (waiter.remaining.size === 0 && waiter.ok.size === 0) {
-        waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false });
+        waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false, cancelled: false });
       }
     }
   }
@@ -589,11 +645,11 @@ export class NostrTransport {
       waiter.remaining.delete(relayUrl);
       if (accepted) {
         waiter.ok.add(relayUrl);
-        waiter.resolve({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: false });
+        waiter.resolve({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: false, cancelled: false });
       } else {
         waiter.rejected.add(relayUrl);
         if (waiter.remaining.size === 0) {
-          waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false });
+          waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false, cancelled: false });
         }
       }
     }
@@ -606,20 +662,42 @@ export class NostrTransport {
    * An empty id list is rejected early (no REQ is sent). The subscription
    * closes on EOSE, with the 5s timer only as a fallback cap, and a
    * query still awaiting EOSE is re-issued when a socket reconnects.
+   * Capped at 100 ids per call (audit F38): a larger list is truncated to
+   * the first 100, and the caller must split the rest across calls (the
+   * WorldSync batching work owns that split; this cap only bounds one
+   * filter). The query is best-effort confirmation, so a truncated tail
+   * simply stays unconfirmed until a later pass.
    */
   async queryByIds(eventIdsHex: Hex64[]): Promise<boolean> {
     if (eventIdsHex.length === 0) return false;
+    const capped = eventIdsHex.slice(0, QUERY_BY_IDS_MAX);
     const subId = `q${++this.subIdCounter}`;
     // Note: we filter by our event IDs via the `e` tag (Nostr `ids` would
     // match the *envelope* id, which differs per publisher), so no `ids`
     // entry is sent at all: an empty `ids` array risks a strict relay
     // matching nothing.
-    const filter = { kinds: [AIRPLANE_NOSTR_KIND], '#e': eventIdsHex };
+    const filter = { kinds: [AIRPLANE_NOSTR_KIND], '#e': capped };
     const msg: ClientMsg = ['REQ', subId, filter];
-    let sent = false;
-    for (const url of this.relays) if (this.sendMsg(url, msg)) sent = true;
-    if (!sent) return false;
+    const sentUrls: string[] = [];
+    for (const url of this.relays) {
+      if (this.sendMsg(url, msg)) sentUrls.push(url);
+    }
+    if (sentUrls.length === 0) return false;
+    // Close the subscription shortly after; relays send EOSE then matching
+    // EVENTs. We keep it simple: one-shot query, close after 5s. A relay
+    // that is not open at close time still owes its CLOSE: it is
+    // remembered and sent when that relay's socket next opens, so the
+    // subscription cannot leak onto a post-timer socket.
     const timer = setTimeout(() => {
+      this.timers.delete(timer);
+      for (const url of sentUrls) {
+        if (!this.sendMsg(url, ['CLOSE', subId])) {
+          this.pendingQueryCloses.push({ subId, url });
+          while (this.pendingQueryCloses.length > MAX_PENDING_QUERY_CLOSES) {
+            this.pendingQueryCloses.shift();
+          }
+        }
+      }
       this.closeQuery(subId);
     }, 5000);
     this.timers.add(timer);
@@ -672,6 +750,9 @@ export class NostrTransport {
     // Size gate BEFORE parsing: a hostile frame must not cost a parse
     // and an allocation before the first validation runs.
     if (data.length > MAX_RELAY_FRAME_BYTES) return;
+    // Size gate BEFORE JSON.parse: an unbounded relay message must not
+    // force a large allocation and parse first.
+    if (typeof data !== 'string' || data.length > MAX_RELAY_MESSAGE_BYTES) return;
     // Any frame proves the socket is alive: reset the silence window.
     this.lastFrameAtMs.set(relayUrl, Date.now());
     this.silencePinged.delete(relayUrl);
@@ -721,7 +802,13 @@ export class NostrTransport {
     if (msg[0] !== 'EVENT') return;
     const nostr = msg[2] as NostrEvent | undefined;
     if (!nostr || typeof nostr !== 'object') return;
-    const event = unwrapEvent(nostr);
+    let event: SignedEvent | null;
+    try {
+      event = unwrapEvent(nostr);
+    } catch {
+      // Belt and braces: one bad frame must never kill the socket handler.
+      return;
+    }
     if (!event) return;
     for (const h of this.receiveHandlers) {
       try {

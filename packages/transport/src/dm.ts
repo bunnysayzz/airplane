@@ -28,6 +28,10 @@
 //   KB" — decided here as 4096 bytes).
 // * Delivery states are exactly Sending / Sent / Failed (orders). Sent means
 //   a relay accepted the sealed envelope, nothing more — never "Delivered".
+// * RETRY POLICY (actual, not the 1s/2s/5s/15s/30s/60s ladder sometimes
+//   quoted: that ladder exists nowhere): the outbox retries on
+//   DM_BACKOFF_MS = [0, 1000, 5000, 30000, 120000] ms with a
+//   DM_MAX_ATTEMPTS = 5 cap, then Failed. No other DM retry exists.
 
 import { x25519 } from '@noble/curves/ed25519.js';
 import { sha512 } from '@noble/hashes/sha512.js';

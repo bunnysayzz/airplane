@@ -132,6 +132,22 @@ describe('wrapEvent / unwrapEvent', () => {
     const wrapped = wrapEvent(makePost(), keys);
     expect(unwrapEvent({ ...wrapped, content: 'zzzz' })).toBeNull();
   });
+
+  test('oversize hex content is rejected before decode', () => {
+    const keys = generateNostrKeypair();
+    const wrapped = wrapEvent(makePost(), keys);
+    expect(unwrapEvent({ ...wrapped, content: 'ab'.repeat(5000) })).toBeNull();
+  });
+
+  test('unwrapEvent ignores malformed frames without throwing', () => {
+    const keys = generateNostrKeypair();
+    const wrapped = wrapEvent(makePost(), keys);
+    expect(unwrapEvent({ ...wrapped, tags: null as never })).toBeNull();
+    expect(unwrapEvent({ ...wrapped, tags: 'airplane' as never })).toBeNull();
+    expect(unwrapEvent({ ...wrapped, tags: [null as never] })).toBeNull();
+    expect(unwrapEvent({ ...wrapped, content: 42 as never })).toBeNull();
+    expect(unwrapEvent({ ...wrapped, content: null as never })).toBeNull();
+  });
 });
 
 describe('NostrTransport', () => {
@@ -554,6 +570,40 @@ describe('NostrTransport inbound edge cases', () => {
     await t.stop();
   });
 
+  test('oversize relay message is dropped before parsing', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    let count = 0;
+    t.onReceive(() => {
+      count++;
+    });
+    sockets[0].onmessage?.({ data: 'x'.repeat(70000) });
+    await tick(10);
+    expect(count).toBe(0);
+    await t.stop();
+  });
+
+  test('EVENT with malformed envelope is ignored and later frames still deliver', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    let count = 0;
+    t.onReceive(() => {
+      count++;
+    });
+    const keys = generateNostrKeypair();
+    const good = wrapEvent(makePost('good frame'), keys);
+    // tags null previously threw out of the socket handler.
+    expect(() =>
+      sockets[0].receive(['EVENT', 'sub1', { ...good, tags: null }]),
+    ).not.toThrow();
+    sockets[0].receive(['EVENT', 'sub1', good]);
+    await tick(10);
+    expect(count).toBe(1);
+    await t.stop();
+  });
+
   test('queryByIds with an empty list sends nothing', async () => {
     const { t, sockets } = makeTransport();
     await t.start();
@@ -563,6 +613,59 @@ describe('NostrTransport inbound edge cases', () => {
     await tick(20);
     expect(sockets[0].sent.length).toBe(sentBefore);
     await t.stop();
+  });
+
+  test('queryByIds caps the filter at 100 ids', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    const ids = Array.from({ length: 150 }, (_, i) => String(i).padStart(64, '0'));
+    await t.queryByIds(ids as never);
+    const req = sockets[0].sent
+      .map((s) => JSON.parse(s))
+      .find((m) => m[0] === 'REQ' && m[2] && '#e' in m[2]);
+    expect(req[2]['#e']).toHaveLength(100);
+    await t.stop();
+  });
+
+  test('query CLOSE owed to a down relay is sent when its socket next opens', async () => {
+    jest.useFakeTimers();
+    try {
+      const sockets: FakeSocket[] = [];
+      const t = new NostrTransport({
+        relays: ['wss://test.relay'],
+        reconnectMs: 10,
+        // No auto-open: the test drives open/close timing by hand.
+        wsFactory: (url: string) => {
+          const s = new FakeSocket(url);
+          sockets.push(s);
+          return s;
+        },
+      });
+      await t.start();
+      sockets[0].open();
+      await t.queryByIds(['aa'.repeat(32)]);
+      expect(
+        sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ'),
+      ).toBeDefined();
+      // Drop before the 5 s close timer: reconnect is scheduled, but the
+      // new socket stays shut until the test opens it after the timer.
+      sockets[0].close();
+      jest.advanceTimersByTime(20);
+      expect(sockets).toHaveLength(2);
+      jest.advanceTimersByTime(5000);
+      // Timer fired while the new socket was down: no CLOSE yet.
+      expect(sockets[1].sent).toHaveLength(0);
+      sockets[1].open();
+      const close = sockets[1].sent
+        .map((s) => JSON.parse(s))
+        .find((m) => m[0] === 'CLOSE');
+      expect(close).toBeDefined();
+      expect(close[1]).toBe('q2');
+      await t.stop();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('publish skips relays whose send throws; others still deliver', async () => {

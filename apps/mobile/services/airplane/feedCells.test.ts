@@ -4,7 +4,7 @@
 // and the failure is logged to Sentry.
 
 import { neighbors } from '@airplane/protocol';
-import { resolveFeedCells } from './feedCells';
+import { __resetFeedCellsThrottleForTests, resolveFeedCells } from './feedCells';
 import { getLocationCell, getLocationPermissionStatus } from './location';
 import { captureError } from '../../src/sentry';
 
@@ -25,6 +25,7 @@ const mockCapture = captureError as jest.MockedFunction<typeof captureError>;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  __resetFeedCellsThrottleForTests();
 });
 
 describe('resolveFeedCells', () => {
@@ -56,6 +57,15 @@ describe('resolveFeedCells', () => {
   test('a cell-resolution failure returns null and logs to Sentry', async () => {
     mockStatus.mockResolvedValue('granted');
     mockCell.mockRejectedValue(new Error('gps boom'));
+    await expect(resolveFeedCells()).resolves.toBeNull();
+    expect(mockCapture).toHaveBeenCalledTimes(1);
+  });
+
+  test('repeated scope failures within a minute report to Sentry only once', async () => {
+    mockStatus.mockResolvedValue('granted');
+    mockCell.mockRejectedValue(new Error('gps boom'));
+    await expect(resolveFeedCells()).resolves.toBeNull();
+    await expect(resolveFeedCells()).resolves.toBeNull();
     await expect(resolveFeedCells()).resolves.toBeNull();
     expect(mockCapture).toHaveBeenCalledTimes(1);
   });

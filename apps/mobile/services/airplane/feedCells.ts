@@ -21,13 +21,27 @@ import { neighbors } from '@airplane/protocol';
 import { captureError } from '../../src/sentry';
 import { getLocationCell, getLocationPermissionStatus } from './location';
 
+/** Feed-scope Sentry reports are throttled (audit F39): a persistent GPS
+ *  failure must not spam one event per feed focus. */
+const FEED_SCOPE_CAPTURE_THROTTLE_MS = 60_000;
+let lastFeedScopeCaptureMs = 0;
+
+/** Test seam: reset the capture throttle so tests are independent. */
+export function __resetFeedCellsThrottleForTests(): void {
+  lastFeedScopeCaptureMs = 0;
+}
+
 /** The viewer's in-scope cells, or null when resolution failed (keep previous). */
 export async function resolveFeedCells(): Promise<string[] | null> {
   try {
     if ((await getLocationPermissionStatus()) !== 'granted') return [];
     return neighbors(await getLocationCell());
   } catch (error) {
-    captureError(error);
+    const nowMs = Date.now();
+    if (nowMs - lastFeedScopeCaptureMs >= FEED_SCOPE_CAPTURE_THROTTLE_MS) {
+      lastFeedScopeCaptureMs = nowMs;
+      captureError(error);
+    }
     return null;
   }
 }

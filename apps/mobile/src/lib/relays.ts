@@ -42,10 +42,17 @@ export const DEFAULT_RELAYS: string[] = [
  * case and port variants of one relay dedupe. Private targets ARE allowed
  * here: this list is explicitly user-added in Settings, and the package
  * layer's private-target drop applies to non-explicit callers.
+ * Length-capped (audit F40): an unbounded URL must not reach the socket
+ * layer or the stored list.
  */
+export const MAX_RELAY_URL_CHARS = 256;
+/** Max relays in one list (audit F40): each entry opens a socket. */
+export const MAX_RELAYS = 10;
+
 export function normalizeRelayUrl(input: string): string | null {
   const trimmed = input.trim().replace(/\/+$/, '');
   if (trimmed.length === 0 || /\s/.test(trimmed)) return null;
+  if (trimmed.length > MAX_RELAY_URL_CHARS) return null;
   let url: URL;
   try {
     url = new URL(trimmed);
@@ -97,7 +104,7 @@ export function normalizeRelayUrl(input: string): string | null {
   return `wss://${host}${portSuffix}${path}`;
 }
 
-/** Dedupe (preserving first-seen order) and drop invalid entries. */
+/** Dedupe (preserving first-seen order) and drop invalid entries. Capped at MAX_RELAYS. */
 export function sanitizeRelayList(urls: readonly string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -106,6 +113,7 @@ export function sanitizeRelayList(urls: readonly string[]): string[] {
     if (url !== null && !seen.has(url)) {
       seen.add(url);
       out.push(url);
+      if (out.length >= MAX_RELAYS) break;
     }
   }
   return out;
@@ -175,6 +183,7 @@ export function addRelayUrl(current: readonly string[], input: string): string[]
   // Compare canonical forms: a case or default-port variant of an
   // existing relay is a duplicate, not a new entry.
   if (current.some((c) => normalizeRelayUrl(c) === url)) return null;
+  if (current.length >= MAX_RELAYS) return null;
   return [...current, url];
 }
 

@@ -37,6 +37,14 @@
 // - TX notify() broadcasts to ALL subscribed centrals; send() to one
 //   peripheral-role peer also reaches the others. The mesh dedupes by event
 //   ID (SeenCache), so this wastes bandwidth, not correctness.
+// - BLE transport: no retry backoff at all for connect or send (no
+//   timeout or backoff timer exists in this layer as of this writing).
+//   Retry behaviour for the other transports, stated so no reader has to
+//   guess: Nostr reconnect doubles from 5 s to a 60 s cap with jitter
+//   (see packages/transport/src/nostr.ts); DM outbox retries on
+//   [0, 1, 5, 30, 120] s capped at 5 attempts (see
+//   packages/transport/src/dm.ts); WorldSync ticks on a fixed 60 s timer
+//   with no backoff (see services/airplane/transport.ts).
 // - Peripheral-role inbound writes are attributed by central BT address;
 //   before the hello arrives the peer id is provisional (`mac:<addr>`).
 // - Scan has no hardware filter in v1 (see profile.ts); software-filtered.

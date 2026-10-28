@@ -382,6 +382,52 @@ describe('transport manager', () => {
     expect(await store.isWorldConfirmed('08'.repeat(32))).toBe(false);
   });
 
+  test('inbound post with failing storage is dropped without an unhandled rejection', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const spy = jest.spyOn(store, 'saveEvent').mockRejectedValue(new Error('disk full'));
+    const event = makeSignedEvent();
+    // ingress is void-called by the real wiring; a rejection here would
+    // previously escape unhandled. It must resolve cleanly now.
+    hybrid!.ingress(event, 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(await store.getEvent('07'.repeat(32))).toBeNull();
+    spy.mockRestore();
+    // The handler survives the failure: a later post still stores.
+    const later = makeSignedEvent();
+    later.id = new Uint8Array(32).fill(9);
+    hybrid!.ingress(later, 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(await store.getEvent('09'.repeat(32))).not.toBeNull();
+  });
+
+  test('inbound receipts count views once via the counting path', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const postId = '07'.repeat(32);
+    const makeReceipt = (seed: number) => ({
+      id: new Uint8Array(32).fill(seed),
+      pubkey: new Uint8Array(32).fill(1),
+      created_at: 1_700_000_000,
+      kind: 2,
+      geohash: 'ezs42',
+      tags: [['e', postId]],
+      content: '',
+      sig: new Uint8Array(64).fill(3),
+    });
+    hybrid!.ingress(makeReceipt(21) as never, 'nostr');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(await store.countViews(postId)).toBe(1);
+    // Same viewer, same post, same day, different event id: still one view.
+    hybrid!.ingress(makeReceipt(22) as never, 'nostr');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(await store.countViews(postId)).toBe(1);
+  });
+
   test('kind-5 ingress counts, persists, and a pending reshare pulls its original post', async () => {
     await startTransport();
     const hybrid = __getHybridForTests();
@@ -463,6 +509,18 @@ describe('transport manager', () => {
     await startTransport();
     const postId = 'd'.repeat(64);
     markResharePostKnown(postId);
+    // The toggle requires a stored kind-1 post; seed it (the point of
+    // this test is the publish echo dedup, not toggle validation).
+    await getStore().saveEvent({
+      id: fromHex(postId),
+      pubkey: fromHex('a'.repeat(64)),
+      created_at: Math.floor(Date.now() / 1000),
+      kind: 1,
+      geohash: 'tdr1v',
+      tags: [],
+      content: 'seed post',
+      sig: new Uint8Array(64),
+    });
     const card: PostCardModel = {
       eventId: postId,
       createdAtMs: Date.now(),
@@ -529,6 +587,10 @@ describe('BLE publish targets + mesh status', () => {
     expect(resolveRelayState(false, 'starting')).toBe('mesh');
     expect(resolveRelayState(false, 'permission-blocked')).toBe('offline');
     expect(resolveRelayState(false, 'unavailable')).toBe('offline');
+    // A failed start never reports mesh, even with a starting radio.
+    expect(resolveRelayState(false, 'starting', true)).toBe('offline');
+    expect(resolveRelayState(false, 'on', true)).toBe('offline');
+    expect(resolveRelayState(true, 'on', true)).toBe('offline');
   });
 
   test('getMeshStatus after stopTransport reports 0 peers and offline', () => {

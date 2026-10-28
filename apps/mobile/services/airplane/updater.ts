@@ -85,15 +85,49 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const asString = (value: unknown): string | null =>
   typeof value === 'string' && value.length > 0 ? value : null;
 
+/**
+ * Update URL allowlist. Only https URLs on the hosts GitHub actually
+ * serves releases from are openable: github.com for release pages and
+ * APK downloads, plus objects.githubusercontent.com for APK assets.
+ * Anything else (http, other hosts, embedded credentials, non-URL
+ * strings) is refused, so a compromised releases payload cannot make
+ * the app open an arbitrary link on the user's tap.
+ */
+export const isAllowedUpdateUrl = (
+  url: string | null,
+  opts: { downloadHost?: boolean } = {},
+): boolean => {
+  if (url === null) return false;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return false;
+    if (parsed.username !== '' || parsed.password !== '') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'github.com') return true;
+    if (opts.downloadHost === true && host === 'objects.githubusercontent.com') return true;
+    return false;
+  } catch {
+    return false;
+  }
+};
+
 /** Pick the installable APK from a release's assets: prefer a `release`
  *  build over a debug one, otherwise the first `.apk` asset. Returns null
- *  when no asset is an APK (caller falls back to the release page). */
+ *  when no asset is an APK (caller falls back to the release page).
+ *  An asset URL is accepted only when it passes the update allowlist
+ *  (https, github.com or objects.githubusercontent.com): a tampered
+ *  releases payload must never steer the app at an arbitrary URL. */
 export const pickApkAsset = (assets: unknown): string | null => {
   if (!Array.isArray(assets)) return null;
   const apks = assets.filter(isRecord).filter((asset) => {
     const name = asString(asset.name);
     const url = asString(asset.browser_download_url);
-    return name !== null && url !== null && name.toLowerCase().endsWith('.apk');
+    return (
+      name !== null &&
+      url !== null &&
+      name.toLowerCase().endsWith('.apk') &&
+      isAllowedUpdateUrl(url, { downloadHost: true })
+    );
   });
   if (apks.length === 0) return null;
   const releaseBuild = apks.find((asset) => !String(asset.name).toLowerCase().includes('debug'));
@@ -109,6 +143,9 @@ export const parseReleasePayload = (payload: unknown): UpdateInfo | null => {
   const tag = asString(payload.tag_name);
   const releaseUrl = asString(payload.html_url);
   if (tag === null || releaseUrl === null) return null;
+  // The release page URL comes from the same untrusted payload as the
+  // assets: it must pass the allowlist or the payload is unusable.
+  if (!isAllowedUpdateUrl(releaseUrl)) return null;
   const version = parseVersion(tag);
   if (version === null) return null;
   return {

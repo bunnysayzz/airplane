@@ -7,6 +7,14 @@
 //   Play Services dependency).
 // - Incoming posts from any source are stored and fed to the UI.
 // - WorldSync runs when online to push unconfirmed posts and check relays.
+//
+// RETRY POLICIES (actual, per transport; no single ladder exists):
+// - Nostr reconnect: base 5 s doubling, capped at 60 s, plus/minus 20%
+//   jitter, while started (see packages/transport/src/nostr.ts).
+// - DM outbox: [0, 1, 5, 30, 120] s, capped at 5 attempts, then Failed
+//   (see packages/transport/src/dm.ts).
+// - WorldSync: fixed 60 s timer, no backoff (SYNC_INTERVAL_MS below).
+// - BLE: no retry backoff at all for connect or send.
 
 import type { NetInfoState } from '@react-native-community/netinfo';
 import {
@@ -19,7 +27,7 @@ import {
 import type { SignedEvent, TransportPort, Hex64 } from '@airplane/protocol';
 import { encodeEvent, toHex, verifyEvent } from '@airplane/protocol';
 import { getStore } from './store';
-import { EVENT_KIND_POST, EVENT_KIND_RESHARE, EVENT_KIND_STAR, reshareTargetId } from '@airplane/protocol';
+import { EVENT_KIND_POST, EVENT_KIND_RECEIPT, EVENT_KIND_RESHARE, EVENT_KIND_STAR, reshareTargetId } from '@airplane/protocol';
 import { applyIncomingStar, markStarPostKnown } from './stars';
 import {
   markResharePostKnown,
@@ -37,6 +45,7 @@ import {
   recordDedupDrop,
   recordMessage,
   recordScanStopped,
+  recordTransportFailure,
   setDiagnosticsAdapterState,
   type DiagnosticsMessageAttempt,
 } from './diagnostics';
@@ -144,6 +153,18 @@ let syncTimer: ReturnType<typeof setInterval> | null = null;
 let lastOnline: boolean | null = null;
 let blePort: { port: TransportPort; close: () => Promise<void> } | null = null;
 let bleScanUnsub: (() => void) | null = null;
+/**
+ * True once startTransport() has failed and not since succeeded. The
+ * launch caller swallows the throw (launch must never die on transport),
+ * but the failure must still be visible: the mesh pill reports offline,
+ * never mesh, while this is set, and a Diagnostics line is recorded.
+ */
+let transportStartFailed = false;
+
+/** Whether the last transport start failed (cleared by a later success). */
+export function getTransportStartFailed(): boolean {
+  return transportStartFailed;
+}
 /**
  * BLE radio state. 'permission-blocked' means the OS grants are missing and
  * the priming UI (BlePrime) owns the request; 'unavailable' means the radio
@@ -274,10 +295,34 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
     });
   }
   const store = getStore();
+  // Receipts (kind 2) go through the counting path, not the generic
+  // saveEvent path: saveReceipt updates view_counts with
+  // (pubkey, post, day) dedup, so a relay view counts exactly once and
+  // actually moves the feed. Previously inbound receipts were stored
+  // but never counted, so relay views changed nothing.
+  if (event.kind === EVENT_KIND_RECEIPT) {
+    let counted = false;
+    try {
+      counted = await getStore().saveReceipt(event);
+    } catch {
+      addBreadcrumb('transport: inbound receipt store failed', {
+        id: toHex(event.id).slice(0, 16),
+      });
+      return;
+    }
+    if (counted) notifyFeedListeners();
+    return;
+  }
   // Store the event (deduped by HybridTransport already).
   // saveEvent is idempotent. A store failure is surfaced in
   // Diagnostics and the feed is NOT notified: an unhandled rejection
   // here used to drop the event while Hybrid already marked it seen.
+  // A storage failure must not escape as an unhandled rejection (the
+  // caller uses void handleIncoming) and must not be silent: record a
+  // Diagnostics message and a stage-tagged breadcrumb, and drop this
+  // pass only. The event is not queued durably here (no inbound queue
+  // exists in the store schema); it re-arrives via relay replay or BLE
+  // redelivery, and the next sync pass re-checks it.
   try {
     await store.saveEvent(event);
   } catch {
@@ -295,6 +340,9 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
         },
       ],
       finalStatus: 'receive failed',
+    });
+    addBreadcrumb('transport: inbound store failed', {
+      id: toHex(event.id).slice(0, 16),
     });
     return;
   }
@@ -520,6 +568,10 @@ export async function startTransport(): Promise<void> {
   } catch {
     // Never leave a half-started transport behind: reset module state so a
     // later startTransport() can retry cleanly. The app runs offline-only.
+    // The failure is surfaced, not swallowed: a Diagnostics line plus the
+    // failed flag the mesh pill reads (offline, never mesh).
+    transportStartFailed = true;
+    recordTransportFailure('start');
     await blePort?.close();
     blePort = null;
     hybrid = null;
@@ -573,6 +625,7 @@ export async function startTransport(): Promise<void> {
     netUnsub = null;
   }
 
+  transportStartFailed = false;
   // Startup retention cleanup (best-effort, never fails launch). This is
   // the first prune a long-lived install has ever run, so it deletes
   // rows past the designed 24 h window on first launch after this change.
@@ -631,9 +684,16 @@ export interface MeshStatusSnapshot {
  * 'mesh' so the pill keeps its boot appearance until a real state is known;
  * a permission-blocked/unavailable radio with Nostr online shows 'online'
  * (truthful: syncing over the internet, NOT the mesh) instead of the old
- * hardcoded 'mesh only' lie.
+ * hardcoded 'mesh only' lie. A failed transport start maps to 'offline'
+ * even while the radio state still reads 'starting': claiming mesh with
+ * no transport at all was the swallowed-failure lie.
  */
-export function resolveRelayState(nostrOnline: boolean, bleState: BleRadioState): MeshStatusSnapshot['relayState'] {
+export function resolveRelayState(
+  nostrOnline: boolean,
+  bleState: BleRadioState,
+  transportFailed = false,
+): MeshStatusSnapshot['relayState'] {
+  if (transportFailed) return 'offline';
   if (nostrOnline) return 'online';
   if (bleState === 'on' || bleState === 'starting') return 'mesh';
   return 'offline';
@@ -648,7 +708,7 @@ let meshSnapshot: MeshStatusSnapshot = { peersNearby: 0, relayState: 'mesh' };
 export function getMeshStatus(): MeshStatusSnapshot {
   const next: MeshStatusSnapshot = {
     peersNearby: blePeerIdsForPublish(blePort?.port).length,
-    relayState: resolveRelayState(!!hybrid?.nostr.online, bleRadioState),
+    relayState: resolveRelayState(!!hybrid?.nostr.online, bleRadioState, transportStartFailed),
   };
   if (next.peersNearby !== meshSnapshot.peersNearby || next.relayState !== meshSnapshot.relayState) {
     meshSnapshot = next;
@@ -843,6 +903,7 @@ export async function stopTransport(): Promise<void> {
   hybrid = null;
   sync = null;
   radioWasOn = false;
+  transportStartFailed = false;
   bleRadioState = 'unavailable';
   syncDiagnosticsAdapterState();
 }
