@@ -378,21 +378,26 @@ export function sealDm(
   recipientMeshHex: string,
   createdAtSec?: number,
 ): DmEnvelope {
-  const recipient = dmFromHex(recipientMeshHex);
+  // Normalize case at the seal boundary: the service rejects uppercase
+  // hex, but the hex parser accepts it, so an uppercase recipient used to
+  // seal an envelope no lowercase subscribe check would ever match.
+  const sender = senderMeshHex.toLowerCase();
+  const recipientHex = recipientMeshHex.toLowerCase();
+  const recipient = dmFromHex(recipientHex);
   if (!recipient || recipient.length !== 32) throw new Error('sealDm: bad recipient pubkey');
   const ephemeralSecret = x25519.utils.randomSecretKey();
   const ephemeralPubkey = x25519.getPublicKey(ephemeralSecret);
   const convKey = dmConversationKeyX(ephemeralSecret, meshPubkeyToX25519(recipient));
   const rumor: DmRumor = {
     kind: 14,
-    pubkey: senderMeshHex,
+    pubkey: sender,
     created_at: createdAtSec ?? Math.floor(Date.now() / 1000),
-    tags: [['p', recipientMeshHex]],
+    tags: [['p', recipientHex]],
     content: text,
   };
   return {
     ephemeralPubkeyHex: dmToHex(ephemeralPubkey),
-    recipientHex: recipientMeshHex,
+    recipientHex: recipientHex,
     sealed: nip44Encrypt(JSON.stringify(rumor), convKey),
     createdAt: rumor.created_at,
   };

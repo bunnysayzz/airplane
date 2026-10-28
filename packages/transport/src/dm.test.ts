@@ -89,6 +89,18 @@ describe('DM crypto', () => {
     expect(nip44Decrypt('not-base64!!', key)).toBeNull();
   });
 
+  test('F18: sealDm lowercases sender and recipient hex', () => {
+    const alice = ed25519.utils.randomSecretKey();
+    const bob = ed25519.utils.randomSecretKey();
+    const aliceHex = dmToHex(ed25519.getPublicKey(alice));
+    const bobHex = dmToHex(ed25519.getPublicKey(bob));
+    const envelope = sealDm('cased', aliceHex.toUpperCase(), bobHex.toUpperCase());
+    expect(envelope.recipientHex).toBe(bobHex);
+    const rumor = unsealDm(envelope, dmKeypairFromDeviceSecret(bob), bobHex);
+    expect(rumor?.pubkey).toBe(aliceHex);
+    expect(rumor?.tags).toEqual([['p', bobHex]]);
+  });
+
   test('F11: unseal rejects oversize content, mistagged rumors, and rumors without a p tag', () => {
     const alice = ed25519.utils.randomSecretKey();
     const bob = ed25519.utils.randomSecretKey();
