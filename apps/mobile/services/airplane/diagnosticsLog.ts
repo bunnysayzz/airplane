@@ -300,6 +300,20 @@ export class DiagnosticsLogWriter {
       }
     }
   }
+
+  /**
+   * Resolve only when the writer is quiescent: no write in flight and
+   * nothing dirty. flush() alone cannot promise this: it returns
+   * immediately when a write is already in flight, just marking dirty.
+   * Share awaits this instead of flush so the shared file contains
+   * the lines that triggered the last flush, not the previous write.
+   */
+  async flushComplete(): Promise<void> {
+    await this.flush();
+    while (this.flushing || this.dirty) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
 }
 
 /** Trailing coalescing window for sink appends, matching the notify throttle. */

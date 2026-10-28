@@ -73,6 +73,37 @@ describe('diagnostics log writer', () => {
     expect(writer.getLineCount()).toBe(2);
   });
 
+  test('flushComplete waits for the in-flight flush and its dirty re-flush', async () => {
+    let resolveFirstWrite!: () => void;
+    let writeCalls = 0;
+    const port: DiagnosticsLogFilePort & { content: string } = {
+      content: '',
+      read: async () => (port.content.length > 0 ? port.content : null),
+      write: (content: string) => {
+        writeCalls += 1;
+        if (writeCalls === 1) {
+          return new Promise<void>((resolve) => {
+            resolveFirstWrite = resolve;
+          });
+        }
+        port.content = content;
+        return Promise.resolve();
+      },
+    };
+    const writer = new DiagnosticsLogWriter(port);
+    await writer.load();
+    writer.append('2026-10-27T00:00:00.000Z app started');
+    // This lands while the first write is in flight, so it only marks
+    // the buffer dirty. A plain flush() here would return at once and
+    // the shared file would still miss this line.
+    writer.append('2026-10-27T00:00:01.000Z scan started');
+    const complete = writer.flushComplete();
+    resolveFirstWrite();
+    await complete;
+    expect(port.content).toContain('app started');
+    expect(port.content).toContain('scan started');
+  });
+
   test('a failing port never throws to the app', async () => {
     const port: DiagnosticsLogFilePort = {
       read: async () => {

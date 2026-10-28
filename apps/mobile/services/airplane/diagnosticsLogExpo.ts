@@ -115,7 +115,7 @@ export async function shareDiagnosticsLogFile(): Promise<void> {
   if (writer === null) {
     await startDiagnosticsLogFile();
   }
-  await writer?.flush();
+  await writer?.flushComplete();
   const available = await Sharing.isAvailableAsync();
   if (!available) throw new Error('sharing unavailable');
   await Sharing.shareAsync(logFileUri(), {
