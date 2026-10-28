@@ -196,6 +196,15 @@ describe('captureError', () => {
 });
 
 describe('addBreadcrumb', () => {
+  test('re-init with the same DSN keeps breadcrumbs, a changed DSN clears them', () => {
+    initSentry(TEST_DSN);
+    addBreadcrumb('keep-me');
+    initSentry(TEST_DSN);
+    expect(__getBreadcrumbsForTests()).toHaveLength(1);
+    initSentry('https://otherkey@o0.ingest.sentry.io/456');
+    expect(__getBreadcrumbsForTests()).toHaveLength(0);
+  });
+
   test('caps the buffer at 20, dropping the oldest', () => {
     for (let i = 0; i < 25; i++) {
       addBreadcrumb(`crumb-${i}`);

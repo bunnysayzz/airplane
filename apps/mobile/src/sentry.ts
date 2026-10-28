@@ -136,6 +136,9 @@ function parseStack(stack: string): StackFrame[] {
 let enabled = false;
 let dsnParts: SentryDsnParts | null = null;
 let breadcrumbs: SentryBreadcrumb[] = [];
+/** Last DSN string init saw, so re-init with the same DSN keeps crumbs. */
+let lastDsnSeen: string | undefined = undefined;
+let haveLastDsn = false;
 /**
  * Disabled-state note (P2-6): when init ends disabled, one log line is
  * owed to the diagnostics log. The log sink is not attached yet at
@@ -153,9 +156,16 @@ let disabledNoteConsumed = false;
  */
 export function initSentry(dsn?: string): void {
   try {
-    breadcrumbs = [];
     const raw =
       dsn ?? (typeof process !== 'undefined' ? process.env['EXPO_PUBLIC_SENTRY_DSN'] : undefined);
+    // Only clear breadcrumbs when the DSN actually changes: a re-init
+    // with the same DSN (for example after a settings change) must not
+    // silently drop the breadcrumbs collected for the next event.
+    if (!haveLastDsn || raw !== lastDsnSeen) {
+      breadcrumbs = [];
+      haveLastDsn = true;
+      lastDsnSeen = raw;
+    }
     dsnParts = raw ? parseDsn(raw) : null;
     enabled = dsnParts !== null;
     if (enabled) {
