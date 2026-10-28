@@ -115,7 +115,13 @@ export async function ensureStarsHydrated(): Promise<void> {
   }
 }
 
-/** Best-effort durable write of one accepted kind-4 event. Never throws. */
+/**
+ * Best-effort durable write of one accepted kind-4 event. Never throws,
+ * but the returned promise settles only when the store write has settled,
+ * so `await persistStarEvent(...)` in toggleStar is a real durability
+ * await: previously the wrapper returned nothing and the toggle could
+ * return before the write landed, losing the star on a kill.
+ */
 async function persistStarEvent(event: SignedEvent): Promise<void> {
   const p = (async () => {
     try {
@@ -130,9 +136,13 @@ async function persistStarEvent(event: SignedEvent): Promise<void> {
   void p.then(() => {
     pendingWrites.delete(p);
   });
+  return p;
 }
 
-/** Best-effort durable write of one known post id. Never throws. */
+/** Best-effort durable write of one known post id. Never throws. Same
+ * real-await contract as persistStarEvent: the returned promise settles
+ * only when the store write has settled (or immediately when this post
+ * was already persisted this session). */
 async function persistStarKnownPost(postIdHex: Hex64): Promise<void> {
   const id = postIdHex.toLowerCase();
   if (persistedKnownPosts.has(id)) return;
@@ -151,6 +161,7 @@ async function persistStarKnownPost(postIdHex: Hex64): Promise<void> {
   void p.then(() => {
     pendingWrites.delete(p);
   });
+  return p;
 }
 
 /** Test seam: await every in-flight star persistence write. */

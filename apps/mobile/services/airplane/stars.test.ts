@@ -15,7 +15,7 @@ import {
 } from './stars';
 import { __resetDeviceKeypairForTests } from './identity';
 import { __resetFeedListenersForTests } from './feed';
-import { __resetStoreForTests } from './store';
+import { getStore, __resetStoreForTests } from './store';
 
 const crypto = new NobleCrypto();
 const POST = 'b'.repeat(64);
@@ -58,6 +58,16 @@ describe('toggleStar (optimistic own star)', () => {
     expect(after.starredByMe).toBe(false);
     expect(after.count).toBe(0);
     expect(after.label).toBe('');
+  });
+
+  test('toggleStar returns only after the star row is durable (no flush seam)', async () => {
+    const publish = jest.fn(async () => {});
+    await toggleStar(POST, 'tdr1v', { publish });
+    // No __flushStarPersistenceForTests call: the row must already be on
+    // disk when the toggle promise resolves, or a kill here resurrects
+    // the old star state on restart.
+    expect(await getStore().listStarEvents()).toHaveLength(1);
+    expect(await getStore().listStarKnownPosts()).toContain(POST);
   });
 
   test('a publish failure still leaves the optimistic local star in place', async () => {
