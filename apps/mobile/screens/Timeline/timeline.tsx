@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, RefreshControl, Text, View } from 'react-
 import { FlashList, FlashListRef } from '@shopify/flash-list';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { listFeedPosts, notifyFeedListeners, subscribeFeed } from '../../services/airplane/feed';
+import { listFeedPosts, subscribeFeed } from '../../services/airplane/feed';
 import { toggleReshare } from '../../services/airplane/reshares';
 import { toggleStar } from '../../services/airplane/stars';
 import { trackViewability } from '../../services/airplane/viewTracker';
@@ -97,17 +97,37 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
 
     // The store has no change events of its own: composer and viewTracker notify,
     // and the timeline re-queries. Arrivals while scrolled down pile up behind the pill.
-    useEffect(
-        () =>
-            subscribeFeed(() => {
-                if (atTop.current) {
-                    load('refresh');
-                } else {
-                    setPendingCount(count => count + 1);
-                }
-            }),
-        [load]
-    );
+    // Burst guard: transport ingress, view receipts, and reshares can fire several
+    // notifications in one burst, and each one used to trigger a full re-query
+    // (50 rows rebuilt as new objects, defeating the PostCard memo). Coalesce
+    // to one trailing refresh: the timer re-checks atTop at fire time, so a
+    // refresh scheduled at the top that outlives a scroll-down becomes a pill
+    // count instead of a mid-scroll list replacement.
+    const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => {
+        const unsub = subscribeFeed(() => {
+            if (atTop.current) {
+                if (refreshTimerRef.current !== null) clearTimeout(refreshTimerRef.current);
+                refreshTimerRef.current = setTimeout(() => {
+                    refreshTimerRef.current = null;
+                    if (atTop.current) {
+                        load('refresh');
+                    } else {
+                        setPendingCount(count => count + 1);
+                    }
+                }, 250);
+            } else {
+                setPendingCount(count => count + 1);
+            }
+        });
+        return () => {
+            unsub();
+            if (refreshTimerRef.current !== null) {
+                clearTimeout(refreshTimerRef.current);
+                refreshTimerRef.current = null;
+            }
+        };
+    }, [load]);
 
     const showNewPosts = useCallback(async () => {
         await load('refresh');
@@ -165,7 +185,9 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
     const renderItem = useCallback(
         ({ item }: { item: PostCardModel }) => (
             <PostCard post={item} onPress={onPostPress} onStar={handleStar} onMessage={onMessage} onReshare={() => {
-                void toggleReshare(item).then(() => notifyFeedListeners());
+                // The service notifies feed listeners itself; the caller used
+                // to notify a second time, doubling the refresh per tap.
+                void toggleReshare(item);
             }} />
         ),
         [onPostPress, handleStar, onMessage]
