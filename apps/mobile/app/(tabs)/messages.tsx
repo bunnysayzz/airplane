@@ -20,19 +20,33 @@ export default function MessagesTab() {
     const [blocked, setBlocked] = useState<DmConversationRow[]>([]);
     const [previews, setPreviews] = useState<Record<string, string | null>>({});
     const [paste, setPaste] = useState('');
+    // A failed refresh used to leave stale lists with no error shown. Now
+    // refresh is all-or-nothing (lists + previews set only on success) and
+    // a failure shows a retry affordance instead of silent staleness.
+    const [refreshError, setRefreshError] = useState(false);
 
     const refresh = useCallback(() => {
         void getDmService().then(async svc => {
-            const nextInbox = await svc.listInbox();
-            const nextRequests = await svc.listRequests();
-            setInbox(nextInbox);
-            setRequests(nextRequests);
-            setBlocked(await svc.listBlocked());
-            const nextPreviews: Record<string, string | null> = {};
-            for (const c of [...nextInbox, ...nextRequests]) {
-                nextPreviews[c.peerHex] = await svc.previewFor(c.peerHex);
+            try {
+                const nextInbox = await svc.listInbox();
+                const nextRequests = await svc.listRequests();
+                const nextBlocked = await svc.listBlocked();
+                const convs = [...nextInbox, ...nextRequests];
+                // Previews used to load one conversation at a time (each a
+                // potential decrypt); one parallel batch instead.
+                const previewValues = await Promise.all(convs.map(c => svc.previewFor(c.peerHex)));
+                const nextPreviews: Record<string, string | null> = {};
+                convs.forEach((c, i) => {
+                    nextPreviews[c.peerHex] = previewValues[i];
+                });
+                setInbox(nextInbox);
+                setRequests(nextRequests);
+                setBlocked(nextBlocked);
+                setPreviews(nextPreviews);
+                setRefreshError(false);
+            } catch {
+                setRefreshError(true);
             }
-            setPreviews(nextPreviews);
         });
     }, []);
 
@@ -105,6 +119,15 @@ export default function MessagesTab() {
                 </Pressable>
             </View>
 
+            {refreshError ? (
+                <View style={styles.retryRow}>
+                    <Text style={[type.meta, { color: colors.textMuted }]}>Could not refresh conversations.</Text>
+                    <Pressable onPress={refresh} accessibilityRole="button" accessibilityLabel="Retry loading conversations">
+                        <Text style={[type.meta, { color: colors.accentText }]}>Retry</Text>
+                    </Pressable>
+                </View>
+            ) : null}
+
             {requests.length > 0 ? (
                 <>
                     <Text style={[type.name, { color: colors.textPrimary, marginTop: 20 }]}>Requests ({requests.length})</Text>
@@ -141,6 +164,7 @@ const styles = StyleSheet.create({
     root: { flex: 1 },
     content: { padding: 16, paddingBottom: 120 },
     pasteRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
+    retryRow: { flexDirection: 'row', gap: 8, marginTop: 12, alignItems: 'center' },
     input: { flex: 1, borderWidth: 1, borderRadius: 8, padding: 10 },
     go: { borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
     row: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, gap: 2 },
