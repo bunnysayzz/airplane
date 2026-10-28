@@ -12,7 +12,7 @@
 
 import { schnorr } from '@noble/curves/secp256k1.js';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { dmToHex, type DmEnvelope } from './dm';
+import { dmFromHex, dmToHex, type DmEnvelope } from './dm';
 import type { DmRelayPort } from './dmService';
 import { DEFAULT_RELAYS, type WebSocketLike } from './nostr';
 
@@ -63,6 +63,30 @@ export function nostrEventToDmEnvelope(event: NostrDmEvent): DmEnvelope | null {
     ) {
       return null;
     }
+    // The event's own p tag must name the envelope recipient: a relay
+    // must not be able to re-address an event to a different recipient.
+    if (
+      !Array.isArray(event.tags) ||
+      !event.tags.some(tag => tag[0] === 'p' && tag[1] === envelope.recipientHex)
+    ) {
+      return null;
+    }
+    // Verify the Nostr id and schnorr signature with the same construction
+    // the sender used, so a relay cannot forge 1059 events claiming any
+    // sender. This stops relay forgery, not peer forgery by a party that
+    // seals correctly (that needs the separate sender-auth protocol fix).
+    if (typeof event.created_at !== 'number') return null;
+    const pubkeyBytes = dmFromHex(event.pubkey);
+    const idBytes = dmFromHex(event.id);
+    const sigBytes = dmFromHex(event.sig);
+    if (!pubkeyBytes || pubkeyBytes.length !== 32) return null;
+    if (!idBytes || idBytes.length !== 32) return null;
+    if (!sigBytes || sigBytes.length !== 64) return null;
+    const expectedId = sha256(
+      new TextEncoder().encode(JSON.stringify([0, event.pubkey, event.created_at, 1059, event.tags, event.content])),
+    );
+    if (dmToHex(expectedId) !== event.id) return null;
+    if (!schnorr.verify(sigBytes, idBytes, pubkeyBytes)) return null;
     envelope.relayEventId = event.id;
     return envelope;
   } catch {
@@ -200,7 +224,7 @@ export class WsDmRelay implements DmRelayPort {
       ws.onmessage = ev => {
         try {
           const data = JSON.parse(String(ev.data)) as unknown[];
-          if (data[0] === 'EVENT' && data[2]) {
+          if (data[0] === 'EVENT' && data[1] === subId && data[2]) {
             const envelope = nostrEventToDmEnvelope(data[2] as NostrDmEvent);
             if (envelope && envelope.recipientHex === ownMeshHex) onEnvelope(envelope);
           }

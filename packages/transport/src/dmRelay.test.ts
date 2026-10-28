@@ -3,6 +3,8 @@
 // Relays are fully mocked; no network touches this file.
 
 import { ed25519 } from '@noble/curves/ed25519.js';
+import { schnorr } from '@noble/curves/secp256k1.js';
+import { sha256 } from '@noble/hashes/sha2.js';
 import { dmToHex, sealDm, type DmEnvelope } from './dm';
 import {
   WsDmRelay,
@@ -171,6 +173,57 @@ describe('WsDmRelay.publish socket paths (P1-11)', () => {
     sockets[0].receive(['OK', event.id, true]);
     await expect(result).resolves.toBe(true);
     expect(sockets[0].closed).toBe(true);
+  });
+});
+
+describe('nostrEventToDmEnvelope relay verification (F12)', () => {
+  test('a forged signature, a wrong id, and a mismatched p tag are all rejected', () => {
+    const sender = ed25519.utils.randomSecretKey();
+    const envelope = sealDm('real', dmToHex(ed25519.getPublicKey(sender)), 'c'.repeat(64));
+    const event = dmEnvelopeToNostrEvent(envelope);
+    expect(nostrEventToDmEnvelope(event)).not.toBeNull();
+    const badSig = { ...event, sig: event.sig.slice(0, -1) + (event.sig.endsWith('0') ? '1' : '0') };
+    expect(nostrEventToDmEnvelope(badSig)).toBeNull();
+    expect(nostrEventToDmEnvelope({ ...event, id: '0'.repeat(64) })).toBeNull();
+    // Valid signature over mismatched tags: the p tag must match the
+    // envelope recipient even when the signature itself verifies.
+    const keys = schnorr.utils.randomPrivateKey();
+    const pubkey = dmToHex(schnorr.getPublicKey(keys));
+    const tags = [['p', 'f'.repeat(64)]];
+    const content = JSON.stringify(envelope);
+    const idBytes = sha256(
+      new TextEncoder().encode(JSON.stringify([0, pubkey, envelope.createdAt, 1059, tags, content])),
+    );
+    const mismatched = {
+      id: dmToHex(idBytes),
+      pubkey,
+      created_at: envelope.createdAt,
+      kind: 1059,
+      tags,
+      content,
+      sig: dmToHex(schnorr.sign(idBytes, keys)),
+    };
+    expect(nostrEventToDmEnvelope(mismatched)).toBeNull();
+  });
+
+  test('events for another subscription id are ignored by subscribe', async () => {
+    const sockets: FakeSocket[] = [];
+    const relay = makeRelay(sockets);
+    const ownHex = 'c'.repeat(64);
+    const received: DmEnvelope[] = [];
+    const unsub = relay.subscribe(ownHex, e => {
+      received.push(e);
+    });
+    sockets[0].open();
+    const req = JSON.parse(sockets[0].sent[0]) as unknown[];
+    const sender = ed25519.utils.randomSecretKey();
+    const envelope = sealDm('for me', dmToHex(ed25519.getPublicKey(sender)), ownHex);
+    const event = dmEnvelopeToNostrEvent(envelope);
+    sockets[0].receive(['EVENT', 'some-other-sub', event]);
+    expect(received).toHaveLength(0);
+    sockets[0].receive(['EVENT', req[1], event]);
+    expect(received).toHaveLength(1);
+    unsub();
   });
 });
 
