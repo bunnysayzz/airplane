@@ -22,7 +22,7 @@ import type {
 } from '@airplane/protocol';
 import { EVENT_KIND_STAR } from '@airplane/protocol';
 import type { StorePort, DatabasePort, ListFeedOpts } from './ports';
-import { MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005 } from './schema';
+import { MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006 } from './schema';
 import {
   DEFAULT_RETENTION_SEC,
   RECEIPT_DAY_BUCKET_SEC,
@@ -186,15 +186,15 @@ export class OpSqliteStore implements StorePort {
    *
    * - `schema_version` is bootstrapped with CREATE TABLE IF NOT EXISTS (not
    *   a numbered migration) and MAX(version) is read as the current level.
-   * - v >= 5: no-op (re-running migrate on an up-to-date DB is safe).
-   * - v == 4: apply 005 (reshare events table).
+   * - v >= 6: no-op (re-running migrate on an up-to-date DB is safe).
+   * - v == 5: apply 006 (feed index). v == 4: apply 005, 006.
    * - v == 0: legacy pre-versioning DBs are detected via sqlite_master:
-   *   no `events` table -> fresh install (apply 001, 002, 003, 004, 005);
+   *   no `events` table -> fresh install (apply 001, 002, 003, 004, 005, 006);
    *   `events` without `world_confirmed` -> 001-only install (apply 002,
-   *   003, 004, 005); both present -> 002-era install (apply 003, 004,
-   *   005 only; re-running 002's plain CREATE TABLE would throw).
-   * - v == 1: apply 002, 003, 004, 005. v == 2: apply 003, 004, 005.
-   *   v == 3: apply 004, 005.
+   *   003, 004, 005, 006); both present -> 002-era install (apply 003, 004,
+   *   005, 006 only).
+   * - v == 1: apply 002, 003, 004, 005, 006. v == 2: apply 003, 004, 005, 006.
+   *   v == 3: apply 004, 005, 006.
    * - Each numbered migration runs inside a transaction (BEGIN IMMEDIATE;
    *   COMMIT; ROLLBACK + rethrow on error) together with its version row,
    *   so a kill between the DDL commit and the version insert cannot
@@ -233,9 +233,14 @@ export class OpSqliteStore implements StorePort {
       });
     };
 
-    if (v >= 5) return;
+    if (v >= 6) return;
+    if (v === 5) {
+      await applyMigration(6, MIGRATION_006);
+      return;
+    }
     if (v === 4) {
       await applyMigration(5, MIGRATION_005);
+      await applyMigration(6, MIGRATION_006);
       return;
     }
     if (v === 0) {
@@ -253,6 +258,7 @@ export class OpSqliteStore implements StorePort {
       await applyMigration(3, MIGRATION_003);
       await applyMigration(4, MIGRATION_004);
       await applyMigration(5, MIGRATION_005);
+      await applyMigration(6, MIGRATION_006);
       return;
     }
     if (v === 1) {
@@ -260,17 +266,20 @@ export class OpSqliteStore implements StorePort {
       await applyMigration(3, MIGRATION_003);
       await applyMigration(4, MIGRATION_004);
       await applyMigration(5, MIGRATION_005);
+      await applyMigration(6, MIGRATION_006);
       return;
     }
     if (v === 2) {
       await applyMigration(3, MIGRATION_003);
       await applyMigration(4, MIGRATION_004);
       await applyMigration(5, MIGRATION_005);
+      await applyMigration(6, MIGRATION_006);
       return;
     }
-    // v === 3 falls through: only 004 and 005 remain.
+    // v === 3 falls through: only 004, 005, and 006 remain.
     await applyMigration(4, MIGRATION_004);
     await applyMigration(5, MIGRATION_005);
+    await applyMigration(6, MIGRATION_006);
   }
 
   async saveEvent(e: SignedEvent): Promise<void> {

@@ -160,3 +160,21 @@ CREATE TABLE IF NOT EXISTS reshare_events(
 );
 CREATE INDEX IF NOT EXISTS idx_reshare_events_target ON reshare_events(target_id);
 `;
+
+/**
+ * MIGRATION_006 - Feed query index matching the real filter and sort.
+ *
+ * The feed query filters kind = 1, deleted = 0, expires_at > now,
+ * geohash IN (cells), and sorts by created_at DESC, id DESC, but the
+ * only feed index was (kind, geohash, created_at DESC): no id tiebreak
+ * and no deleted/expiry coverage. This additive index matches the sort
+ * exactly. Honest limit, kept in the comment on purpose: with a
+ * multi-value IN list SQLite still cannot walk one index in global
+ * created_at order across cells, so a cross-cell sort before LIMIT may
+ * remain; the index removes the per-cell sort and the tiebreak gap.
+ * The old index is kept: dropping it waits on EXPLAIN proof on a
+ * realistic database that the new one is used.
+ */
+export const MIGRATION_006 = `
+CREATE INDEX IF NOT EXISTS idx_events_feed_v2 ON events(kind, geohash, created_at DESC, id DESC);
+`;
