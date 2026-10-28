@@ -44,13 +44,18 @@ export default function PostScreen() {
         void toggleStar(eventId, post.geohash).catch(() => {});
     };
 
+    // No onPostPress here, deliberately: the in-thread card IS this post,
+    // and passing a navigating onPress pushed the same /post/[id] route
+    // again on every tap, stacking duplicate thread screens (Back then
+    // walked through duplicates). With no onPress the card renders as a
+    // plain view, so a post opens once; star, message and reshare below
+    // still work through their own handlers.
     return (
         <Thread
             postId={id ?? ''}
             posts={posts}
             loading={loading}
             onBack={goBack}
-            onPostPress={eventId => router.push(`/post/${eventId}`)}
             onStar={handleStar}
             onMessage={authorPubkeyHex => router.push(`/dm/${authorPubkeyHex}`)}
         />

@@ -6,13 +6,14 @@
 // real mesh events by another worker) and renders author, body and the views
 // count. Views are the hero stat - this product ranks by views, so there are
 // deliberately no hearts, reposts, bookmarks or follow buttons.
-import React from 'react';
+import React, { useRef } from 'react';
 import { Pressable, Text } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Post } from './ui/post';
 import { EyeIcon } from './ui/eyeIcon';
 import { useTheme } from '../src/theme/themeContext';
 import { formatCompact } from '../src/lib/format';
+import { isWithinWindow } from '../src/lib/navGuard';
 
 export interface PostCardModel {
   /** hex event hash (stable key) */
@@ -90,9 +91,24 @@ export function ReshareIcon({ size = 17, color }: { size?: number; color?: strin
 export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: PostCardProps) {
   const { type, colors } = useTheme();
 
+  // Inner-action guard: the card is a Pressable wrapping inner Pressables
+  // (Message, star, reshare). React Native gives the inner responder the
+  // tap, so inner taps do not navigate in practice, but a platform
+  // double-fire must never open the thread: a card press within 500ms of
+  // an inner action is treated as that action, not a navigation.
+  const lastActionAt = useRef(0);
+  const markAction = () => {
+    lastActionAt.current = Date.now();
+  };
+  const handleCardPress = onPress
+    ? () => {
+        if (!isWithinWindow(lastActionAt.current, Date.now(), 500)) onPress(post.eventId);
+      }
+    : undefined;
+
   return (
     <Post
-      onPress={onPress ? () => onPress(post.eventId) : undefined}
+      onPress={handleCardPress}
       accessibilityLabel={`Post by ${post.authorLabel}, ${post.views} views, ${post.reshares} reshares`}
     >
       <Post.Header>
@@ -117,7 +133,10 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
         <Post.Stat icon={EyeIcon} value={formatCompact(post.views)} />
         {onMessage && post.authorPubkeyHex ? (
           <Pressable
-            onPress={() => onMessage(post.authorPubkeyHex as string)}
+            onPress={() => {
+              markAction();
+              onMessage(post.authorPubkeyHex as string);
+            }}
             accessibilityRole="button"
             accessibilityLabel={`Message ${post.authorLabel}`}
           >
@@ -132,7 +151,14 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
           value={formatCompact(post.reshares)}
           tone="repost"
           active={post.resharedByMe}
-          onPress={onReshare ? () => onReshare(post.eventId) : undefined}
+          onPress={
+            onReshare
+              ? () => {
+                  markAction();
+                  onReshare(post.eventId);
+                }
+              : undefined
+          }
           accessibilityLabel={
             post.resharedByMe
               ? 'You reshared this post. Tap to unreshare.'
@@ -150,7 +176,14 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
           active={post.starredByMe ?? false}
           tone="like"
           value={post.starLabel ? post.starLabel : undefined}
-          onPress={onStar ? () => onStar(post.eventId) : undefined}
+          onPress={
+            onStar
+              ? () => {
+                  markAction();
+                  onStar(post.eventId);
+                }
+              : undefined
+          }
           accessibilityLabel={
             post.starredByMe ? 'Unstar this post' : 'Star this post'
           }

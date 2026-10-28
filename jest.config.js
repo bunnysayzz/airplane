@@ -69,6 +69,9 @@ module.exports = {
       rootDir: path.join(rootDir, 'apps', 'mobile'),
       testMatch: [
         '<rootDir>/services/**/*.test.ts',
+        // Pure-logic UI helpers (no React Native imports) run in the node
+        // harness too; navGuard is the first such file under src/lib.
+        '<rootDir>/src/lib/*.test.ts',
         // First-launch onboarding gating is UI-adjacent but pure async
         // storage; it runs in the node harness with AsyncStorage mocked.
         '<rootDir>/screens/Setup/*.test.ts',

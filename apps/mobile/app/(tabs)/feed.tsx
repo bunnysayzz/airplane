@@ -8,6 +8,7 @@ import { BlePrime } from '../../components/BlePrime/blePrime';
 import { useTheme } from '../../src/theme/themeContext';
 import { resolveFeedCells } from '../../services/airplane/feedCells';
 import { subscribeFeed } from '../../services/airplane/feed';
+import { isDoublePush } from '../../src/lib/navGuard';
 
 export default function FeedTab() {
     const router = useRouter();
@@ -21,6 +22,20 @@ export default function FeedTab() {
     // feed never flashes empty mid-resolve.
     const [cells, setCells] = useState<string[]>([]);
     const cellsKeyRef = useRef('');
+
+    // Double-push guard: rapid taps on a feed card pushed the same post
+    // route twice, stacking duplicate thread screens. A repeat push of the
+    // same post within 1s is ignored; a later tap navigates normally.
+    const lastPostPushRef = useRef<{ eventId: string; atMs: number } | null>(null);
+    const handlePostPress = useCallback(
+        (eventId: string) => {
+            const nowMs = Date.now();
+            if (isDoublePush(lastPostPushRef.current, eventId, nowMs)) return;
+            lastPostPushRef.current = { eventId, atMs: nowMs };
+            router.push(`/post/${eventId}`);
+        },
+        [router],
+    );
 
     const resolveCells = useCallback(async () => {
         const next = await resolveFeedCells();
@@ -53,7 +68,7 @@ export default function FeedTab() {
             <TopBar onSettingsPress={() => router.navigate('/(tabs)/settings')} />
             <Timeline
                 cells={cells}
-                onPostPress={eventId => router.push(`/post/${eventId}`)}
+                onPostPress={handlePostPress}
                 onComposePress={openCompose}
                 onMessage={authorPubkeyHex => router.push(`/dm/${authorPubkeyHex}`)}
             />
