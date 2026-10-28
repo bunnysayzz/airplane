@@ -17,6 +17,9 @@ import { useTheme } from '../../src/theme/themeContext';
 export default function DmThreadScreen() {
     const { peer } = useLocalSearchParams<{ peer: string }>();
     const peerHex = (peer ?? '').toLowerCase();
+    // Screen boundary for peer validation: a garbage route id must never
+    // create a phantom conversation or render actions for one.
+    const peerValid = /^[0-9a-f]{64}$/.test(peerHex);
     const insets = useSafeAreaInsets();
     const { colors, type } = useTheme();
     const [thread, setThread] = useState<DmThreadRow[]>([]);
@@ -49,6 +52,11 @@ export default function DmThreadScreen() {
     }, []);
 
     const refresh = useCallback(() => {
+        if (!peerValid) {
+            setThread([]);
+            setConv(null);
+            return;
+        }
         void getDmService().then(async svc => {
             setThread(await svc.getThread(peerHex));
             const inbox = await svc.listInbox();
@@ -56,9 +64,14 @@ export default function DmThreadScreen() {
             const blocked = await svc.listBlocked();
             setConv([...inbox, ...requests, ...blocked].find(c => c.peerHex === peerHex) ?? null);
         });
-    }, [peerHex]);
+    }, [peerHex, peerValid]);
 
     useEffect(() => {
+        if (!peerValid) {
+            setThread([]);
+            setConv(null);
+            return;
+        }
         refresh();
         let unsub: (() => void) | undefined;
         void getDmService().then(svc => {
@@ -66,7 +79,7 @@ export default function DmThreadScreen() {
             void svc.markRead(peerHex);
         });
         return () => unsub?.();
-    }, [refresh, peerHex]);
+    }, [refresh, peerHex, peerValid]);
 
     const send = () => {
         const text = draft.trim();
@@ -127,6 +140,23 @@ export default function DmThreadScreen() {
     };
 
     const isRequest = conv?.state === 'request';
+
+    if (!peerValid) {
+        return (
+            <View style={[styles.root, { backgroundColor: colors.background }]}>
+                <View style={[styles.header, { borderBottomColor: colors.borderColor, paddingTop: insets.top + 16 }]}>
+                    <Pressable onPress={() => router.back()}>
+                        <Text style={[type.meta, { color: colors.accentText }]}>Back</Text>
+                    </Pressable>
+                    <Text style={[type.name, { color: colors.textPrimary }]}>Invalid conversation</Text>
+                    <View style={styles.headerSpacer} />
+                </View>
+                <View style={styles.list}>
+                    <Text style={[type.meta, { color: colors.textMuted }]}>This conversation key is not valid.</Text>
+                </View>
+            </View>
+        );
+    }
 
     // F10: the keyboard must never cover the input and Send button. iOS has
     // no window resize, so a padding avoiding view lifts the send row; on

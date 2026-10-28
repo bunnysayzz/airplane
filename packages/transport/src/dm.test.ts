@@ -460,6 +460,25 @@ describe('DmService routing + outbox', () => {
     expect(rows[rows.length - 1].id).toBe('msg-1004');
   });
 
+  test('F24: garbage peer ids are rejected before any row is created', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 120_000_000 };
+    const alice = makePersona(relay, nowRef);
+    await expect(alice.service.blockPeer('garbage')).rejects.toThrow();
+    await expect(alice.service.unblockPeer('garbage')).rejects.toThrow();
+    await expect(alice.service.mutePeer('garbage', true)).rejects.toThrow();
+    await expect(alice.service.acceptRequest('garbage')).rejects.toThrow();
+    await expect(alice.service.ignoreRequest('garbage')).rejects.toThrow();
+    await expect(alice.service.deleteConversationLocalOnly('garbage')).rejects.toThrow();
+    await expect(alice.service.markRead('garbage')).rejects.toThrow();
+    await expect(alice.service.getThread('garbage')).rejects.toThrow();
+    await expect(alice.service.getConversation('garbage')).rejects.toThrow();
+    await expect(alice.service.previewFor('garbage')).rejects.toThrow();
+    await expect(alice.service.retryMessage('garbage', 'nope')).rejects.toThrow();
+    expect(await alice.service.listBlocked()).toHaveLength(0);
+    expect(await alice.service.listInbox()).toHaveLength(0);
+  });
+
   test('P1-09: the flush scheduler re-arms on the backoff and drains without user action', async () => {
     jest.useFakeTimers();
     try {

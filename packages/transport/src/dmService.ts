@@ -211,6 +211,11 @@ function capMapEntries<K, V>(map: Map<K, V>): void {
   }
 }
 
+/** Reject garbage peer ids before any row is created or read. */
+function assertPeerHex(peerHex: string, method: string): void {
+  if (!isHex64(peerHex)) throw new Error(`${method}: peer pubkey must be 64 lowercase hex chars`);
+}
+
 export class DmService {
   private readonly store: DmStorePort;
   private readonly relay: DmRelayPort;
@@ -464,6 +469,7 @@ export class DmService {
 
   /** Tap-to-retry a Failed message: back to Sending, attempts reset, due now. */
   async retryMessage(peerHex: string, messageId: string): Promise<void> {
+    assertPeerHex(peerHex, 'retryMessage');
     const messages = await this.store.listMessages(peerHex);
     const m = messages.find(x => x.id === messageId);
     if (!m || m.direction !== 'out' || m.status !== 'Failed') return;
@@ -547,6 +553,7 @@ export class DmService {
   }
 
   async acceptRequest(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'acceptRequest');
     const c = await this.store.getConversation(peerHex);
     if (c && c.state === 'request') {
       await this.store.upsertConversation({ ...c, state: 'inbox', ignored: false });
@@ -555,6 +562,7 @@ export class DmService {
   }
 
   async ignoreRequest(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'ignoreRequest');
     const c = await this.store.getConversation(peerHex);
     if (c && c.state === 'request') {
       await this.store.upsertConversation({ ...c, ignored: true });
@@ -563,6 +571,7 @@ export class DmService {
   }
 
   async blockPeer(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'blockPeer');
     const c = await this.store.getConversation(peerHex);
     if (c) {
       // Remember where the conversation came from, unless it is already
@@ -597,6 +606,7 @@ export class DmService {
   }
 
   async unblockPeer(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'unblockPeer');
     const c = await this.store.getConversation(peerHex);
     if (c && c.state === 'blocked') {
       if (c.lastMessageAtMs === 0) {
@@ -615,6 +625,7 @@ export class DmService {
   }
 
   async mutePeer(peerHex: string, muted: boolean): Promise<void> {
+    assertPeerHex(peerHex, 'mutePeer');
     const c = await this.store.getConversation(peerHex);
     if (c) {
       await this.store.upsertConversation({ ...c, muted });
@@ -628,6 +639,7 @@ export class DmService {
    * — unsend is impossible, and the UI must say so.
    */
   async deleteConversationLocalOnly(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'deleteConversationLocalOnly');
     const messages = await this.store.listMessages(peerHex);
     for (const m of messages) {
       this.outboxEnvelopes.delete(m.id);
@@ -641,11 +653,18 @@ export class DmService {
   }
 
   async markRead(peerHex: string): Promise<void> {
+    assertPeerHex(peerHex, 'markRead');
     const c = await this.store.getConversation(peerHex);
     if (c && c.unread !== 0) {
       await this.store.upsertConversation({ ...c, unread: 0 });
       this.emit();
     }
+  }
+
+  /** Single conversation row, any state (including ignored requests). */
+  async getConversation(peerHex: string): Promise<DmConversationRow | null> {
+    assertPeerHex(peerHex, 'getConversation');
+    return this.store.getConversation(peerHex);
   }
 
   async listInbox(): Promise<DmConversationRow[]> {
@@ -682,6 +701,7 @@ export class DmService {
    *  plaintext cache (memory only, never disk). Unknown rows get null text
    *  (the UI renders the "Encrypted message" placeholder). */
   async getThread(peerHex: string): Promise<DmThreadRow[]> {
+    assertPeerHex(peerHex, 'getThread');
     // Order by sender time within the conversation, with receive time as
     // the tiebreak for same-second sends. Outgoing rows carry no sender
     // timestamp, so their send time stands in for it.
@@ -716,6 +736,7 @@ export class DmService {
   /** Last-message preview for a conversation row: decrypted text, or null
    *  when the last message is undecryptable (UI shows the placeholder). */
   async previewFor(peerHex: string): Promise<string | null> {
+    assertPeerHex(peerHex, 'previewFor');
     const rows = (await this.store.listMessages(peerHex)).sort((a, b) => a.createdAtMs - b.createdAtMs);
     const last = rows[rows.length - 1];
     if (!last) return null;
