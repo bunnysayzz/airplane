@@ -258,6 +258,29 @@ describe('migrate', () => {
     expect(old).toHaveLength(1);
   });
 
+  test('splitStatements respects semicolons inside strings and comments', async () => {
+    const stmts = splitStatements(
+      `CREATE TABLE t(a TEXT DEFAULT 'x;y'); -- a ; comment\n` +
+        `CREATE TABLE u(b TEXT DEFAULT 'it''s; fine'); /* block ; comment */ ` +
+        `CREATE TABLE v(c INT);`,
+    );
+    expect(stmts).toHaveLength(3);
+    expect(stmts[0]).toContain(`'x;y'`);
+    expect(stmts[1]).toContain(`'it''s; fine'`);
+    expect(stmts[2]).toContain('CREATE TABLE v');
+  });
+
+  test('concurrent migrate calls on one port share a single run', async () => {
+    const db = new DatabaseSync(':memory:');
+    openDbs.push(db);
+    const port = makePort(db, false);
+    await Promise.all([OpSqliteStore.migrate(port), OpSqliteStore.migrate(port)]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+    // A later migrate after the shared run settles still works.
+    await OpSqliteStore.migrate(port);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
   test('a database from a newer build fails fast with a clear error', async () => {
     const { port } = await migratedDb();
     await port.exec(`INSERT INTO schema_version (version, applied_at) VALUES (7, ?)`, [NOW]);

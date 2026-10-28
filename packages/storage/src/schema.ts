@@ -105,7 +105,6 @@ CREATE INDEX IF NOT EXISTS idx_world_confirmed_at ON world_confirmed(confirmed_a
  * author's pubkey and are honored only when it matches the post's author.
  */
 export const MIGRATION_003 = `
-CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
 CREATE TABLE tombstones(target_id BLOB NOT NULL, author BLOB NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(target_id, author));
 CREATE INDEX idx_tombstones_target ON tombstones(target_id);
 `;

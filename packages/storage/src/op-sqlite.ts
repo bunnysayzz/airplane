@@ -31,12 +31,87 @@ import {
   rankScore,
 } from './memory';
 
-/** Split a multi-statement SQL script on `;` boundaries (DDL has no `;` in strings). */
+/**
+ * Split a multi-statement SQL script on `;` boundaries, respecting
+ * single-quoted strings (with '' escapes), double-quoted and backtick
+ * identifiers, line comments, and block comments. The old naive split
+ * broke any future migration whose string literal or default value
+ * contained a semicolon; this one only splits on a `;` outside all of
+ * those, so existing scripts split exactly as before.
+ */
 export function splitStatements(script: string): string[] {
-  return script
-    .split(';')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const out: string[] = [];
+  let cur = '';
+  let i = 0;
+  let quote: string | null = null;
+  let lineComment = false;
+  let blockComment = false;
+  while (i < script.length) {
+    const ch = script[i];
+    const next = script[i + 1];
+    if (lineComment) {
+      cur += ch;
+      if (ch === '\n') lineComment = false;
+      i++;
+      continue;
+    }
+    if (blockComment) {
+      cur += ch;
+      if (ch === '*' && next === '/') {
+        cur += next;
+        i += 2;
+        blockComment = false;
+      } else {
+        i++;
+      }
+      continue;
+    }
+    if (quote) {
+      cur += ch;
+      if (ch === quote) {
+        if (next === quote) {
+          cur += next;
+          i += 2;
+        } else {
+          quote = null;
+          i++;
+        }
+      } else {
+        i++;
+      }
+      continue;
+    }
+    if (ch === '-' && next === '-') {
+      lineComment = true;
+      cur += ch;
+      i++;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      blockComment = true;
+      cur += ch;
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      cur += ch;
+      i++;
+      continue;
+    }
+    if (ch === ';') {
+      const stmt = cur.trim();
+      if (stmt.length > 0) out.push(stmt);
+      cur = '';
+      i++;
+      continue;
+    }
+    cur += ch;
+    i++;
+  }
+  const tail = cur.trim();
+  if (tail.length > 0) out.push(tail);
+  return out;
 }
 
 /**
@@ -49,6 +124,7 @@ export function splitStatements(script: string): string[] {
  * promise always settles).
  */
 const txQueues = new WeakMap<DatabasePort, Promise<void>>();
+const migrateInFlight = new WeakMap<DatabasePort, Promise<void>>();
 
 async function runTransaction<T>(db: DatabasePort, fn: () => Promise<T>): Promise<T> {
   const prev = txQueues.get(db) ?? Promise.resolve();
@@ -207,7 +283,26 @@ export class OpSqliteStore implements StorePort {
    *   is safe (IF NOT EXISTS) and records the missing version row.
    *   A failed upgrade records no version row and can be retried.
    */
+  /**
+   * In-flight migrate runs per port: two DatabasePort callers migrating
+   * the same file concurrently used to collide on the version-row primary
+   * key. Concurrent callers now share one run instead of racing it.
+   * (The production singleton already avoids this; the guard is for the
+   * port API, which allows a second instance.)
+   */
   static async migrate(db: DatabasePort): Promise<void> {
+    const existing = migrateInFlight.get(db);
+    if (existing) return existing;
+    const run = OpSqliteStore.runMigrate(db);
+    migrateInFlight.set(db, run);
+    try {
+      await run;
+    } finally {
+      if (migrateInFlight.get(db) === run) migrateInFlight.delete(db);
+    }
+  }
+
+  private static async runMigrate(db: DatabasePort): Promise<void> {
     await db.exec(
       `CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`,
     );
