@@ -662,8 +662,13 @@ export class OpSqliteStore implements StorePort {
   // ------------------------------------------------------------------
 
   async saveStarEvent(e: SignedEvent): Promise<void> {
+    if (e.kind !== 4) {
+      throw new Error(`saveStarEvent: expected kind 4, got kind ${e.kind}`);
+    }
     const target = taggedPostId(e);
-    if (target === null) return;
+    if (target === null) {
+      throw new Error('saveStarEvent: star has no ["e", postId] tag');
+    }
     await this.db.exec(
       `INSERT INTO star_events
          (event_id, pubkey, target_id, created_at, geohash, tags, content, sig)

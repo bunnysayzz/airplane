@@ -819,6 +819,15 @@ describe('stars (MIGRATION_004)', () => {
     }
   });
 
+  test('saveStarEvent rejects non-kind-4 events and stars without an e tag', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    await expect(store.saveStarEvent(makeEvent({ seed: 81, kind: 1 }))).rejects.toThrow(/kind 4/);
+    await expect(
+      store.saveStarEvent(makeEvent({ seed: 82, kind: 4, tags: [] })),
+    ).rejects.toThrow(/no \["e", postId\] tag/);
+  });
+
   test('pending star for an unknown post stays pending until the post is known', async () => {
     const { port } = await migratedDb();
     const store = new OpSqliteStore(port);

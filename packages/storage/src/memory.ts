@@ -387,6 +387,12 @@ export class MemoryEventStore implements StorePort {
   // Stars (T17): same semantics as the SQLite star tables.
 
   async saveStarEvent(e: SignedEvent): Promise<void> {
+    if (e.kind !== 4) {
+      throw new Error(`saveStarEvent: expected kind 4, got kind ${e.kind}`);
+    }
+    if (!taggedPostId(e)) {
+      throw new Error('saveStarEvent: star has no ["e", postId] tag');
+    }
     const idHex = bytesToHex(e.id);
     if (!this.starEvents.has(idHex)) {
       this.starEvents.set(idHex, cloneEvent(e));
