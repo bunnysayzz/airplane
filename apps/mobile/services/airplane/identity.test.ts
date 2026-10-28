@@ -248,6 +248,32 @@ describe('secure-store call-time failure fallback (T1)', () => {
     );
   });
 
+  test('a corrupt-value read error fails loud and never mints an ephemeral identity', async () => {
+    const adapter = makeAdapter();
+    const mod = await freshIdentity(() => adapter);
+    // First launch succeeds and persists, so a last-known identity exists.
+    const first = await mod.getDeviceKeypair();
+    expect(adapter.items.has('airplane.mesh.identity.v1')).toBe(true);
+    // Simulate corruption: the secure store now throws a corrupt-value
+    // error (the SecureKeyStore fail-closed message shape) on read.
+    mod.__resetDeviceKeypairForTests();
+    adapter.getItemAsync = async () => {
+      throw new Error('SecureKeyStore: stored key is not valid hex');
+    };
+    await expect(mod.getDeviceKeypair()).rejects.toThrow('not valid hex');
+    // Retry after the store recovers: the original identity returns,
+    // not a freshly minted ephemeral one.
+    adapter.getItemAsync = async (k: string) => (adapter.items.has(k) ? adapter.items.get(k)! : null);
+    const recovered = await mod.getDeviceKeypair();
+    expect(Buffer.from(recovered.publicKey).toString('hex')).toBe(
+      Buffer.from(first.publicKey).toString('hex'),
+    );
+    const sentry = await import('../../src/sentry');
+    expect(sentry.__getBreadcrumbsForTests()).toContainEqual(
+      expect.objectContaining({ message: 'keystore-read-error' }),
+    );
+  });
+
   test('fallback identity is ephemeral: a fresh module load mints a different keypair', async () => {
     const adapter = throwingAdapter();
     const first = await (await freshIdentity(() => adapter)).getDeviceKeypair();
