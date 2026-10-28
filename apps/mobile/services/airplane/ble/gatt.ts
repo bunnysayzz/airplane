@@ -48,6 +48,7 @@ import { FRAG_WIRE_MAX, fromHex, toHex } from '@airplane/protocol';
 import {
   recordAdvertiseFailure,
   recordAdvertiseStopped,
+  recordBleDrop,
   recordConnectFailure,
   recordAdvertiseSuccess,
   recordFragmentsReceived,
@@ -240,6 +241,19 @@ export function describeAdvertiseError(err: unknown): string {
     return `ble: advertise failed: ${err}`;
   }
   return 'ble: advertise failed: native error was empty (null/undefined) - check Bluetooth on, peripheral support, and the Diagnostics retry';
+}
+
+/** Last log time per drop class, so a flood of drops logs at most one line per minute per class. */
+const lastDropLogAtMs = new Map<string, number>();
+const DROP_LOG_WINDOW_MS = 60_000;
+
+/** Log one throttled diagnostics line per drop class per minute. */
+function logBleDropThrottled(kind: string, detail: string): void {
+  const nowMs = Date.now();
+  const last = lastDropLogAtMs.get(kind) ?? 0;
+  if (nowMs - last < DROP_LOG_WINDOW_MS) return;
+  lastDropLogAtMs.set(kind, nowMs);
+  recordBleDrop(kind, detail);
 }
 
 export class GattBlePort implements TransportPort {
@@ -814,7 +828,10 @@ export class GattBlePort implements TransportPort {
     let key = this.bleIndex.get(device);
     let conn = key ? this.conns.get(key) : undefined;
     if (!conn) {
-      if (this.conns.size >= MAX_BLE_PEERS) return; // drop, bounded
+      if (this.conns.size >= MAX_BLE_PEERS) {
+        logBleDropThrottled('peer-limit', `dropped write from ${device} at peer limit`);
+        return; // drop, bounded
+      }
       key = `${PROVISIONAL_MAC_PREFIX}${device}`;
       conn = { role: 'peripheral', bleId: device, tag: null, peerId: null, mtu: ATT_DEFAULT_MTU, inbound: new DatagramReassembler(), partialOpen: false };
       this.registerConn(key, conn);
@@ -1258,6 +1275,7 @@ function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
           if (typeof raw === 'string') bytes = base64ToBytes(raw);
           else if (Array.isArray(raw)) bytes = new Uint8Array(raw as number[]);
           if (bytes && typeof e?.device === 'string') cb({ device: e.device, value: bytes });
+          else logBleDropThrottled('malformed-write', 'dropped write event with unexpected shape');
         };
         inst.on('write', handler);
         return () => {

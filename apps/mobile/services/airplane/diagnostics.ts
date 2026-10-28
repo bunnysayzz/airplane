@@ -360,6 +360,18 @@ export function recordConnectFailure(code: string): void {
   notifyThrottled();
 }
 
+/**
+ * Throttled drop line for BLE inbound drops (peer-limit drops, malformed
+ * write drops). Log-only and kind-scoped: the sink already throttles
+ * bursts elsewhere, and this hook is for classes the port counts as
+ * silently dropped, not for per-frame traffic. No snapshot counter is
+ * added, so no store or snapshot schema changes.
+ */
+export function recordBleDrop(kind: string, detail: string): void {
+  logEvent('ble-drop', `${kind} ${detail}`);
+  notifyThrottled();
+}
+
 export function recordPeerDisconnected(peerId: string): void {
   const peer = peers.get(peerId);
   if (!peer) return;

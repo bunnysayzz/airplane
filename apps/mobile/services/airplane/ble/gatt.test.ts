@@ -1061,3 +1061,28 @@ describe('advertisement length (audit F-P3-3)', () => {
     await port.close();
   });
 });
+
+describe('BLE drop logging (audit F-P3-5)', () => {
+  test('a peripheral write dropped at the peer limit logs one throttled line', async () => {
+    const { deps, central, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    for (let i = 0; i < 8; i++) {
+      const pub = new Uint8Array(32).fill(0x10 + i);
+      central.identHex = toHex(pub);
+      central.discoverCb!({ id: `ble-${i}`, rssi: -60, tag: peerTagOf(pub) });
+      await tick(20);
+    }
+    expect(port.peerCount).toBe(8);
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:99', value: new Uint8Array([1, 2, 3]) });
+    peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:98', value: new Uint8Array([1, 2, 3]) });
+    // Throttled: two drops in one minute produce exactly one line.
+    expect(lines.filter((l) => l.startsWith('ble-drop peer-limit'))).toHaveLength(1);
+    resetDiagnosticsForTests();
+    await port.close();
+  });
+});
