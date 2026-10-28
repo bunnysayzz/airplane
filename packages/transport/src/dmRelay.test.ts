@@ -176,6 +176,26 @@ describe('WsDmRelay.publish socket paths (P1-11)', () => {
   });
 });
 
+describe('WsDmRelay.publish event reuse on retry (F14-retry)', () => {
+  test('publishing the same envelope twice sends the same event id', async () => {
+    const sockets: FakeSocket[] = [];
+    const relay = makeRelay(sockets);
+    const envelope = sealDm('retry me', 'd'.repeat(64), 'e'.repeat(64));
+    const first = relay.publish(envelope);
+    sockets[0].open();
+    const firstEvent = JSON.parse(sockets[0].sent[0]) as unknown[];
+    const firstId = (firstEvent[1] as { id: string }).id;
+    sockets[0].receive(['OK', firstId, true]);
+    await expect(first).resolves.toBe(true);
+    const second = relay.publish(envelope);
+    sockets[1].open();
+    const secondEvent = JSON.parse(sockets[1].sent[0]) as unknown[];
+    expect((secondEvent[1] as { id: string }).id).toBe(firstId);
+    sockets[1].receive(['OK', firstId, true]);
+    await expect(second).resolves.toBe(true);
+  });
+});
+
 describe('nostrEventToDmEnvelope relay verification (F12)', () => {
   test('a forged signature, a wrong id, and a mismatched p tag are all rejected', () => {
     const sender = ed25519.utils.randomSecretKey();

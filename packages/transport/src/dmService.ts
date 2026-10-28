@@ -197,6 +197,8 @@ export class DmService {
   private unsub: (() => void) | null = null;
   /** Single outbox flush timer, armed for the earliest next attempt (P1-09). */
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** In-flight flush: concurrent flushOutbox calls share one run (F14-retry). */
+  private flushInFlight: Promise<void> | null = null;
 
   constructor(opts: DmServiceOpts) {
     this.store = opts.store;
@@ -350,8 +352,22 @@ export class DmService {
    * oldest due message goes first and a failure stops that conversation's
    * queue (other conversations are unaffected). Never silently drops: a
    * message that exhausts DM_MAX_ATTEMPTS becomes Failed, not deleted.
+   * Concurrent callers share a single in-flight run, so two flushes can
+   * never publish the same Sending row twice; per-conversation order is
+   * unchanged, since the run itself stays sequential.
    */
   async flushOutbox(nowMs?: number): Promise<void> {
+    if (this.flushInFlight) return this.flushInFlight;
+    const run = this.flushOutboxInner(nowMs);
+    this.flushInFlight = run;
+    try {
+      await run;
+    } finally {
+      if (this.flushInFlight === run) this.flushInFlight = null;
+    }
+  }
+
+  private async flushOutboxInner(nowMs?: number): Promise<void> {
     const now = nowMs ?? this.now();
     const convs = await this.store.listConversations();
     let changed = false;

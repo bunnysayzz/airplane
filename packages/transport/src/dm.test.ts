@@ -21,6 +21,7 @@ import {
   FailingDmRelay,
   MemoryDmRelay,
   MemoryDmStore,
+  type DmRelayPort,
 } from './dmService';
 
 const tick = () => new Promise<void>(r => setTimeout(r, 10));
@@ -32,7 +33,7 @@ interface Persona {
   store: MemoryDmStore;
 }
 
-function makePersona(relay: MemoryDmRelay | FailingDmRelay, nowRef: { now: number }): Persona {
+function makePersona(relay: DmRelayPort, nowRef: { now: number }): Persona {
   const secret = ed25519.utils.randomSecretKey();
   const meshHex = dmToHex(ed25519.getPublicKey(secret));
   const store = new MemoryDmStore();
@@ -390,6 +391,29 @@ describe('DmService routing + outbox', () => {
     await bob.service.blockPeer(alice.meshHex);
     await bob.service.unblockPeer(alice.meshHex);
     expect(await bob.service.listInbox()).toHaveLength(1);
+  });
+
+  test('F14-retry: concurrent flushes share one run and publish once', async () => {
+    class DelayedCountingRelay implements DmRelayPort {
+      calls = 0;
+      async publish(): Promise<boolean> {
+        this.calls += 1;
+        await new Promise(r => setTimeout(r, 30));
+        return true;
+      }
+      subscribe(): () => void {
+        return () => {};
+      }
+    }
+    const relay = new DelayedCountingRelay();
+    const nowRef = { now: 100_000_000 };
+    const alice = makePersona(relay, nowRef);
+    await alice.service.sendMessage('a'.repeat(64), 'guard me');
+    await Promise.all([alice.service.flushOutbox(), alice.service.flushOutbox()]);
+    expect(relay.calls).toBe(1);
+    const rows = await alice.store.listMessages('a'.repeat(64));
+    expect(rows[0].status).toBe('Sent');
+    alice.service.stop();
   });
 
   test('P1-09: the flush scheduler re-arms on the backoff and drains without user action', async () => {

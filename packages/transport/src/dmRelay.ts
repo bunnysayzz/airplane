@@ -99,6 +99,14 @@ export class WsDmRelay implements DmRelayPort {
   private readonly wsFactory: (url: string) => WebSocketLike;
   private readonly publishTimeoutMs: number;
   private subSockets: WebSocketLike[] = [];
+  /**
+   * First-built Nostr event per envelope, keyed by envelope bytes. A retry
+   * publishes the identical event (same id, same ephemeral key) instead of
+   * minting a fresh event id, so relays and the inbound dedup see one
+   * logical send. Bounded with oldest eviction; the envelope's ephemeral
+   * pubkey already makes each logical send a distinct key.
+   */
+  private readonly eventCache = new Map<string, { id: string; message: string }>();
 
   constructor(opts: WsDmRelayOpts = {}) {
     this.relays = opts.relays ?? DEFAULT_RELAYS;
@@ -113,11 +121,20 @@ export class WsDmRelay implements DmRelayPort {
 
   /** Publish to relays in order; true when ANY relay answers OK. */
   async publish(envelope: DmEnvelope): Promise<boolean> {
-    const event = dmEnvelopeToNostrEvent(envelope);
-    const message = JSON.stringify(['EVENT', event]);
+    const key = JSON.stringify(envelope);
+    let cached = this.eventCache.get(key);
+    if (!cached) {
+      const event = dmEnvelopeToNostrEvent(envelope);
+      cached = { id: event.id, message: JSON.stringify(['EVENT', event]) };
+      if (this.eventCache.size >= 500) {
+        const oldest = this.eventCache.keys().next();
+        if (!oldest.done) this.eventCache.delete(oldest.value);
+      }
+      this.eventCache.set(key, cached);
+    }
     for (const url of this.relays) {
       try {
-        const ok = await this.publishOne(url, message, event.id);
+        const ok = await this.publishOne(url, cached.message, cached.id);
         if (ok) return true;
       } catch {
         // Try the next relay.
