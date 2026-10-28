@@ -222,7 +222,9 @@ function peerLogLabel(peerId: string): string {
 }
 
 function notify(): void {
-  for (const cb of listeners) {
+  // Iterate a snapshot copy: a subscriber that subscribes or
+  // unsubscribes during notification must not change who gets visited.
+  for (const cb of [...listeners]) {
     try {
       cb();
     } catch {

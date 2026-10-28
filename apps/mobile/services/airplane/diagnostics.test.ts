@@ -102,6 +102,23 @@ describe('diagnostics collector', () => {
     }
   });
 
+  test('notify visits subscribers from a snapshot, not the live set', async () => {
+    const calls: string[] = [];
+    let unsubSecond: (() => void) | null = null;
+    subscribeDiagnostics(() => {
+      calls.push('first');
+      unsubSecond?.();
+    });
+    unsubSecond = subscribeDiagnostics(() => {
+      calls.push('second');
+    });
+    setDiagnosticsAdapterState('on');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    // The first subscriber unsubscribes the second mid-notify, but the
+    // snapshot copy still visits it; live-set iteration would skip it.
+    expect(calls).toEqual(['first', 'second']);
+  });
+
   test('peer cap evicts a seen peer before a connected one and never exceeds 100', () => {
     for (let i = 0; i < 100; i++) {
       recordPeerSeen(`tag:${i.toString(16).padStart(16, '0')}`, -60, '0123456789abcdef');
