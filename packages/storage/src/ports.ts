@@ -176,4 +176,10 @@ export interface DatabasePort {
    * emulate with BEGIN IMMEDIATE / COMMIT / ROLLBACK via exec.
    */
   transaction?<T>(fn: () => Promise<T>): Promise<T>;
+  /**
+   * Checkpoint and close the underlying connection, when the driver
+   * supports it. Teardown only; never required for correctness of
+   * committed rows (SQLite atomic commit already covers a kill).
+   */
+  close?(): Promise<void>;
 }

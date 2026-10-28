@@ -34,7 +34,7 @@ export {
   type DeviceKeypair,
   type RotationResult,
 } from './identity';
-export { getStore } from './store';
+export { getStore, closeStore } from './store';
 // --- RESHARE (delimited) ---
 export {
   recordReshareEvent,
