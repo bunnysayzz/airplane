@@ -69,6 +69,25 @@ afterEach(() => {
 });
 
 describe('sqlite adapter over real SQL', () => {
+  test('a far-future post is accepted but expires on the clamped clock, not its signed date', async () => {
+    const file = tempDbPath();
+    const db = new DatabaseSync(file);
+    const store = new OpSqliteStore(createSqliteDatabasePort(makeExecutor(db)));
+    const now = Math.floor(Date.now() / 1000);
+    const future = makePost(11);
+    future.created_at = now + 10 * 365 * 86400; // signed 10 years ahead
+    await store.saveEvent(future);
+    // Accepted, not rejected: it is in the feed now.
+    expect(await store.listFeed({ cells: ['tdr1v'], limit: 10 })).toHaveLength(1);
+    // The signed created_at is stored untouched.
+    expect((await store.getEvent(bytesToHex(future.id)))!.created_at).toBe(future.created_at);
+    // But it expires about 24 h after arrival (clamped), not 10 years out.
+    expect(
+      await store.listFeed({ cells: ['tdr1v'], limit: 10, nowSec: now + 25 * 3600 }),
+    ).toHaveLength(0);
+    db.close();
+  });
+
   test('a post survives closing and reopening the database (restart)', async () => {
     const file = tempDbPath();
     const post = makePost(7);

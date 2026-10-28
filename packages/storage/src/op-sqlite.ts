@@ -27,6 +27,8 @@ import {
   DEFAULT_RETENTION_SEC,
   RECEIPT_DAY_BUCKET_SEC,
   bytesToHex,
+  clampFutureCreatedAt,
+  FUTURE_SKEW_TOLERANCE_SEC,
   hexToBytes,
   rankScore,
 } from './memory';
@@ -225,7 +227,11 @@ export class OpSqliteStore implements StorePort {
   async saveEvent(e: SignedEvent): Promise<void> {
     const authorHex = bytesToHex(e.pubkey);
     const now = Math.floor(Date.now() / 1000);
-    const expiresAt = e.created_at + this.retentionSec;
+    // Expiry is computed from the clamped timestamp, never the raw
+    // signed one: a post dated years ahead expires about 24 h after
+    // arrival instead of staying unexpired for years. The signed
+    // created_at itself is stored untouched.
+    const expiresAt = clampFutureCreatedAt(e.created_at, now) + this.retentionSec;
     await runTransaction(this.db, async () => {
       // Tombstone-wins: a tombstone row armed before the post arrived
       // deletes it when its author matches the arriving event's author, or
@@ -352,6 +358,7 @@ export class OpSqliteStore implements StorePort {
     } else {
       params.push(opts.before ?? null, opts.before ?? null);
     }
+    params.push(now + FUTURE_SKEW_TOLERANCE_SEC);
     params.push(opts.limit);
     const rows = await this.db.query<EventRowShape & { views: number }>(
       `SELECT e.id, e.pubkey, e.kind, e.created_at, e.geohash, e.tags,
@@ -363,13 +370,13 @@ export class OpSqliteStore implements StorePort {
          AND e.expires_at > ?
          AND e.geohash IN (${placeholders})
          ${cursor}
-       ORDER BY e.created_at DESC, e.id DESC
+       ORDER BY MIN(e.created_at, ?) DESC, e.id DESC
        LIMIT ?`,
       params,
     );
     return rows.map((row) => {
       const event = rowToEvent(row);
-      const ageHours = Math.max(0, (now - event.created_at) / 3600);
+      const ageHours = Math.max(0, (now - clampFutureCreatedAt(event.created_at, now)) / 3600);
       return {
         event,
         views: row.views,
@@ -424,7 +431,7 @@ export class OpSqliteStore implements StorePort {
           [
             r.id, r.pubkey, r.kind, r.created_at, r.geohash,
             encodeTags(r.tags), r.content, r.sig,
-            now, r.created_at + this.retentionSec,
+            now, clampFutureCreatedAt(r.created_at, now) + this.retentionSec,
           ],
         );
         await this.db.exec(

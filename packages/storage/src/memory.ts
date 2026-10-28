@@ -18,6 +18,21 @@ export const DEFAULT_RETENTION_SEC = 24 * 3600;
 export const RECEIPT_DAY_BUCKET_SEC = 86400;
 
 /**
+ * Future-skew tolerance for ordering and expiry, matching the star
+ * counter's 300 s guard. A signed created_at far in the future is never
+ * rejected outright (sender clocks skew legitimately) and never
+ * rewritten (it is covered by the event id/signature); it is only
+ * clamped for derived values, so a future post cannot pin the feed top
+ * or stay unexpired for years.
+ */
+export const FUTURE_SKEW_TOLERANCE_SEC = 300;
+
+/** Clamp a signed created_at to now plus the future-skew tolerance. */
+export function clampFutureCreatedAt(createdAtSec: number, nowSec: number): number {
+  return Math.min(createdAtSec, nowSec + FUTURE_SKEW_TOLERANCE_SEC);
+}
+
+/**
  * Ranking score. Mirrors the protocol formula
  * `log10(1 + views) / (ageHours + 2) ^ RANK_GRAVITY` (RANK_GRAVITY = 1.5).
  * listFeed sorts newest-first; score is computed for downstream ranking.
@@ -140,7 +155,7 @@ export class MemoryEventStore implements StorePort {
     const row: EventRow = {
       event: cloneEvent(e),
       receivedAt: now,
-      expiresAt: e.created_at + this.retentionSec,
+      expiresAt: clampFutureCreatedAt(e.created_at, now) + this.retentionSec,
       deleted: pendingMatch,
     };
     if (pendingMatch) this.pendingTombstones.delete(idHex);
@@ -210,7 +225,8 @@ export class MemoryEventStore implements StorePort {
         }
       }
       const views = this.viewCounts.get(idHex) ?? 0;
-      const ageHours = Math.max(0, (now - e.created_at) / 3600);
+      const effectiveCreatedAt = clampFutureCreatedAt(e.created_at, now);
+      const ageHours = Math.max(0, (now - effectiveCreatedAt) / 3600);
       posts.push({
         event: cloneEvent(e),
         views,
@@ -218,12 +234,15 @@ export class MemoryEventStore implements StorePort {
         ageHours,
       });
     }
-    // Deterministic newest-first: (created_at desc, id hex desc). The id
-    // tie-break makes pagination by (before, beforeId) stable even when
-    // several posts share a created_at second.
+    // Deterministic newest-first on the clamped timestamp: (effective
+    // created_at desc, id hex desc). The id tie-break makes pagination
+    // by (before, beforeId) stable even when several posts share a
+    // created_at second.
     posts.sort((a, b) => {
-      if (b.event.created_at !== a.event.created_at) {
-        return b.event.created_at - a.event.created_at;
+      const aEff = clampFutureCreatedAt(a.event.created_at, now);
+      const bEff = clampFutureCreatedAt(b.event.created_at, now);
+      if (bEff !== aEff) {
+        return bEff - aEff;
       }
       const aHex = bytesToHex(a.event.id);
       const bHex = bytesToHex(b.event.id);

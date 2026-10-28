@@ -7,7 +7,7 @@
 // card; this layer keeps the raw `createdAtMs` timestamp.
 
 import { EVENT_KIND_POST, toHex, type FeedPost } from '@airplane/protocol';
-import { DEFAULT_RETENTION_SEC, rankScore, type ListFeedOpts } from '@airplane/storage';
+import { DEFAULT_RETENTION_SEC, clampFutureCreatedAt, rankScore, type ListFeedOpts } from '@airplane/storage';
 import type { PostCardModel } from './types';
 import { ensureStarsHydrated, markStarPostKnown, resolveOwnPubkeyHex, starViewFor } from './stars';
 import { markResharePostKnown, reshareViewFor } from './reshares';
@@ -149,7 +149,7 @@ export async function getPostCardById(eventId: string): Promise<PostCardModel | 
   const nowSec = Math.floor(Date.now() / 1000);
   if (event.created_at + DEFAULT_RETENTION_SEC <= nowSec) return null;
   const views = await store.countViews(id);
-  const ageHours = Math.max(0, (nowSec - event.created_at) / 3600);
+  const ageHours = Math.max(0, (nowSec - clampFutureCreatedAt(event.created_at, nowSec)) / 3600);
   const worldConfirmed = await store.isWorldConfirmed(id);
   // T17: hydrate durable star state before reading the star view.
   await ensureStarsHydrated();
