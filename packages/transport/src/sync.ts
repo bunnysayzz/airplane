@@ -46,14 +46,23 @@ export const SYNC_MAX_PER_PASS = 50;
 /** Store reads are batched in pages of this size, not one by one. */
 export const SYNC_PAGE_SIZE = 20;
 
+export interface WorldSyncOpts {
+  /** Deadline per publish ACK wait, ms. Default 5000 (router deadline). */
+  ackDeadlineMs?: number;
+}
+
 export class WorldSync {
   /** In-flight pass, shared by concurrent callers so ticks cannot overlap. */
   private inFlight: Promise<SyncReport> | null = null;
+  private readonly ackDeadlineMs: number;
 
   constructor(
     private readonly nostr: NostrTransport,
     private readonly store: WorldConfirmStore,
-  ) {}
+    opts: WorldSyncOpts = {},
+  ) {
+    this.ackDeadlineMs = opts.ackDeadlineMs ?? 5000;
+  }
 
   /**
    * One sync pass. Concurrent callers share the in-flight pass instead
@@ -101,8 +110,11 @@ export class WorldSync {
       const pushed = await Promise.all(
         events.map(async (row) => {
           if (!row) return null;
-          const relays = await this.nostr.publish(row.event);
-          return relays.length > 0 ? row.idHex : null;
+          // Acceptance, not send success: only a relay OK counts as
+          // pushed. A relay that silently drops the event is re-pushed
+          // on a later pass, exactly like an unconfirmed post.
+          const ack = await this.nostr.publishWithAck(row.event, this.ackDeadlineMs);
+          return ack.ok.length > 0 ? row.idHex : null;
         }),
       );
       for (const idHex of pushed) if (idHex) pushedIds.push(idHex);

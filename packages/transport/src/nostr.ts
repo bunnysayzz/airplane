@@ -346,7 +346,7 @@ export class NostrTransport {
     }
   }
 
-  /** Publish one event to all open relays. Returns URLs that accepted it. */
+  /** Publish one event to all open relays. Returns URLs the envelope was sent to (no acceptance waited for); use publishWithAck when acceptance matters. */
   async publish(event: SignedEvent): Promise<string[]> {
     const envelope = wrapEvent(event, this.keys);
     const msg: ClientMsg = ['EVENT', envelope];

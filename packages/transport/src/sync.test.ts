@@ -36,6 +36,8 @@ class FakeConfirmStore implements WorldConfirmStore {
 /** Mock NostrTransport: controllable online state, records publishes. */
 class FakeNostr {
   online = true;
+  /** When false, sends succeed but no relay ever OKs (silent drop). */
+  ackOk = true;
   published: SignedEvent[] = [];
   queried: Hex64[][] = [];
 
@@ -43,6 +45,14 @@ class FakeNostr {
     if (!this.online) return [];
     this.published.push(event);
     return ['wss://mock.relay'];
+  }
+
+  async publishWithAck(event: SignedEvent): Promise<{ ok: string[]; rejected: string[]; timedOut: boolean }> {
+    if (!this.online) return { ok: [], rejected: [], timedOut: false };
+    this.published.push(event);
+    return this.ackOk
+      ? { ok: ['wss://mock.relay'], rejected: [], timedOut: false }
+      : { ok: [], rejected: [], timedOut: true };
   }
 
   async queryByIds(ids: Hex64[]): Promise<void> {
@@ -183,6 +193,17 @@ describe('WorldSync', () => {
     const report = await sync.sync();
     expect(report.pushed).toHaveLength(50);
     expect(nostr.queried[0]).toHaveLength(50);
+  });
+
+  test('send success without a relay OK is not reported as pushed', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    nostr.ackOk = false;
+    const sync = new WorldSync(nostr as never, store);
+    const id = store.add(makePost('silent drop'));
+    const report = await sync.sync();
+    expect(report.pushed).toEqual([]);
+    expect(nostr.queried[0]).toContain(id);
   });
 
   test('confirmation persists across WorldSync restarts sharing a store', async () => {
