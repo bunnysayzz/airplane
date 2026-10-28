@@ -164,6 +164,7 @@ export default function DmThreadScreen() {
     };
 
     const isRequest = conv?.state === 'request';
+    const isBlocked = conv?.state === 'blocked';
 
     if (!peerValid) {
         return (
@@ -244,6 +245,15 @@ export default function DmThreadScreen() {
                 </Pressable>
             </View>
 
+            {isBlocked ? (
+                <View style={[styles.requestBar, { borderBottomColor: colors.borderColor }]}>
+                    <Text style={[type.meta, { color: colors.textMuted }]}>This conversation is blocked.</Text>
+                    <Pressable onPress={() => act(svc => svc.unblockPeer(peerHex))}>
+                        <Text style={[type.meta, { color: colors.accentText }]}>Unblock</Text>
+                    </Pressable>
+                </View>
+            ) : null}
+
             {refreshError ? (
                 <View style={[styles.requestBar, { borderBottomColor: colors.borderColor }]}>
                     <Text style={[type.meta, { color: colors.textMuted }]}>Could not load conversation.</Text>
@@ -269,19 +279,21 @@ export default function DmThreadScreen() {
                 keyboardShouldPersistTaps="handled"
             />
 
-            <View style={[styles.sendRow, { borderTopColor: colors.borderColor, paddingBottom: insets.bottom + 12 }]}>
-                <TextInput
-                    value={draft}
-                    onChangeText={setDraft}
-                    placeholder="Message (text only)"
-                    placeholderTextColor={colors.textMuted}
-                    multiline
-                    style={[styles.input, { color: colors.textPrimary, borderColor: colors.borderColor }]}
-                />
-                <Pressable onPress={send} style={[styles.send, { backgroundColor: colors.accentColor }]}>
-                    <Text style={{ color: colors.buttonTextColor }}>Send</Text>
-                </Pressable>
-            </View>
+            {isBlocked ? null : (
+                <View style={[styles.sendRow, { borderTopColor: colors.borderColor, paddingBottom: insets.bottom + 12 }]}>
+                    <TextInput
+                        value={draft}
+                        onChangeText={setDraft}
+                        placeholder="Message (text only)"
+                        placeholderTextColor={colors.textMuted}
+                        multiline
+                        style={[styles.input, { color: colors.textPrimary, borderColor: colors.borderColor }]}
+                    />
+                    <Pressable onPress={send} style={[styles.send, { backgroundColor: colors.accentColor }]}>
+                        <Text style={{ color: colors.buttonTextColor }}>Send</Text>
+                    </Pressable>
+                </View>
+            )}
         </KeyboardAvoidingView>
     );
 }
