@@ -8,6 +8,8 @@ import {
   captureError,
   addBreadcrumb,
   parseDsn,
+  isSentryEnabled,
+  takeSentryDisabledNote,
   __getBreadcrumbsForTests,
 } from '../../src/sentry';
 
@@ -163,6 +165,18 @@ describe('captureError', () => {
     const crumbs = breadcrumbValues(event);
     expect(crumbs).toHaveLength(1);
     expect(crumbs[0]['message']).toBe('keystore-fallback');
+  });
+
+  test('disabled note is consumable once per disabled stretch', () => {
+    expect(isSentryEnabled()).toBe(false);
+    expect(takeSentryDisabledNote()).toBe(true);
+    expect(takeSentryDisabledNote()).toBe(false);
+    initSentry(TEST_DSN);
+    expect(isSentryEnabled()).toBe(true);
+    expect(takeSentryDisabledNote()).toBe(false);
+    initSentry('garbage');
+    expect(isSentryEnabled()).toBe(false);
+    expect(takeSentryDisabledNote()).toBe(true);
   });
 
   test('never throws, even when fetch rejects', async () => {

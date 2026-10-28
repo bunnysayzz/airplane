@@ -136,6 +136,15 @@ function parseStack(stack: string): StackFrame[] {
 let enabled = false;
 let dsnParts: SentryDsnParts | null = null;
 let breadcrumbs: SentryBreadcrumb[] = [];
+/**
+ * Disabled-state note (P2-6): when init ends disabled, one log line is
+ * owed to the diagnostics log. The log sink is not attached yet at
+ * import time, so init only arms the note; the log starter consumes
+ * it once per launch. An enabled init re-arms, so a later disable in
+ * the same launch can note again.
+ */
+let disabledNotePending = false;
+let disabledNoteConsumed = false;
 
 /**
  * Initialize the client. The DSN comes from EXPO_PUBLIC_SENTRY_DSN (inlined
@@ -149,10 +158,33 @@ export function initSentry(dsn?: string): void {
       dsn ?? (typeof process !== 'undefined' ? process.env['EXPO_PUBLIC_SENTRY_DSN'] : undefined);
     dsnParts = raw ? parseDsn(raw) : null;
     enabled = dsnParts !== null;
+    if (enabled) {
+      disabledNotePending = false;
+      disabledNoteConsumed = false;
+    } else if (!disabledNoteConsumed) {
+      disabledNotePending = true;
+    }
   } catch {
     enabled = false;
     dsnParts = null;
+    if (!disabledNoteConsumed) disabledNotePending = true;
   }
+}
+
+/** True when the client has a valid DSN and will send events. */
+export function isSentryEnabled(): boolean {
+  return enabled;
+}
+
+/**
+ * Consume the owed disabled note, if any. Returns true exactly once
+ * per disabled stretch; the caller records the diagnostics log line.
+ */
+export function takeSentryDisabledNote(): boolean {
+  if (!disabledNotePending) return false;
+  disabledNotePending = false;
+  disabledNoteConsumed = true;
+  return true;
 }
 
 /** Record a breadcrumb for the next captured event. Never throws. */

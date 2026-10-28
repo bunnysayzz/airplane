@@ -251,6 +251,11 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
           </Text>
         )}
         <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogPath', { path: logStatus.fileUri })}</Text>
+        <Text style={[type.body, styles.kvValue]}>
+          {logStatus.sentryEnabled
+            ? t('settings.diagnosticsSentryEnabled')
+            : t('settings.diagnosticsSentryDisabled')}
+        </Text>
         {shareFailed && (
           <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsShareUnavailable')}</Text>
         )}

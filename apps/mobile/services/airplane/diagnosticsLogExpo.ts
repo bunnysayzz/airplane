@@ -10,6 +10,7 @@
 
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+import { isSentryEnabled, takeSentryDisabledNote } from '../../src/sentry';
 import {
   attachDiagnosticsLogWriter,
   detachDiagnosticsLogWriter,
@@ -55,6 +56,11 @@ export async function startDiagnosticsLogFile(): Promise<void> {
   await writer.load();
   attachDiagnosticsLogWriter(writer);
   writer.append(formatDiagnosticsLogLine(Date.now(), 'app', 'started'));
+  // A disabled Sentry client is otherwise invisible: one log line per
+  // launch says so plainly instead of looking like "no errors happened".
+  if (takeSentryDisabledNote()) {
+    writer.append(formatDiagnosticsLogLine(Date.now(), 'sentry', 'disabled'));
+  }
 }
 
 export function stopDiagnosticsLogFile(): void {
@@ -93,6 +99,8 @@ export interface DiagnosticsLogFileStatus {
   lastWriteOk: boolean | null;
   lastWriteAtMs: number | null;
   lastWriteError: string | null;
+  /** Sentry client state at status time: false means disabled, never throwing. */
+  sentryEnabled: boolean;
   fileName: string;
   fileUri: string;
 }
@@ -107,6 +115,7 @@ export function getDiagnosticsLogStatus(): DiagnosticsLogFileStatus {
     lastWriteOk: lastWrite.ok,
     lastWriteAtMs: lastWrite.atMs,
     lastWriteError: lastWrite.error,
+    sentryEnabled: isSentryEnabled(),
     fileName: DIAGNOSTICS_LOG_FILE_NAME,
     fileUri: logFileUri(),
   };
