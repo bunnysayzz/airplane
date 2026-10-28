@@ -69,10 +69,10 @@ export default function DmThreadScreen() {
         return getDmService()
             .then(async svc => {
                 setThread(await svc.getThread(peerHex));
-                const inbox = await svc.listInbox();
-                const requests = await svc.listRequests();
-                const blocked = await svc.listBlocked();
-                setConv([...inbox, ...requests, ...blocked].find(c => c.peerHex === peerHex) ?? null);
+                // Direct lookup, not the inbox/requests/blocked lists: an
+                // ignored conversation is in none of those lists, yet its
+                // thread must still resolve (with its actions) when opened.
+                setConv(await svc.getConversation(peerHex));
                 setRefreshError(false);
             })
             .catch((e: unknown) => {
@@ -97,6 +97,8 @@ export default function DmThreadScreen() {
                 unsub = svc.subscribe(() => {
                     void refresh().catch(() => {});
                 });
+                // F23(a) left as-is per the finding's smaller-safe-change
+                // note: opening a request clears its unread count.
                 void svc.markRead(peerHex);
             })
             .catch(() => {
@@ -158,7 +160,7 @@ export default function DmThreadScreen() {
     const confirmDelete = () => {
         Alert.alert(
             'Delete conversation?',
-            'This only deletes from your device. The relay copy and the other person\'s copy stay exactly where they are. Unsend is not possible.',
+            'This only deletes from your device. The relay copy and the other person\'s copy stay exactly where they are. Unsend is not possible. Unsent messages in this conversation are discarded.',
             [
                 { text: 'Cancel', style: 'cancel' },
                 {
