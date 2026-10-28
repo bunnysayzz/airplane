@@ -419,6 +419,24 @@ describe('HybridTransport', () => {
     await h.stop();
   });
 
+  test('a throwing handler leaves the event unmarked, so redelivery retries', async () => {
+    const { h } = makeHybrid();
+    await h.start();
+    h.onPost(() => {
+      throw new Error('boom');
+    });
+    let count = 0;
+    h.onPost(() => {
+      count++;
+    });
+    const event = makePost('retry me');
+    h.ingress(event, 'ble');
+    expect(count).toBe(1);
+    h.ingress(event, 'ble'); // not seen-marked, so delivered again
+    expect(count).toBe(2);
+    await h.stop();
+  });
+
   test('handler errors do not break ingress', async () => {
     const { h } = makeHybrid();
     await h.start();

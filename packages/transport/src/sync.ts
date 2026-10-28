@@ -137,11 +137,19 @@ export class WorldSync {
    */
   confirmListener(onEvent: (event: SignedEvent, source: string) => void): (event: SignedEvent, source: string) => void {
     return async (event: SignedEvent, source: string) => {
+      // Deliver first, confirm second: a confirmation-write failure must
+      // never block storage of the event itself, and it has its own
+      // catch so it cannot escape as an unhandled rejection either.
+      onEvent(event, source);
       if (source === 'nostr') {
         const idHex = toHex(event.id);
-        await this.store.markWorldConfirmed(idHex);
+        try {
+          await this.store.markWorldConfirmed(idHex);
+        } catch {
+          // Confirmation is a secondary write; the event is already
+          // delivered, and WorldSync re-confirms on a later pass.
+        }
       }
-      onEvent(event, source);
     };
   }
 

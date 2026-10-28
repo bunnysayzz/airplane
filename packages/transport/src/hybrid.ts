@@ -294,14 +294,29 @@ export class HybridTransport {
       this.diagnosticsOpts?.onDedupDrop?.(source, peerId ?? null);
       return false;
     }
-    this.seen.add(idHex);
+    // Seen is marked only on successful delivery: a handler that throws
+    // leaves the event unmarked, so a redelivery can retry it instead of
+    // being dropped as a duplicate of a delivery that never happened.
+    let syncFailed = false;
     for (const h of this.handlers) {
       try {
-        h(event, source);
+        // The handler type is sync, but a handler may return a promise
+        // (confirmListener is async): a rejection must be caught here,
+        // since the sync try/catch above cannot catch an async rejection,
+        // and it unmarks the event so a redelivery can retry.
+        const result = h(event, source) as unknown;
+        if (result && typeof (result as { catch?: unknown }).catch === 'function') {
+          (result as Promise<void>).catch(() => {
+            this.seen.delete(idHex);
+          });
+        }
       } catch {
-        // handler errors must not break the transport
+        syncFailed = true;
+        // handler errors must not break the transport: later handlers
+        // still run, but the event is not marked seen
       }
     }
+    if (!syncFailed) this.seen.add(idHex);
     return true;
   }
 

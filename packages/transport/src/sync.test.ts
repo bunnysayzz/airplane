@@ -147,6 +147,21 @@ describe('WorldSync', () => {
     expect(seen).toEqual(['nostr', 'ble']);
   });
 
+  test('confirmListener forwards even when the confirmation write fails', async () => {
+    const store = new FakeConfirmStore();
+    store.markWorldConfirmed = async () => {
+      throw new Error('store gone');
+    };
+    const nostr = new FakeNostr();
+    const sync = new WorldSync(nostr as never, store);
+    const forwarded: string[] = [];
+    const wrapped = sync.confirmListener((e, source) => {
+      forwarded.push(source);
+    });
+    await expect(wrapped(makePost('deliver anyway'), 'nostr')).resolves.toBeUndefined();
+    expect(forwarded).toEqual(['nostr']);
+  });
+
   test('markConfirmed is sticky and idempotent', async () => {
     const store = new FakeConfirmStore();
     const nostr = new FakeNostr();

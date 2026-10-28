@@ -30,6 +30,11 @@ export class SeenCache {
     }
   }
 
+  /** Remove one id (a delivery that failed after being marked seen). */
+  delete(eventId: Hex64): void {
+    this.map.delete(eventId);
+  }
+
   get size(): number {
     return this.map.size;
   }

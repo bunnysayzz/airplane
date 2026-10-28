@@ -200,8 +200,29 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
   }
   const store = getStore();
   // Store the event (deduped by HybridTransport already).
-  // saveEvent is idempotent.
-  await store.saveEvent(event);
+  // saveEvent is idempotent. A store failure is surfaced in
+  // Diagnostics and the feed is NOT notified: an unhandled rejection
+  // here used to drop the event while Hybrid already marked it seen.
+  try {
+    await store.saveEvent(event);
+  } catch {
+    recordMessage({
+      id: toHex(event.id),
+      sequence: null,
+      sizeBytes: encodeEvent(event).length,
+      direction: 'inbound',
+      attempts: [
+        {
+          transport: source === 'nostr' ? 'relay' : 'ble',
+          atMs: Date.now(),
+          outcome: 'failed',
+          detail: 'store save failed',
+        },
+      ],
+      finalStatus: 'receive failed',
+    });
+    return;
+  }
   // A post arriving may release stars and reshares held pending for it.
   if (event.kind === EVENT_KIND_POST) {
     markStarPostKnown(toHex(event.id));
