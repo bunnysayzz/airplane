@@ -215,7 +215,8 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
               <Text style={[type.name, styles.buttonText]}>{t('settings.diagnosticsOpenSettings')}</Text>
             </Pressable>
           )}
-          {snapshot.advertising.state === 'stopped' && (
+          {(snapshot.advertising.state === 'stopped' ||
+            (snapshot.scanning.state === 'stopped' && snapshot.scanning.lastFailure !== null)) && (
             <Pressable
               style={styles.button}
               onPress={() => {
