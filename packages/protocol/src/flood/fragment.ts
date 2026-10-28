@@ -14,6 +14,7 @@ import { decodeEvent } from '../codec/cbor';import {
   FRAG_HEADER_LEN,
   FRAG_MAGIC,
   FRAG_WIRE_MAX,
+  MAX_EVENT_BYTES,
   REASSEMBLY_TIMEOUT_MS,
 } from '../events/types';
 
@@ -24,6 +25,16 @@ export class FragmentError extends Error {
     this.name = 'FragmentError';
   }
 }
+
+/**
+ * Sane fragment-total cap. A valid event is at most MAX_EVENT_BYTES
+ * (4096) over a 458-byte payload, so 9 fragments; 16 leaves margin for a
+ * smaller sender MTU while still rejecting the old anything-up-to-65535
+ * claim a hostile peer could use to pin huge reassembly state.
+ */
+export const MAX_FRAGMENT_TOTAL = 16;
+/** Cap on distinct pending reassembly tags; the oldest is dropped on overflow. */
+export const MAX_PENDING_REASSEMBLIES = 64;
 
 export interface FragmentHeader {
   msgTag: number;
@@ -62,7 +73,10 @@ export function parseHeader(frame: Uint8Array): FragmentHeader {
   const total = view.getUint16(5);
   const index = view.getUint16(7);
   if (total === 0) throw new FragmentError('total fragment count is 0');
+  if (total > MAX_FRAGMENT_TOTAL) throw new FragmentError(`total fragment count ${total} exceeds cap ${MAX_FRAGMENT_TOTAL}`);
   if (index >= total) throw new FragmentError(`index ${index} >= total ${total}`);
+  // Flags are reserved and must be 0; a set flag is a malformed frame.
+  if (view.getUint8(10) !== 0) throw new FragmentError(`flags must be 0, got ${view.getUint8(10)}`);
   return {
     msgTag: view.getUint32(1),
     total,
@@ -94,7 +108,7 @@ export function fragment(eventBytes: Uint8Array, ttl: number, mtu: number = FRAG
   const msgTag = msgTagOf(eventBytes);
   const payloadMax = mtu - FRAG_HEADER_LEN;
   const total = Math.max(1, Math.ceil(eventBytes.length / payloadMax));
-  if (total > 0xffff) throw new FragmentError('event needs more than 65535 fragments');
+  if (total > MAX_FRAGMENT_TOTAL) throw new FragmentError(`event needs ${total} fragments, over cap ${MAX_FRAGMENT_TOTAL}`);
   const frames: Uint8Array[] = [];
   for (let index = 0; index < total; index++) {
     const start = index * payloadMax;
@@ -127,6 +141,12 @@ export class Reassembler {
     const payload = frame.subarray(FRAG_HEADER_LEN);
     let entry = this.pending.get(header.msgTag);
     if (!entry) {
+      // Per-peer pending-buffer bound: cap distinct pending tags and drop
+      // the oldest entry on overflow instead of growing without bound.
+      if (this.pending.size >= MAX_PENDING_REASSEMBLIES) {
+        const oldest = this.pending.keys().next().value;
+        if (oldest !== undefined) this.pending.delete(oldest);
+      }
       entry = { total: header.total, frames: new Map(), firstSeenMs: nowMs };
       this.pending.set(header.msgTag, entry);
     }
@@ -134,6 +154,14 @@ export class Reassembler {
     // first one seen and ignore mismatched frames.
     if (entry.total !== header.total) return null;
     if (!entry.frames.has(header.index)) {
+      // Total buffered bytes for one tag must stay within one event: a
+      // claim of many fragments must not pin more than MAX_EVENT_BYTES.
+      let buffered = payload.length;
+      for (const part of entry.frames.values()) buffered += part.length;
+      if (buffered > MAX_EVENT_BYTES) {
+        this.pending.delete(header.msgTag);
+        return null;
+      }
       entry.frames.set(header.index, payload);
     }
     if (entry.frames.size === entry.total) {
