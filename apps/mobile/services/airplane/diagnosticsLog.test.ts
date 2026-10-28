@@ -134,6 +134,26 @@ describe('diagnostics log writer', () => {
     expect(writer.getLastWriteStatus().ok).toBe(false);
   });
 
+  test('flush after a failed load writes nothing and keeps lines in memory', async () => {
+    let writes = 0;
+    const port: DiagnosticsLogFilePort = {
+      read: async () => {
+        throw new Error('no storage');
+      },
+      write: async () => {
+        writes += 1;
+      },
+    };
+    const writer = new DiagnosticsLogWriter(port);
+    await writer.load();
+    expect(writer.getLoadOk()).toBe(false);
+    writer.append('2026-10-27T00:00:00.000Z app started');
+    await writer.flush();
+    expect(writes).toBe(0);
+    expect(writer.getLineCount()).toBe(1);
+    expect(writer.getLastWriteStatus().ok).toBeNull();
+  });
+
   test('a failing port never throws to the app', async () => {
     const port: DiagnosticsLogFilePort = {
       read: async () => {
@@ -250,8 +270,11 @@ describe('diagnostics log restart survival', () => {
     expect(failingWriter.getLoadOk()).toBe(false);
     failingWriter.append('line-one');
     await failingWriter.flush();
-    expect(failingWriter.getLastWriteStatus().ok).toBe(false);
-    expect(failingWriter.getLastWriteStatus().error).toBe('no storage');
+    // A flush after a failed load is a no-op: writing the in-memory
+    // lines over the file could destroy surviving history, so the
+    // write status stays pending instead of recording a failure.
+    expect(failingWriter.getLineCount()).toBe(1);
+    expect(failingWriter.getLastWriteStatus().ok).toBeNull();
   });
 
   test('flush during load never blanks the surviving file', async () => {

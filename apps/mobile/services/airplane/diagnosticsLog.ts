@@ -292,6 +292,15 @@ export class DiagnosticsLogWriter {
       this.dirty = true;
       return;
     }
+    if (this.loadOk === false) {
+      // The load failed, so this.lines does not hold the surviving
+      // file: flushing now would destroy history a transient read
+      // failure left behind. Lines stay in memory; flush stays a
+      // no-op while loadOk is false, and the screen already reports
+      // the load failure. Deliberately not marked dirty, so a share
+      // waiting on quiescence does not hang on a blocked flush.
+      return;
+    }
     // Coalesced sink lines belong in this flush, not the next one:
     // drain them into the line list before deciding anything else.
     this.drainCoalesced();
