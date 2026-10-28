@@ -291,6 +291,9 @@ export class NostrTransport {
     }
     this.sockets.set(url, ws);
     ws.onopen = () => {
+      // A socket that opens after stop() must not resurrect the relay:
+      // the transport is stopped, so this open is stale and ignored.
+      if (!this.started) return;
       this.states.set(url, 'open');
       // A successful connection resets the backoff - the next drop starts
       // again from the base delay.
@@ -481,6 +484,7 @@ export class NostrTransport {
   }
 
   private handleMessage(relayUrl: string, data: string): void {
+    if (!this.started) return;
     let msg: unknown[];
     try {
       msg = JSON.parse(data) as unknown[];

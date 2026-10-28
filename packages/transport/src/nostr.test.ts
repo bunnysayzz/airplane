@@ -307,6 +307,20 @@ describe('NostrTransport reconnect', () => {
     await t.stop();
   });
 
+  test('a stale onopen after stop does not resurrect the relay as open', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    expect(t.online).toBe(true);
+    const sentBefore = sockets[0].sent.length;
+    await t.stop();
+    sockets[0].open(); // stale open on the discarded socket
+    expect(t.getRelayState('wss://test.relay')).toBe('closed');
+    expect(t.online).toBe(false);
+    expect(sockets[0].sent.length).toBe(sentBefore); // no resubscribe sent
+    await t.stop();
+  });
+
   test('stop before start is a safe no-op', async () => {
     const { t } = makeTransport();
     await expect(t.stop()).resolves.toBeUndefined();
