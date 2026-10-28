@@ -7,7 +7,7 @@
 // card; this layer keeps the raw `createdAtMs` timestamp.
 
 import { EVENT_KIND_POST, toHex, type FeedPost, type Hex64 } from '@airplane/protocol';
-import { rankScore, type ListFeedOpts } from '@airplane/storage';
+import { rankScore } from '@airplane/storage';
 import type { PostCardModel } from './types';
 import { ensureStarsHydrated, markStarPostKnown, resolveOwnPubkeyHex, starViewFor } from './stars';
 import { markResharePostKnown, reshareViewFor } from './reshares';
