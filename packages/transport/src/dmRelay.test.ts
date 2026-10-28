@@ -115,6 +115,65 @@ describe('WsDmRelay.subscribe reconnect (P1-10)', () => {
   });
 });
 
+describe('WsDmRelay.publish socket paths (P1-11)', () => {
+  test('a close without OK resolves false immediately, not at the timeout', async () => {
+    const sockets: FakeSocket[] = [];
+    const relay = makeRelay(sockets, { publishTimeoutMs: 60000 });
+    const envelope = sealDm('close me', 'd'.repeat(64), 'e'.repeat(64));
+    const result = relay.publish(envelope);
+    sockets[0].open();
+    sockets[0].close();
+    await expect(result).resolves.toBe(false);
+  });
+
+  test('an error resolves false and closes the socket (no leak)', async () => {
+    const sockets: FakeSocket[] = [];
+    const relay = makeRelay(sockets);
+    const envelope = sealDm('error me', 'd'.repeat(64), 'e'.repeat(64));
+    const result = relay.publish(envelope);
+    sockets[0].open();
+    sockets[0].fail();
+    await expect(result).resolves.toBe(false);
+    expect(sockets[0].closed).toBe(true);
+  });
+
+  test('a send throw resolves false and closes the socket', async () => {
+    class ThrowingSocket extends FakeSocket {
+      override send(): void {
+        throw new Error('send boom');
+      }
+    }
+    const sockets: ThrowingSocket[] = [];
+    const relay = new WsDmRelay({
+      relays: ['wss://test.relay'],
+      wsFactory: (url: string) => {
+        const s = new ThrowingSocket(url);
+        sockets.push(s);
+        return s;
+      },
+      publishTimeoutMs: 1000,
+    });
+    const envelope = sealDm('throw me', 'd'.repeat(64), 'e'.repeat(64));
+    const result = relay.publish(envelope);
+    sockets[0].open();
+    await expect(result).resolves.toBe(false);
+    expect(sockets[0].closed).toBe(true);
+  });
+
+  test('sequential first-OK-wins order is unchanged: an OK still resolves true', async () => {
+    const sockets: FakeSocket[] = [];
+    const relay = makeRelay(sockets);
+    const envelope = sealDm('ok me', 'd'.repeat(64), 'e'.repeat(64));
+    const result = relay.publish(envelope);
+    sockets[0].open();
+    const sent = JSON.parse(sockets[0].sent[0]) as unknown[];
+    const event = sent[1] as { id: string };
+    sockets[0].receive(['OK', event.id, true]);
+    await expect(result).resolves.toBe(true);
+    expect(sockets[0].closed).toBe(true);
+  });
+});
+
 describe('nostrEventToDmEnvelope event id carry (P1-06)', () => {
   test('the parsed envelope carries the relay event id for dedup', () => {
     const sender = ed25519.utils.randomSecretKey();

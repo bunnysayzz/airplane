@@ -111,41 +111,54 @@ export class WsDmRelay implements DmRelayPort {
         resolve(false);
         return;
       }
-      const timer = setTimeout(() => {
+      // First outcome wins: close() fires onclose synchronously on fake
+      // and real sockets alike, so a success close must not let onclose
+      // overwrite the OK, and a timeout close must not double-resolve.
+      let settled = false;
+      const finish = (value: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const closeQuietly = (): void => {
         try {
           ws.close();
         } catch {
           // ignore
         }
-        resolve(false);
+      };
+      const timer = setTimeout(() => {
+        closeQuietly();
+        finish(false);
       }, this.publishTimeoutMs);
       ws.onopen = () => {
         try {
           ws.send(message);
         } catch {
-          clearTimeout(timer);
-          resolve(false);
+          closeQuietly();
+          finish(false);
         }
       };
       ws.onmessage = ev => {
         try {
           const data = JSON.parse(String(ev.data)) as unknown[];
           if (data[0] === 'OK' && data[1] === eventId && data[2] === true) {
-            clearTimeout(timer);
-            try {
-              ws.close();
-            } catch {
-              // ignore
-            }
-            resolve(true);
+            finish(true);
+            closeQuietly();
           }
         } catch {
           // Not an OK frame; keep waiting until timeout.
         }
       };
       ws.onerror = () => {
-        clearTimeout(timer);
-        resolve(false);
+        closeQuietly();
+        finish(false);
+      };
+      ws.onclose = () => {
+        // A relay that closes without an OK or an error used to stall
+        // until the full per-attempt timeout; resolve immediately instead.
+        finish(false);
       };
     });
   }
