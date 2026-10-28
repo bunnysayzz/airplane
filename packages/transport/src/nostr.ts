@@ -39,6 +39,14 @@ function crypto(): NobleCrypto {
 /** Nostr event kind for wrapped Airplane events (custom range). */
 export const AIRPLANE_NOSTR_KIND = 30000;
 
+/**
+ * Max relay frame accepted before parsing, bytes. A wrapped event is at
+ * most about 8 KB of hex plus envelope overhead, so 64 KB cannot reject
+ * any legitimate frame; it only stops a relay from making the client
+ * parse and allocate multi-megabyte frames before any validation runs.
+ */
+export const MAX_RELAY_FRAME_BYTES = 65536;
+
 /** Tag marking the envelope as an Airplane wrapper. */
 export const AIRPLANE_TAG = ['airplane', '1'];
 
@@ -574,6 +582,9 @@ export class NostrTransport {
 
   private handleMessage(relayUrl: string, data: string): void {
     if (!this.started) return;
+    // Size gate BEFORE parsing: a hostile frame must not cost a parse
+    // and an allocation before the first validation runs.
+    if (data.length > MAX_RELAY_FRAME_BYTES) return;
     // Any frame proves the socket is alive: reset the silence window.
     this.lastFrameAtMs.set(relayUrl, Date.now());
     this.silencePinged.delete(relayUrl);

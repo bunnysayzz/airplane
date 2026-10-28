@@ -383,6 +383,24 @@ describe('NostrTransport reconnect', () => {
     await t.stop();
   });
 
+  test('an oversize relay frame is dropped before parsing', async () => {
+    const { t, sockets } = makeTransport();
+    const keys = generateNostrKeypair();
+    await t.start();
+    await tick(20);
+    let count = 0;
+    t.onReceive(() => {
+      count++;
+    });
+    const wrapped = wrapEvent(makePost('oversize'), keys);
+    const frame = JSON.stringify(['EVENT', 'sub1', wrapped]) + ' '.repeat(70000);
+    expect(frame.length).toBeGreaterThan(65536);
+    sockets[0].onmessage?.({ data: frame });
+    await tick(10);
+    expect(count).toBe(0);
+    await t.stop();
+  });
+
   test('stop before start is a safe no-op', async () => {
     const { t } = makeTransport();
     await expect(t.stop()).resolves.toBeUndefined();
