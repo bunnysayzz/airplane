@@ -110,10 +110,15 @@ async function checkLocationState(apiLevel: number): Promise<BlePermissionState>
 export async function checkBlePermissionStates(): Promise<BlePermissionReport> {
   const apiLevel = typeof Platform.Version === 'number' ? Platform.Version : 0;
   const p = PermissionsAndroid.PERMISSIONS;
+  // Below API 31 there are no runtime BLUETOOTH_SCAN/ADVERTISE/CONNECT
+  // permissions: legacy BLUETOOTH/BLUETOOTH_ADMIN are install-time grants,
+  // so the three radio rows report granted (install-time) instead of
+  // unavailable, which read as unknown radio health on older phones.
+  const legacyGranted: BlePermissionState = Platform.OS === 'android' ? 'granted' : 'unavailable';
   return {
-    scan: apiLevel >= 31 ? await checkOne(p.BLUETOOTH_SCAN) : 'unavailable',
-    advertise: apiLevel >= 31 ? await checkOne(p.BLUETOOTH_ADVERTISE) : 'unavailable',
-    connect: apiLevel >= 31 ? await checkOne(p.BLUETOOTH_CONNECT) : 'unavailable',
+    scan: apiLevel >= 31 ? await checkOne(p.BLUETOOTH_SCAN) : legacyGranted,
+    advertise: apiLevel >= 31 ? await checkOne(p.BLUETOOTH_ADVERTISE) : legacyGranted,
+    connect: apiLevel >= 31 ? await checkOne(p.BLUETOOTH_CONNECT) : legacyGranted,
     location: await checkLocationState(apiLevel),
     locationServices: 'unavailable',
     batteryOptimisation: 'unavailable',

@@ -10,6 +10,7 @@ import {
   GattBlePort,
   defaultBleDeps,
   describeAdvertiseError,
+  withBleTimeout,
   extractTag,
   type BleNativeDeps,
   type CentralAdapter,
@@ -46,14 +47,22 @@ class FakeCentral implements CentralAdapter {
   notifyCb: ((ev: { id: string; value: Uint8Array }) => void) | null = null;
   disconnectCb: ((id: string) => void) | null = null;
   connects: string[] = [];
+  connectAttempts: string[] = [];
   disconnects: string[] = [];
   notificationsStarted: string[] = [];
   writes: { id: string; char: string; chunk: Uint8Array }[] = [];
+  writesWithoutResponse: { id: string; char: string; chunk: Uint8Array }[] = [];
   mtu = 512;
   failConnect = new Set<string>();
+  failStart = false;
+  failWrite = false;
+  stateCb: ((state: string) => void) | null = null;
+  adapterState = 'on';
+  listenerRegistrations = 0;
   identHex: string = PEER_HEX;
 
   async start(): Promise<void> {
+    if (this.failStart) throw new Error('central start refused');
     this.started = true;
   }
   async scan(): Promise<void> {
@@ -63,12 +72,14 @@ class FakeCentral implements CentralAdapter {
     this.scanning = false;
   }
   onDiscover(cb: (info: { id: string; rssi: number; tag: Uint8Array | null }) => void): () => void {
+    this.listenerRegistrations++;
     this.discoverCb = cb;
     return () => {
       this.discoverCb = null;
     };
   }
   async connect(id: string): Promise<void> {
+    this.connectAttempts.push(id);
     if (this.failConnect.has(id)) throw new Error('connect refused');
     this.connects.push(id);
   }
@@ -83,22 +94,37 @@ class FakeCentral implements CentralAdapter {
     return ascii(this.identHex);
   }
   async write(id: string, _svc: string, char: string, chunk: Uint8Array): Promise<void> {
+    if (this.failWrite) throw new Error('write refused');
     this.writes.push({ id, char, chunk });
+  }
+  async writeWithoutResponse(id: string, _svc: string, char: string, chunk: Uint8Array): Promise<void> {
+    this.writesWithoutResponse.push({ id, char, chunk });
   }
   async startNotification(id: string): Promise<void> {
     this.notificationsStarted.push(id);
   }
   onNotification(cb: (ev: { id: string; value: Uint8Array }) => void): () => void {
+    this.listenerRegistrations++;
     this.notifyCb = cb;
     return () => {
       this.notifyCb = null;
     };
   }
   onDisconnect(cb: (id: string) => void): () => void {
+    this.listenerRegistrations++;
     this.disconnectCb = cb;
     return () => {
       this.disconnectCb = null;
     };
+  }
+  onState(cb: (state: string) => void): () => void {
+    this.stateCb = cb;
+    return () => {
+      this.stateCb = null;
+    };
+  }
+  async checkState(): Promise<string | null> {
+    return this.adapterState;
   }
 
   /** Reassemble what was written to a characteristic into datagrams. */
@@ -119,6 +145,7 @@ class FakePeripheral implements PeripheralAdapter {
   advTag: Uint8Array | null = null;
   advIdent: string | null = null;
   writeCb: ((ev: { device: string; value: Uint8Array }) => void) | null = null;
+  errorCb: ((err: unknown) => void) | null = null;
   notified: Uint8Array[] = [];
 
   async startAdvertising(tag: Uint8Array, identHex: string): Promise<void> {
@@ -126,13 +153,21 @@ class FakePeripheral implements PeripheralAdapter {
     this.advIdent = identHex;
     this.advertising = true;
   }
+  failStop = false;
   async stopAdvertising(): Promise<void> {
+    if (this.failStop) throw new Error('stop refused');
     this.advertising = false;
   }
   onWrite(cb: (ev: { device: string; value: Uint8Array }) => void): () => void {
     this.writeCb = cb;
     return () => {
       this.writeCb = null;
+    };
+  }
+  onError(cb: (err: unknown) => void): () => void {
+    this.errorCb = cb;
+    return () => {
+      this.errorCb = null;
     };
   }
   async notify(chunk: Uint8Array): Promise<void> {
@@ -314,6 +349,7 @@ describe('discovery + central connect flow', () => {
     central.discoverCb!({ id: 'ble-2', rssi: -60, tag: PEER_TAG });
     await tick(50);
     expect(port.peerCount).toBe(1);
+    await port.close();
   });
 });
 
@@ -417,9 +453,10 @@ describe('send/receive over the central role', () => {
   test('send chunks frames to (mtu - 3) ATT PDUs', async () => {
     const { port, central } = await connectedPort();
     const frame = new Uint8Array(1200).map((_, i) => i & 0xff);
-    const before = central.writes.length;
+    // Frame chunks go out without-response (F-P2-9); hello writes stay
+    // in central.writes, so chunking is asserted on the without-response log.
     await port.send(PEER_HEX, frame);
-    const newWrites = central.writes.slice(before);
+    const newWrites = central.writesWithoutResponse;
     // datagram = 2 (len) + 1 (kind) + 1200; chunk size 509 -> 3 chunks
     expect(newWrites).toHaveLength(3);
     expect(newWrites.every((w) => w.chunk.length <= 512 - ATT_OVERHEAD)).toBe(true);
@@ -643,5 +680,409 @@ describe('defaultBleDeps adapter delegation', () => {
     // The real multi-ble-peripheral module loads, but its native module is
     // absent in jest, so constructing throws -> factory rejects.
     await expect(deps.createPeripheral!()).rejects.toThrow();
+  });
+});
+
+describe('withBleTimeout (audit P1-13)', () => {
+  test('passes a settling value through', async () => {
+    await expect(withBleTimeout(Promise.resolve(7), 1000, 'test stage')).resolves.toBe(7);
+  });
+
+  test('rejects with a stage-tagged error when the native call never settles', async () => {
+    await expect(withBleTimeout(new Promise(() => {}), 10, 'central connect')).rejects.toThrow(
+      /central connect timed out/,
+    );
+  });
+
+  test('passes a native rejection through unchanged', async () => {
+    await expect(withBleTimeout(Promise.reject(new Error('native boom')), 1000, 'test stage')).rejects.toThrow(
+      'native boom',
+    );
+  });
+});
+
+describe('ensureCentral failure cleanup (audit P1-15)', () => {
+  test('a start failure is recorded, leaks no subscriber, and a retry registers listeners once', async () => {
+    const { deps, central } = makeDeps();
+    central.failStart = true;
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await expect(port.scan(() => {})).rejects.toThrow(/central start refused/);
+    // No listener survives the failed bring-up, and no scan subscriber leaked.
+    expect(central.discoverCb).toBeNull();
+    expect(central.notifyCb).toBeNull();
+    expect(central.disconnectCb).toBeNull();
+    const { getDiagnosticsSnapshot, resetDiagnosticsForTests } = await import('../diagnostics');
+    expect(getDiagnosticsSnapshot().scanning.lastFailure).toMatch(/central start refused/);
+    resetDiagnosticsForTests();
+    // Retry after the radio recovers: exactly one listener set, one connect.
+    central.failStart = false;
+    const seen: string[] = [];
+    await port.scan((peer) => seen.push(peer.peerId));
+    expect(central.listenerRegistrations).toBe(3);
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connects).toEqual(['ble-1']);
+    expect(seen).toEqual([`tag:${toHex(PEER_TAG)}`, PEER_HEX]);
+    await port.close();
+  });
+});
+
+describe('connectCentral cleanup + IDENT tag binding (audit P1-16)', () => {
+  test('a hello-write failure after registration drops the conn, it does not stay connected', async () => {
+    const { deps, central } = makeDeps();
+    central.failWrite = true;
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(0);
+    expect(port.connectedPeerIds()).toEqual([]);
+    expect(central.disconnects).toContain('ble-1');
+    // The bleId is free again: a later discovery can connect.
+    central.failWrite = false;
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(1);
+    await port.close();
+  });
+
+  test('an IDENT pubkey whose tag differs from the advertised tag fails the connect', async () => {
+    const { deps, central } = makeDeps();
+    const mismatchPub = new Uint8Array(32).fill(0x0c);
+    central.identHex = toHex(mismatchPub);
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(0);
+    expect(port.connectedPeerIds()).toEqual([]);
+    // With the matching IDENT the same bleId connects.
+    central.identHex = PEER_HEX;
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(1);
+    await port.close();
+  });
+});
+
+describe('in-flight guards (audit P1-20)', () => {
+  test('concurrent advertise calls share one in-flight promise, no second advertiser', async () => {
+    const { deps, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    const otherPub = new Uint8Array(32).fill(0x0d);
+    await Promise.all([port.advertise(OWN_HEX), port.advertise(toHex(otherPub))]);
+    expect(peripheral.advIdent).toBe(OWN_HEX);
+    await port.stopAdvertise();
+  });
+
+  test('concurrent connects to the same bleId run one handshake', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    // Two discoveries of the same bleId in one tick: the second must not
+    // start a second native connect while the first handshake is pending.
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connects).toEqual(['ble-1']);
+    expect(port.peerCount).toBe(1);
+    await port.close();
+  });
+
+  test('peer limit counts pending handshakes, not just registered conns', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    // MAX_BLE_PEERS is 8: fill it with 8 connected peers, then a 9th
+    // discovery must not start a connect.
+    for (let i = 0; i < 8; i++) {
+      const pub = new Uint8Array(32).fill(0x10 + i);
+      const tag = peerTagOf(pub);
+      // Each peer tag must sort above our own tag (0x0a) to auto-connect,
+      // and IDENT must match the tag: point ident at this peer.
+      central.identHex = toHex(pub);
+      central.discoverCb!({ id: `ble-${i}`, rssi: -60, tag });
+      await tick(20);
+    }
+    expect(port.peerCount).toBe(8);
+    const connectsBefore = central.connects.length;
+    const pub9 = new Uint8Array(32).fill(0x30);
+    central.identHex = toHex(pub9);
+    central.discoverCb!({ id: 'ble-9', rssi: -60, tag: peerTagOf(pub9) });
+    await tick(30);
+    expect(central.connects.length).toBe(connectsBefore);
+    await port.close();
+  });
+});
+
+describe('auto-connect bounded retry (audit P1-19)', () => {
+  test('a failed auto-connect is recorded and retried exactly once', async () => {
+    const { deps, central } = makeDeps();
+    central.failConnect.add('ble-1');
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(lines.some((l) => l.includes('connect failed auto-connect ble-1'))).toBe(true);
+    expect(port.peerCount).toBe(0);
+    // The single retry fires after about 2s and fails again (still refused).
+    await new Promise((r) => setTimeout(r, 2200));
+    expect(central.connectAttempts).toEqual(['ble-1', 'ble-1']);
+    // No further retries: another window passes with no new attempt.
+    await new Promise((r) => setTimeout(r, 2200));
+    expect(central.connectAttempts).toEqual(['ble-1', 'ble-1']);
+    resetDiagnosticsForTests();
+    await port.close();
+  });
+
+  test('the retry succeeds when the transient failure clears', async () => {
+    const { deps, central } = makeDeps();
+    central.failConnect.add('ble-1');
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(0);
+    central.failConnect.clear();
+    await new Promise((r) => setTimeout(r, 2200));
+    expect(port.peerCount).toBe(1);
+    await port.close();
+  });
+});
+
+describe('adapter-state subscription (audit P1-14)', () => {
+  test('native state events reach port subscribers and checkAdapterState reports the state', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    const states: string[] = [];
+    port.onAdapterState((state) => states.push(state));
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    expect(await port.checkAdapterState()).toBe('on');
+    central.stateCb!('off');
+    central.stateCb!('on');
+    central.stateCb!('unsupported'); // ignored: only on/off are forwarded
+    expect(states).toEqual(['off', 'on']);
+    await port.close();
+  });
+});
+
+describe('ensureCentral permission check (audit P1-18)', () => {
+  test('scan with revoked grants records a permission-tagged failure and throws', async () => {
+    const { deps } = makeDeps({ checkPermissions: async () => false });
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await expect(port.scan(() => {})).rejects.toThrow(/permissions not granted/);
+    const { getDiagnosticsSnapshot, resetDiagnosticsForTests } = await import('../diagnostics');
+    expect(getDiagnosticsSnapshot().scanning.lastFailure).toMatch(/permissions not granted/);
+    resetDiagnosticsForTests();
+    await port.close();
+  });
+
+  test('scan proceeds when the check passes', async () => {
+    const { deps, central } = makeDeps({ checkPermissions: async () => true });
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    expect(central.started).toBe(true);
+    await port.close();
+  });
+});
+
+describe('discovered peer pruning and cap (audit F-P2-1)', () => {
+  test('stale entries are pruned before connect, so a long-gone peer is not dialled', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    const nowSpy = jest.spyOn(Date, 'now');
+    nowSpy.mockReturnValue(1_000_000);
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    // 61s later a new sighting triggers the prune of the stale entry.
+    nowSpy.mockReturnValue(1_000_000 + 61_000);
+    const otherPub = new Uint8Array(32).fill(0x0c);
+    central.discoverCb!({ id: 'ble-2', rssi: -60, tag: peerTagOf(otherPub) });
+    await tick(50);
+    // Still at the second sighting's time: the first entry was pruned on
+    // discover, the second is fresh, so only the first is unknown.
+    await expect(port.connect(`tag:${toHex(PEER_TAG)}`)).rejects.toThrow(/unknown peer/);
+    nowSpy.mockRestore();
+    await port.close();
+  });
+
+  test('the map caps at 100 entries, evicting the stalest first', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    // 101 distinct tags that sort below our own tag, so none auto-connect.
+    for (let i = 0; i < 101; i++) {
+      const pub = new Uint8Array(32);
+      pub[0] = 0x01;
+      pub[1] = i & 0xff;
+      central.discoverCb!({ id: `ble-${i}`, rssi: -60, tag: peerTagOf(pub) });
+    }
+    const firstPub = new Uint8Array(32);
+    firstPub[0] = 0x01;
+    firstPub[1] = 0;
+    await expect(port.connect(`tag:${toHex(peerTagOf(firstPub))}`)).rejects.toThrow(/unknown peer/);
+    const lastPub = new Uint8Array(32);
+    lastPub[0] = 0x01;
+    lastPub[1] = 100;
+    // The newest entry survives: connect attempts it, so the error is
+    // the IDENT mismatch (default fake IDENT), not unknown-peer.
+    await expect(port.connect(`tag:${toHex(peerTagOf(lastPub))}`)).rejects.not.toThrow(/unknown peer/);
+    await port.close();
+  });
+});
+
+describe('scan failure callback (audit F-P2-5)', () => {
+  test('ensureCentral failure notifies the transport callback with the failure code', async () => {
+    const codes: string[] = [];
+    const { deps, central } = makeDeps({ onScanFailure: (code) => codes.push(code) });
+    central.failStart = true;
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await expect(port.scan(() => {})).rejects.toThrow();
+    expect(codes).toEqual(['central start refused']);
+    await port.close();
+  });
+});
+
+describe('persistent peripheral error listener (audit F-P2-6)', () => {
+  test('a later peripheral error records an advertise failure and clears the handle for Retry', async () => {
+    const { deps, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    expect(peripheral.advertising).toBe(true);
+    peripheral.errorCb!(new Error('gatt server died'));
+    const { getDiagnosticsSnapshot, resetDiagnosticsForTests } = await import('../diagnostics');
+    expect(getDiagnosticsSnapshot().advertising.state).toBe('stopped');
+    expect(getDiagnosticsSnapshot().advertising.lastFailure).toMatch(/peripheral error after ready/);
+    resetDiagnosticsForTests();
+    // The handle is cleared, so a fresh advertise recreates the adapter
+    // instead of returning early for the dead one.
+    await port.advertise(OWN_HEX);
+    expect(peripheral.advIdent).toBe(OWN_HEX);
+    await port.close();
+  });
+});
+
+describe('stopAdvertise failure ordering (audit F-P2-7)', () => {
+  test('a failed stop keeps the handle and never throws; a later stop retries', async () => {
+    const { deps, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    peripheral.failStop = true;
+    await port.stopAdvertise(); // never throws, despite the native failure
+    // The handle is kept: advertising a different peer must refuse rather
+    // than overwrite the kept handle and orphan the old advertiser.
+    const otherPub = new Uint8Array(32).fill(0x0d);
+    await expect(port.advertise(toHex(otherPub))).rejects.toThrow(/could not be stopped/);
+    // Once the native stop recovers, a later stop succeeds and destroys.
+    peripheral.failStop = false;
+    await port.stopAdvertise();
+    expect(peripheral.destroyed).toBe(true);
+    await port.close();
+  });
+});
+
+describe('writeWithoutResponse for frame chunks (audit F-P2-9)', () => {
+  test('send uses without-response writes for frame chunks, hello keeps with-response writes', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    const helloWrites = central.writes.length;
+    const frame = new Uint8Array(100).map((_, i) => i & 0xff);
+    await port.send(PEER_HEX, frame);
+    // Hello went out with-response; the frame went without-response.
+    expect(central.writes.length).toBe(helloWrites);
+    expect(central.writesWithoutResponse.length).toBeGreaterThan(0);
+    expect(central.writesWithoutResponse.every((w) => w.char === 'b44060bc-7918-4e95-aabd-fe08327ad228')).toBe(true);
+    await port.close();
+  });
+});
+
+describe('close cleanup (audit F-P3-1)', () => {
+  test('close records scan stopped only when scanning was active', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    const { deps } = makeDeps();
+    const neverScanned = new GattBlePort(deps);
+    await neverScanned.close();
+    expect(lines.some((l) => l === 'scan stopped')).toBe(false);
+    const scanned = new GattBlePort(deps);
+    await scanned.advertise(OWN_HEX);
+    await scanned.scan(() => {});
+    await scanned.close();
+    expect(lines.some((l) => l === 'scan stopped')).toBe(true);
+    resetDiagnosticsForTests();
+  });
+});
+
+describe('scan-before-advertise self filtering (audit F-P3-2)', () => {
+  test('scanning before advertising surfaces our own advertisement as a peer (documented latent order requirement)', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    // No advertise() call: ownTag is null, so the self filter cannot run.
+    const seen: string[] = [];
+    await port.scan((peer) => seen.push(peer.peerId));
+    central.discoverCb!({ id: 'ble-self', rssi: -50, tag: peerTagOf(OWN_PUB) });
+    await tick(20);
+    // The app flow always advertises first, so this never happens live;
+    // the test pins that the filter depends on advertise having run.
+    expect(seen).toEqual([`tag:${toHex(peerTagOf(OWN_PUB))}`]);
+    await port.close();
+  });
+});
+
+describe('advertisement length (audit F-P3-3)', () => {
+  test('advertise records 15 bytes: 12-byte manufacturer field plus 3-byte Flags', async () => {
+    const { deps } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    const { getDiagnosticsSnapshot, resetDiagnosticsForTests } = await import('../diagnostics');
+    expect(getDiagnosticsSnapshot().advertising.advertisementLengthBytes).toBe(15);
+    resetDiagnosticsForTests();
+    await port.close();
+  });
+});
+
+describe('BLE drop logging (audit F-P3-5)', () => {
+  test('a peripheral write dropped at the peer limit logs one throttled line', async () => {
+    const { deps, central, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    for (let i = 0; i < 8; i++) {
+      const pub = new Uint8Array(32).fill(0x10 + i);
+      central.identHex = toHex(pub);
+      central.discoverCb!({ id: `ble-${i}`, rssi: -60, tag: peerTagOf(pub) });
+      await tick(20);
+    }
+    expect(port.peerCount).toBe(8);
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:99', value: new Uint8Array([1, 2, 3]) });
+    peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:98', value: new Uint8Array([1, 2, 3]) });
+    // Throttled: two drops in one minute produce exactly one line.
+    expect(lines.filter((l) => l.startsWith('ble-drop peer-limit'))).toHaveLength(1);
+    resetDiagnosticsForTests();
+    await port.close();
   });
 });

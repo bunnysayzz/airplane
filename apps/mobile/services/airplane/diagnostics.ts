@@ -291,6 +291,11 @@ export function recordScanStopped(): void {
 
 export function recordScanFailure(code: string): void {
   scanningLastFailure = code;
+  // A failed scan is a stopped scan: previously the failure was only
+  // logged while scanningState stayed started, so Diagnostics kept
+  // showing a live scan on a dead radio. The transport reclassifies the
+  // adapter state separately (see the port onScanFailure callback).
+  scanningState = 'stopped';
   logEvent('scan', `failed ${code}`);
   notifyThrottled();
 }
@@ -341,6 +346,29 @@ export function recordPeerConnected(
   peer.mtu = mtu;
   peer.cccdSubscribed = cccdSubscribed;
   peer.lastSeenAtMs = Date.now();
+  notifyThrottled();
+}
+
+/**
+ * Stage-tagged auto-connect failure line. Log-only on purpose: a single
+ * peer failing to connect must not flip the scanning state (that is what
+ * recordScanFailure is for, and it does flip it). The port schedules one
+ * bounded retry for the same bleId; this line is its only trail.
+ */
+export function recordConnectFailure(code: string): void {
+  logEvent('peer', `connect failed ${code}`);
+  notifyThrottled();
+}
+
+/**
+ * Throttled drop line for BLE inbound drops (peer-limit drops, malformed
+ * write drops). Log-only and kind-scoped: the sink already throttles
+ * bursts elsewhere, and this hook is for classes the port counts as
+ * silently dropped, not for per-frame traffic. No snapshot counter is
+ * added, so no store or snapshot schema changes.
+ */
+export function recordBleDrop(kind: string, detail: string): void {
+  logEvent('ble-drop', `${kind} ${detail}`);
   notifyThrottled();
 }
 

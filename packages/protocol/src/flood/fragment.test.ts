@@ -141,3 +141,32 @@ describe('fragmentation', () => {
     expect(() => fragment(encodeEvent(makePost('x')), 7, 10)).toThrow(FragmentError); // mtu too small
   });
 });
+
+describe('fragment bounds (audit area6 F12)', () => {
+  test('parseHeader rejects total over the cap and nonzero flags', () => {
+    expect(() => parseHeader(encodeHeader({ msgTag: 1, total: 257, index: 0, ttl: 7, flags: 0 }))).toThrow(
+      FragmentError,
+    );
+    expect(() => parseHeader(encodeHeader({ msgTag: 1, total: 1, index: 0, ttl: 7, flags: 1 }))).toThrow(
+      FragmentError,
+    );
+    // 38 fragments (the MTU-aware broadcast case) stays accepted.
+    expect(parseHeader(encodeHeader({ msgTag: 1, total: 38, index: 0, ttl: 7, flags: 0 })).total).toBe(38);
+    expect(parseHeader(encodeHeader({ msgTag: 1, total: 256, index: 0, ttl: 7, flags: 0 })).total).toBe(256);
+  });
+
+  test('Reassembler caps pending tags at 64, dropping the oldest', () => {
+    const rx = new Reassembler();
+    for (let tag = 0; tag < 65; tag++) {
+      const frame = new Uint8Array(FRAG_HEADER_LEN + 1);
+      frame.set(encodeHeader({ msgTag: tag, total: 2, index: 0, ttl: 7, flags: 0 }));
+      expect(rx.push(frame, 1000)).toBeNull();
+    }
+    expect(rx.pendingCount).toBe(64);
+    // Tag 0 was evicted: its second fragment starts a fresh incomplete set.
+    const second = new Uint8Array(FRAG_HEADER_LEN + 1);
+    second.set(encodeHeader({ msgTag: 0, total: 2, index: 1, ttl: 7, flags: 0 }));
+    expect(rx.push(second, 1000)).toBeNull();
+    expect(rx.pendingCount).toBe(64);
+  });
+});

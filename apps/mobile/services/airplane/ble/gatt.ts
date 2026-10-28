@@ -48,6 +48,8 @@ import { FRAG_WIRE_MAX, fromHex, toHex } from '@airplane/protocol';
 import {
   recordAdvertiseFailure,
   recordAdvertiseStopped,
+  recordBleDrop,
+  recordConnectFailure,
   recordAdvertiseSuccess,
   recordFragmentsReceived,
   recordFragmentsSent,
@@ -96,9 +98,25 @@ export interface CentralAdapter {
   requestMtu(id: string, mtu: number): Promise<number>;
   read(id: string, serviceUuid: string, charUuid: string): Promise<Uint8Array>;
   write(id: string, serviceUuid: string, charUuid: string, chunk: Uint8Array): Promise<void>;
+  /**
+   * Without-response write (ble-manager 12.6.0 writeWithoutResponse,
+   * verified in the installed package source). Used for RX frame chunks
+   * in send(), where no per-chunk acknowledgement is needed; hello
+   * writes keep with-response writes. Absent on older shapes.
+   */
+  writeWithoutResponse?(id: string, serviceUuid: string, charUuid: string, chunk: Uint8Array): Promise<void>;
   startNotification(id: string, serviceUuid: string, charUuid: string): Promise<void>;
   onNotification(cb: (ev: { id: string; value: Uint8Array }) => void): () => void;
   onDisconnect(cb: (id: string) => void): () => void;
+  /**
+   * Adapter-state events, when the native library exposes them
+   * (react-native-ble-manager 12.6.0: onDidUpdateState, states 'on' /
+   * 'off' / 'unsupported' / 'unauthorized'). Absent on older shapes; the
+   * transport then falls back to AppState-active re-validation.
+   */
+  onState?(cb: (state: string) => void): () => void;
+  /** Current adapter state via checkState, or null when unavailable. */
+  checkState?(): Promise<string | null>;
 }
 
 /** Peripheral-role native surface (react-native-multi-ble-peripheral shaped). */
@@ -108,6 +126,13 @@ export interface PeripheralAdapter {
   onWrite(cb: (ev: { device: string; value: Uint8Array }) => void): () => void;
   notify(chunk: Uint8Array): Promise<void>;
   destroy(): Promise<void>;
+  /**
+   * Persistent error listener, attached after ready resolves. The
+   * creation-time once('error') is consumed at startup, so without this
+   * a later GATT server failure is invisible and advertisingState stays
+   * started. Absent on fakes and older shapes.
+   */
+  onError?(cb: (err: unknown) => void): () => void;
 }
 
 /** Injected native dependencies. Null = that role is unavailable (fail closed). */
@@ -115,6 +140,19 @@ export interface BleNativeDeps {
   central: CentralAdapter | null;
   createPeripheral: (() => Promise<PeripheralAdapter>) | null;
   requestPermissions: () => Promise<boolean>;
+  /**
+   * Non-prompting permission check (checkBlePermissions). Absent in older
+   * callers and tests: ensureCentral then skips the check rather than
+   * prompting from a scan. Distinct from requestPermissions, which fires
+   * the OS dialog and must only run from a user action.
+   */
+  checkPermissions?: () => Promise<boolean>;
+  /**
+   * Mid-session scan-failure callback for the transport: the port records
+   * the failure, the transport reclassifies the radio state by re-checking
+   * permissions at that moment. Absent in tests and older callers.
+   */
+  onScanFailure?: (code: string) => void;
 }
 
 type Role = 'central' | 'peripheral';
@@ -150,6 +188,53 @@ function isProvisionalKey(key: string): boolean {
  * R2 run's "null BluetoothGattServer addService" case); those must not
  * be recorded verbatim, or diagnostics shows a meaningless "null".
  */
+/**
+ * Per-operation native deadlines (ms). No BLE operation has a native
+ * guarantee to settle: a radio that is off or wedged can leave a promise
+ * pending forever, which used to hang advertise, connect, send, and
+ * transport startup with no fallback. Every native await in this file
+ * goes through withBleTimeout; on timeout the caller cleans up (disconnect,
+ * drop the registered conn) and throws, so the transport falls back to
+ * Nostr-only. No new dependency.
+ */
+/** Single auto-connect retry delay (ms). One retry only, never a loop. */
+export const AUTO_CONNECT_RETRY_MS = 2000;
+
+/** Discovered peers older than this are stale (pruned on discover and before connect). */
+export const DISCOVERED_STALE_MS = 60_000;
+/** Discovered peer map cap: past this, the stalest entry is evicted. */
+export const DISCOVERED_MAX = 100;
+
+export const BLE_TIMEOUT_MS = {
+  ready: 10_000,
+  start: 10_000,
+  scan: 10_000,
+  connect: 10_000,
+  retrieveServices: 10_000,
+  requestMtu: 10_000,
+  read: 10_000,
+  write: 5_000,
+  startNotification: 10_000,
+  advertise: 15_000,
+  notify: 5_000,
+} as const;
+
+/**
+ * Race a native promise against a deadline. Rejects with a stage-tagged
+ * error on timeout. A late native rejection after the race settles is
+ * swallowed by the attached no-op handler so it is never unhandled.
+ */
+export function withBleTimeout<T>(promise: Promise<T>, timeoutMs: number, stage: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<T>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`ble: ${stage} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  void promise.catch(() => {});
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== null) clearTimeout(timer);
+  });
+}
+
 export function describeAdvertiseError(err: unknown): string {
   if (err instanceof Error && err.message.trim() !== '') return `ble: advertise failed: ${err.message}`;
   if (typeof err === 'string' && err.trim() !== '' && err !== 'null' && err !== 'undefined') {
@@ -158,19 +243,40 @@ export function describeAdvertiseError(err: unknown): string {
   return 'ble: advertise failed: native error was empty (null/undefined) - check Bluetooth on, peripheral support, and the Diagnostics retry';
 }
 
+/** Last log time per drop class, so a flood of drops logs at most one line per minute per class. */
+const lastDropLogAtMs = new Map<string, number>();
+const DROP_LOG_WINDOW_MS = 60_000;
+
+/** Log one throttled diagnostics line per drop class per minute. */
+function logBleDropThrottled(kind: string, detail: string): void {
+  const nowMs = Date.now();
+  const last = lastDropLogAtMs.get(kind) ?? 0;
+  if (nowMs - last < DROP_LOG_WINDOW_MS) return;
+  lastDropLogAtMs.set(kind, nowMs);
+  recordBleDrop(kind, detail);
+}
+
 export class GattBlePort implements TransportPort {
   private ownPeerId: string | null = null;
   private ownTag: Uint8Array | null = null;
   private readonly conns = new Map<string, PeerConn>();
   private readonly bleIndex = new Map<string, string>(); // bleId -> conn key
-  private readonly discovered = new Map<string, { bleId: string; tag: Uint8Array; rssi: number }>();
+  private readonly discovered = new Map<string, { bleId: string; tag: Uint8Array; rssi: number; lastSeenMs: number }>();
   private readonly receivers = new Set<(peerId: string, bytes: Uint8Array) => void>();
   private readonly scanSubs = new Set<(peer: PeerInfo) => void>();
   private scanUnsub: (() => void) | null = null;
   private centralStarted = false;
+  /** In-flight advertise promise: a second concurrent advertise returns this instead of starting a second advertiser. */
+  private advertisePromise: Promise<void> | null = null;
+  /** bleIds with a handshake in flight: reserved before the first await, freed in finally. */
+  private readonly pendingConnects = new Set<string>();
+  /** One scheduled auto-connect retry per bleId (single retry, about 2s). */
+  private readonly autoConnectRetries = new Map<string, ReturnType<typeof setTimeout>>();
   private peripheral: PeripheralAdapter | null = null;
   private readonly peripheralUnsubs: (() => void)[] = [];
   private centralUnsubs: (() => void)[] = [];
+  private readonly adapterStateSubs = new Set<(state: 'on' | 'off') => void>();
+  private adapterStateUnsub: (() => void) | null = null;
 
   constructor(private readonly deps: BleNativeDeps) {}
 
@@ -182,9 +288,27 @@ export class GattBlePort implements TransportPort {
    * denied, peripheral lib missing/broken) - the caller runs Nostr-only.
    */
   async advertise(peerId: string): Promise<void> {
+    // In-flight guard: two concurrent calls used to both pass the
+    // idempotent check, both create adapters, and the second assignment
+    // leaked the first advertiser (still advertising, never destroyed).
+    if (this.advertisePromise) return this.advertisePromise;
+    const p = this.advertiseInner(peerId);
+    this.advertisePromise = p;
+    try {
+      await p;
+    } finally {
+      if (this.advertisePromise === p) this.advertisePromise = null;
+    }
+  }
+
+  private async advertiseInner(peerId: string): Promise<void> {
     if (!HEX64_RE.test(peerId)) throw new Error('ble: advertise needs a 64-char hex peerId');
     if (this.peripheral && this.ownPeerId === peerId) return;
     await this.stopAdvertise();
+    // stopAdvertise keeps the handle when the native stop fails so a later
+    // stop can retry it; a new advertise must not overwrite that handle
+    // and orphan the old advertiser. Fail instead and let Retry retry.
+    if (this.peripheral) throw new Error('ble: previous advertiser could not be stopped');
     const granted = await this.deps.requestPermissions().catch(() => false);
     if (!granted) {
       recordAdvertiseFailure('bluetooth permissions not granted');
@@ -198,8 +322,8 @@ export class GattBlePort implements TransportPort {
     const tag = peerTagOf(fromHex(peerId));
     let adapter: PeripheralAdapter | null = null;
     try {
-      adapter = await factory();
-      await adapter.startAdvertising(tag, peerId);
+      adapter = await withBleTimeout(factory(), BLE_TIMEOUT_MS.ready, 'peripheral ready');
+      await withBleTimeout(adapter.startAdvertising(tag, peerId), BLE_TIMEOUT_MS.advertise, 'advertise');
     } catch (err) {
       await adapter?.destroy().catch(() => {});
       // R3: the R2 device run surfaced this failure as a bare "null"
@@ -211,18 +335,60 @@ export class GattBlePort implements TransportPort {
       recordAdvertiseFailure(message);
       throw new Error(message);
     }
-    // Advertisement length on the air: AD header (2 bytes) + company id
-    // (2 bytes) + 8-byte tag = 12 bytes, inside the 31-byte legacy budget.
-    recordAdvertiseSuccess(2 + 2 + tag.length);
+    // Advertisement length on the air: the manufacturer AD field is
+    // AD header (2 bytes) + company id (2 bytes) + 8-byte tag = 12
+    // bytes, but a legacy packet also carries the 3-byte Android Flags
+    // AD field, so the true minimum packet is 15 bytes, still inside the
+    // 31-byte legacy budget. Previously diagnostics reported 12, which
+    // understated the packet.
+    recordAdvertiseSuccess(2 + 2 + tag.length + 3);
     this.peripheral = adapter;
     this.ownPeerId = peerId;
     this.ownTag = peerTagOf(fromHex(peerId));
     this.peripheralUnsubs.push(
       adapter.onWrite(({ device, value }) => this.onPeripheralWrite(device, value)),
     );
+    // Persistent error listener: a later GATT server failure records a
+    // stage-tagged advertise failure and clears the peripheral handle, so
+    // the next Retry recreates the adapter instead of hitting the
+    // idempotent early return for a held-but-dead peripheral.
+    if (adapter.onError) {
+      const offError = adapter.onError(() => {
+        if (this.peripheral === adapter) {
+          this.peripheral = null;
+          this.ownPeerId = null;
+          this.ownTag = null;
+        }
+        recordAdvertiseFailure('ble: advertise failed: peripheral error after ready');
+      });
+      this.peripheralUnsubs.push(offError);
+    }
   }
 
   async stopAdvertise(): Promise<void> {
+    const p = this.peripheral;
+    if (p) {
+      // Await stop and destroy FIRST: previously the handle was cleared
+      // before the awaits and both failures were swallowed, so a failed
+      // stop left an orphan advertiser running while JS state said
+      // stopped. Failures are recorded without throwing (the never-throws
+      // contract for callers is kept) and the handle is kept, so a later
+      // stopAdvertise can retry the stop instead of orphaning it.
+      let failed = false;
+      try {
+        await p.stopAdvertising();
+      } catch (err) {
+        failed = true;
+        recordAdvertiseFailure(`ble: stopAdvertising failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      try {
+        await p.destroy();
+      } catch (err) {
+        failed = true;
+        recordAdvertiseFailure(`ble: peripheral destroy failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (failed) return;
+    }
     for (const u of this.peripheralUnsubs.splice(0)) {
       try {
         u();
@@ -230,14 +396,9 @@ export class GattBlePort implements TransportPort {
         // ignore
       }
     }
-    const p = this.peripheral;
     this.peripheral = null;
     this.ownPeerId = null;
     this.ownTag = null;
-    if (p) {
-      await p.stopAdvertising().catch(() => {});
-      await p.destroy().catch(() => {});
-    }
     recordAdvertiseStopped();
     // Forget peripheral-role conns (their radio is gone); central-role conns
     // survive - the GATT client is independent of our advertiser.
@@ -253,12 +414,22 @@ export class GattBlePort implements TransportPort {
    * `tag:<hex>` id until the full peerId resolves, then again with it).
    * Resolves to an unsubscribe function. Inert no-op when central is
    * unavailable.
+   *
+   * Order requirement: advertise() must run before scan(). The self
+   * filter in onDiscover needs ownTag, which is only set by advertise;
+   * scanning first surfaces our own advertisement as a nearby peer
+   * (latent in the app flow, which always advertises first). No
+   * behaviour change is made here: this comment plus the
+   * scan-before-advertise test pin the requirement.
    */
   async scan(onPeer: (peer: PeerInfo) => void): Promise<() => void> {
-    this.scanSubs.add(onPeer);
+    // The subscriber joins only after ensureCentral succeeds: previously it
+    // was added first, so a failed bring-up leaked it in scanSubs forever
+    // and the caller never received the unsubscribe function.
     if (!this.scanUnsub) {
       await this.ensureCentral();
     }
+    this.scanSubs.add(onPeer);
     let done = false;
     return () => {
       if (done) return;
@@ -274,22 +445,81 @@ export class GattBlePort implements TransportPort {
     };
   }
 
+  /**
+   * Subscribe to adapter-state changes ('on' / 'off'). The port forwards
+   * native state events; the transport decides what a transition means
+   * (powered-off reclassifies the radio, powered-on re-runs bring-up).
+   */
+  onAdapterState(cb: (state: 'on' | 'off') => void): () => void {
+    this.adapterStateSubs.add(cb);
+    return () => {
+      this.adapterStateSubs.delete(cb);
+    };
+  }
+
+  /** Current adapter state when the central library exposes checkState, else null. Never throws. */
+  async checkAdapterState(): Promise<string | null> {
+    try {
+      return (await this.deps.central?.checkState?.()) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   private async ensureCentral(): Promise<void> {
     const central = this.deps.central;
     if (!central) return; // scan stays inert; unsub still works
-    if (!this.centralStarted) {
-      await central.start();
-      this.centralStarted = true;
-      this.centralUnsubs.push(
-        central.onDiscover((info) => this.onDiscover(info)),
-        central.onNotification(({ id, value }) => this.onCentralNotify(id, value)),
-        central.onDisconnect((id) => this.onCentralDisconnect(id)),
-      );
-    }
+    // Start, listener registration, and scan live in one try: previously
+    // the start flag and listeners were set before the fallible step, so
+    // a start failure was never recorded and the next scan registered a
+    // second set of listeners (discovery and notify callbacks fired twice).
+    // On any failure the just-registered listeners are removed, the flag
+    // is reset, and the failure is recorded, so a retry starts clean.
+    const registeredInThisCall: (() => void)[] = [];
     try {
-      await central.scan();
+      // Scan never checked permissions before: a scan attempted with
+      // revoked grants surfaced only as a native failure, never as a
+      // permission-blocked radio. Check first and record a
+      // permission-tagged scan failure on denial.
+      if (this.deps.checkPermissions) {
+        const granted = await this.deps.checkPermissions().catch(() => false);
+        if (!granted) throw new Error('ble: bluetooth permissions not granted');
+      }
+      if (!this.centralStarted) {
+        await withBleTimeout(central.start(), BLE_TIMEOUT_MS.start, 'central start');
+        registeredInThisCall.push(
+          central.onDiscover((info) => this.onDiscover(info)),
+          central.onNotification(({ id, value }) => this.onCentralNotify(id, value)),
+          central.onDisconnect((id) => this.onCentralDisconnect(id)),
+        );
+        this.centralUnsubs.push(...registeredInThisCall);
+        this.centralStarted = true;
+        if (central.onState && !this.adapterStateUnsub) {
+          this.adapterStateUnsub = central.onState((state) => {
+            const normalized = state === 'on' ? 'on' : state === 'off' ? 'off' : null;
+            if (!normalized) return;
+            for (const cb of this.adapterStateSubs) {
+              try {
+                cb(normalized);
+              } catch {
+                // subscriber errors must not break state handling
+              }
+            }
+          });
+        }
+      }
+      await withBleTimeout(central.scan(), BLE_TIMEOUT_MS.scan, 'central scan');
     } catch (err) {
-      recordScanFailure(err instanceof Error ? err.message : String(err));
+      // Remove every central listener (just-registered plus any held from
+      // an earlier bring-up) so a retry can never double-register.
+      for (const u of [...new Set([...registeredInThisCall, ...this.centralUnsubs])]) uSafe(u);
+      this.centralUnsubs = [];
+      this.centralStarted = false;
+      uSafe(this.adapterStateUnsub);
+      this.adapterStateUnsub = null;
+      const code = err instanceof Error ? err.message : String(err);
+      recordScanFailure(code);
+      this.deps.onScanFailure?.(code);
       throw err;
     }
     recordScanStarted();
@@ -302,6 +532,8 @@ export class GattBlePort implements TransportPort {
         }
       }
       this.centralStarted = false;
+      uSafe(this.adapterStateUnsub);
+      this.adapterStateUnsub = null;
     };
   }
 
@@ -311,7 +543,21 @@ export class GattBlePort implements TransportPort {
     if (this.ownTag && toHex(tag) === toHex(this.ownTag)) return; // self
     const key = provisionalTagKey(tag);
     const known = this.discovered.get(key);
-    this.discovered.set(key, { bleId: id, tag, rssi });
+    this.pruneDiscovered();
+    this.discovered.set(key, { bleId: id, tag, rssi, lastSeenMs: Date.now() });
+    while (this.discovered.size > DISCOVERED_MAX) {
+      // Evict the stalest entry (never the one just seen).
+      let stalest: string | null = null;
+      let stalestAt = Number.POSITIVE_INFINITY;
+      for (const [k, v] of this.discovered) {
+        if (k !== key && v.lastSeenMs < stalestAt) {
+          stalestAt = v.lastSeenMs;
+          stalest = k;
+        }
+      }
+      if (stalest === null) break;
+      this.discovered.delete(stalest);
+    }
     recordPeerSeen(key, rssi, toHex(tag));
     if (!known) {
       for (const cb of this.scanSubs) {
@@ -322,17 +568,57 @@ export class GattBlePort implements TransportPort {
         }
       }
     }
-    if (this.conns.size >= MAX_BLE_PEERS) return;
-    if (this.bleIndex.has(id)) return; // already connecting/connected
+    if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) return;
+    if (this.bleIndex.has(id) || this.pendingConnects.has(id)) return; // already connecting/connected
     // Tie-break: smaller (or equal) tag initiates the central connection.
     if (this.ownTag && compareTags(this.ownTag, tag) <= 0) {
-      void this.connectCentral(id, tag).catch(() => {
-        // connect failures are routine (peer walked away); stay silent
+      void this.connectCentral(id, tag).catch((err) => {
+        // Auto-connect failures used to be swallowed with an empty catch
+        // and, with allowDuplicates false, the peer was never retried for
+        // the session. Record a stage-tagged failure and schedule exactly
+        // one bounded retry; the retry itself stays silent on failure.
+        recordConnectFailure(`auto-connect ${id}: ${err instanceof Error ? err.message : String(err)}`);
+        this.scheduleAutoConnectRetry(id, tag);
       });
     }
   }
 
+  /**
+   * Schedule the single bounded auto-connect retry for a bleId (about 2s
+   * out). No retry is scheduled when one is already pending or the peer
+   * limit is hit; the timer is cancelled on disconnect (see dropConn) and
+   * on close, and the retry never schedules a further retry.
+   */
+  private scheduleAutoConnectRetry(bleId: string, tag: Uint8Array): void {
+    if (this.autoConnectRetries.has(bleId)) return;
+    if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) return;
+    const timer = setTimeout(() => {
+      this.autoConnectRetries.delete(bleId);
+      if (this.bleIndex.has(bleId) || this.pendingConnects.has(bleId)) return;
+      if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) return;
+      void this.connectCentral(bleId, tag).catch(() => {
+        // Single retry spent; a further failure stays silent.
+      });
+    }, AUTO_CONNECT_RETRY_MS);
+    this.autoConnectRetries.set(bleId, timer);
+  }
+
+  private cancelAutoConnectRetry(bleId: string): void {
+    const timer = this.autoConnectRetries.get(bleId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.autoConnectRetries.delete(bleId);
+    }
+  }
+
   // ------------------------------------------------------------------ connect
+
+  /** Drop discovered entries not seen within the stale window. */
+  private pruneDiscovered(nowMs: number = Date.now()): void {
+    for (const [key, entry] of this.discovered) {
+      if (nowMs - entry.lastSeenMs > DISCOVERED_STALE_MS) this.discovered.delete(key);
+    }
+  }
 
   /** Connect to a discovered peer (provisional `tag:<hex>` id or full peerId). */
   async connect(peerId: string): Promise<void> {
@@ -340,6 +626,7 @@ export class GattBlePort implements TransportPort {
     for (const conn of this.conns.values()) {
       if (conn.peerId === peerId) return;
     }
+    this.pruneDiscovered();
     const disc = this.discovered.get(peerId);
     if (!disc) throw new Error(`ble: unknown peer ${peerId}`);
     if (!this.deps.central) throw new Error('ble: central role unavailable');
@@ -350,21 +637,47 @@ export class GattBlePort implements TransportPort {
     const central = this.deps.central;
     if (!central) throw new Error('ble: central role unavailable');
     if (this.bleIndex.has(bleId)) return;
+    if (this.pendingConnects.has(bleId)) return;
     if (!this.ownPeerId) throw new Error('ble: advertise() must run before connect');
-    if (this.conns.size >= MAX_BLE_PEERS) throw new Error('ble: peer limit reached');
-    await central.connect(bleId);
+    // The peer-limit check counts reservations, not just registered conns:
+    // two handshakes that both passed a conns-only check could together
+    // exceed the limit. The reservation is made before the first await.
+    if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) throw new Error('ble: peer limit reached');
+    this.pendingConnects.add(bleId);
     try {
-      await central.retrieveServices(bleId);
+      await this.connectCentralInner(central, bleId, tag);
+    } finally {
+      this.pendingConnects.delete(bleId);
+    }
+  }
+
+  private async connectCentralInner(central: NonNullable<BleNativeDeps['central']>, bleId: string, tag: Uint8Array): Promise<void> {
+    // Re-checked here because the outer guard narrowed it before the await
+    // boundary; the inner method must not trust that narrowing.
+    const ownPeerId = this.ownPeerId;
+    if (!ownPeerId) throw new Error('ble: advertise() must run before connect');
+    await withBleTimeout(central.connect(bleId), BLE_TIMEOUT_MS.connect, 'central connect');
+    // Set only once a connection is registered in this call, so the catch
+    // below drops exactly the stale registration this call created.
+    let registeredKey: string | null = null;
+    try {
+      await withBleTimeout(central.retrieveServices(bleId), BLE_TIMEOUT_MS.retrieveServices, 'retrieveServices');
       let mtu = ATT_DEFAULT_MTU;
       try {
-        const negotiated = await central.requestMtu(bleId, ATT_REQUEST_MTU);
+        const negotiated = await withBleTimeout(central.requestMtu(bleId, ATT_REQUEST_MTU), BLE_TIMEOUT_MS.requestMtu, 'requestMtu');
         if (Number.isInteger(negotiated) && negotiated >= ATT_DEFAULT_MTU) mtu = negotiated;
       } catch {
         // keep default 23
       }
-      const identRaw = await central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID);
+      const identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
       const peerId = new TextDecoder().decode(identRaw);
       if (!HEX64_RE.test(peerId)) throw new Error('ble: peer IDENT malformed');
+      // Bind the claimed identity to the discovery hint: the IDENT pubkey
+      // must carry the advertised tag, or this is a different peer (or a
+      // spoofed IDENT) and the connect must fail, not register.
+      if (toHex(peerTagOf(fromHex(peerId))) !== toHex(tag)) {
+        throw new Error('ble: peer IDENT does not match advertised tag');
+      }
       // Register before the hello so any inbound traffic is attributed.
       // Keyed by the full peerId (known from IDENT) - not the provisional
       // tag key - so send()/disconnect() resolve by peerId.
@@ -377,12 +690,13 @@ export class GattBlePort implements TransportPort {
         inbound: new DatagramReassembler(),
         partialOpen: false,
       });
+      registeredKey = peerId;
       // Announce ourselves: the peripheral side learns our identity + MTU.
-      const hello = encodeHello(fromHex(this.ownPeerId), mtu);
+      const hello = encodeHello(fromHex(ownPeerId), mtu);
       for (const chunk of chunkBytes(hello, mtu - ATT_OVERHEAD)) {
-        await central.write(bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk);
+        await withBleTimeout(central.write(bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk), BLE_TIMEOUT_MS.write, 'hello write');
       }
-      await central.startNotification(bleId, MESH_SERVICE_UUID, MESH_TX_CHAR_UUID);
+      await withBleTimeout(central.startNotification(bleId, MESH_SERVICE_UUID, MESH_TX_CHAR_UUID), BLE_TIMEOUT_MS.startNotification, 'startNotification');
       // Subscribed to the peer TX characteristic: CCCD is on for this link.
       recordPeerConnected(peerId, mtu, true);
       // Surface the resolved identity through the scan channel, matching
@@ -399,6 +713,11 @@ export class GattBlePort implements TransportPort {
       }
     } catch (err) {
       await central.disconnect(bleId).catch(() => {});
+      // Previously the native disconnect ran but the registration stayed:
+      // a dead peer kept counting as connected and publish fan-out kept
+      // targeting it, with no disconnected event. Drop it when this call
+      // registered it; the native disconnect above is kept.
+      if (registeredKey !== null) this.dropConn(registeredKey);
       throw err instanceof Error ? err : new Error(`ble: connect failed: ${String(err)}`);
     }
   }
@@ -431,7 +750,18 @@ export class GattBlePort implements TransportPort {
       const central = this.deps.central;
       if (!central) throw new Error('ble: central role unavailable');
       for (const chunk of chunkBytes(datagram, chunkSize)) {
-        await central.write(conn.bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk);
+        // RX declares WRITE_NO_RESPONSE: frame chunks go without-response
+        // (no per-chunk round trip), falling back to with-response writes
+        // when the native shape lacks the method.
+        if (central.writeWithoutResponse) {
+          await withBleTimeout(
+            central.writeWithoutResponse(conn.bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk),
+            BLE_TIMEOUT_MS.write,
+            'frame write',
+          );
+        } else {
+          await withBleTimeout(central.write(conn.bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk), BLE_TIMEOUT_MS.write, 'frame write');
+        }
         recordFragmentsSent(peerId, 1);
       }
       recordPacketSent(peerId);
@@ -443,7 +773,7 @@ export class GattBlePort implements TransportPort {
     // limitation); non-target peers drop the frames at the mesh layer via
     // event-ID dedup. Bandwidth-inefficient, not incorrect.
     for (const chunk of chunkBytes(datagram, chunkSize)) {
-      await peripheral.notify(chunk);
+      await withBleTimeout(peripheral.notify(chunk), BLE_TIMEOUT_MS.notify, 'notify');
       recordFragmentsSent(peerId, 1);
     }
     recordPacketSent(peerId);
@@ -469,6 +799,10 @@ export class GattBlePort implements TransportPort {
   private feedChunk(conn: PeerConn, key: string, value: Uint8Array): void {
     const peerKey = conn.peerId ?? key;
     recordFragmentsReceived(peerKey, 1);
+    // Per-datagram expiry: a stalled partial buffer is dropped here
+    // before the new chunk is appended, so a corrupt length prefix
+    // cannot wedge the stream for this connection.
+    if (conn.inbound.expireIfStale(Date.now())) conn.partialOpen = false;
     const datagrams = conn.inbound.push(value);
     if (datagrams.length === 0) {
       if (!conn.partialOpen) {
@@ -494,7 +828,10 @@ export class GattBlePort implements TransportPort {
     let key = this.bleIndex.get(device);
     let conn = key ? this.conns.get(key) : undefined;
     if (!conn) {
-      if (this.conns.size >= MAX_BLE_PEERS) return; // drop, bounded
+      if (this.conns.size >= MAX_BLE_PEERS) {
+        logBleDropThrottled('peer-limit', `dropped write from ${device} at peer limit`);
+        return; // drop, bounded
+      }
       key = `${PROVISIONAL_MAC_PREFIX}${device}`;
       conn = { role: 'peripheral', bleId: device, tag: null, peerId: null, mtu: ATT_DEFAULT_MTU, inbound: new DatagramReassembler(), partialOpen: false };
       this.registerConn(key, conn);
@@ -582,6 +919,7 @@ export class GattBlePort implements TransportPort {
   private dropConn(key: string): void {
     const conn = this.conns.get(key);
     if (!conn) return;
+    this.cancelAutoConnectRetry(conn.bleId);
     recordPeerDisconnected(key);
     this.conns.delete(key);
     if (this.bleIndex.get(conn.bleId) === key) this.bleIndex.delete(conn.bleId);
@@ -594,11 +932,19 @@ export class GattBlePort implements TransportPort {
     const unsub = this.scanUnsub;
     this.scanUnsub = null;
     this.scanSubs.clear();
-    recordScanStopped();
+    // Clear receive subscribers too: previously a reused port object kept
+    // firing stale receive callbacks into a dead transport after close.
+    this.receivers.clear();
+    // Record scan stopped only when scanning was actually active:
+    // previously close logged a scan stop even for a port that never
+    // scanned, polluting the scan lifecycle trail.
+    if (unsub !== null || this.centralStarted) recordScanStopped();
     uSafe(unsub);
     await this.deps.central?.stopScan().catch(() => {});
     for (const u of this.centralUnsubs.splice(0)) uSafe(u);
     this.centralStarted = false;
+    uSafe(this.adapterStateUnsub);
+    this.adapterStateUnsub = null;
     for (const key of [...this.conns.keys()]) {
       const conn = this.conns.get(key);
       this.dropConn(key);
@@ -606,6 +952,8 @@ export class GattBlePort implements TransportPort {
         await this.deps.central?.disconnect(conn.bleId).catch(() => {});
       }
     }
+    for (const timer of this.autoConnectRetries.values()) clearTimeout(timer);
+    this.autoConnectRetries.clear();
     this.discovered.clear();
     await this.stopAdvertise();
   }
@@ -718,6 +1066,11 @@ function loadCentralAdapter(): CentralAdapter | null {
       },
       read: async (id, serviceUuid, charUuid) => new Uint8Array((await mgr.read(id, serviceUuid, charUuid)) as number[]),
       write: (id, serviceUuid, charUuid, chunk) => mgr.write(id, serviceUuid, charUuid, Array.from(chunk), chunk.length),
+      // ble-manager 12.6.0 writeWithoutResponse(id, service, char, data,
+      // maxByteSize, queueSleepTime): pass the chunk length as
+      // maxByteSize so the native layer does not re-chunk the frame chunk.
+      writeWithoutResponse: (id, serviceUuid, charUuid, chunk) =>
+        mgr.writeWithoutResponse(id, serviceUuid, charUuid, Array.from(chunk), chunk.length, 10),
       startNotification: (id, serviceUuid, charUuid) => mgr.startNotification(id, serviceUuid, charUuid),
       onNotification: (cb) => {
         const sub = emitter.addListener('BleManagerDidUpdateValueForCharacteristic', (e: unknown) => {
@@ -739,6 +1092,40 @@ function loadCentralAdapter(): CentralAdapter | null {
         });
         return () => sub.remove();
       },
+      // Adapter state (ble-manager 12.6.0): the class API exposes
+      // onDidUpdateState with { state: BleState } ('on' / 'off' /
+      // 'unsupported' / ...). Prefer it; fall back to the legacy
+      // 'BleManagerDidUpdateState' emitter event for older shapes.
+      onState: (cb) => {
+        const mgrAny = mgr as unknown as {
+          onDidUpdateState?: (cb: (ev: { state?: unknown }) => void) => { remove: () => void };
+          checkState?: () => Promise<unknown>;
+        };
+        if (typeof mgrAny.onDidUpdateState === 'function') {
+          const sub = mgrAny.onDidUpdateState((ev) => cb(String(ev?.state ?? '')));
+          return () => {
+            try {
+              sub.remove();
+            } catch {
+              // ignore
+            }
+          };
+        }
+        const sub = emitter.addListener('BleManagerDidUpdateState', (e: unknown) => {
+          cb(String((e as { state?: unknown })?.state ?? ''));
+        });
+        return () => sub.remove();
+      },
+      checkState: async () => {
+        const mgrAny = mgr as unknown as { checkState?: () => Promise<unknown> };
+        if (typeof mgrAny.checkState !== 'function') return null;
+        try {
+          const state = await mgrAny.checkState();
+          return typeof state === 'string' ? state : null;
+        } catch {
+          return null;
+        }
+      },
     };
   } catch {
     return null;
@@ -753,13 +1140,41 @@ function base64ToBytes(s: string): Uint8Array | null {
   }
 }
 
+/**
+ * react-native-multi-ble-peripheral 0.1.8 startAdvertising contract, pinned
+ * from the installed package source (lib/typescript/index.d.ts and
+ * lib/commonjs/index.js), replacing the old unknown/unknown typing that
+ * let a wrong shape through TypeScript unchecked. The JS layer takes
+ * (servicesOrOpts, options): when options is undefined it forwards the
+ * first argument as the options and null as the services, and the Android
+ * native module only adds service UUIDs when the services map is non-null.
+ * The app always calls it with (options object, undefined), so no service
+ * UUID is added to the packet: the packet is manufacturer data only plus
+ * the Android Flags field (see the 15-byte figure in advertiseInner).
+ * Kept as a type pin, not a library replacement: the keep-vs-replace
+ * decision still needs a measured on-air packet plus a device run.
+ */
+export interface PeripheralAdvertiseOptions {
+  mode?: number;
+  txPowerLevel?: number;
+  connectable?: boolean;
+  includeDeviceName?: boolean;
+  includeTxPowerLevel?: boolean;
+  manufacturerId?: number;
+  manufacturerData?: Buffer;
+}
+export type PeripheralAdvertiseServices = Record<string, Buffer>;
+
 function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
   let PeripheralClass: new () => {
     once(ev: string, cb: (arg?: unknown) => void): void;
     addService(uuid: string, primary: boolean): Promise<unknown>;
     addCharacteristic(svc: string, uuid: string, props: number, perms: number): Promise<unknown>;
     updateValue(svc: string, uuid: string, value: unknown): Promise<unknown>;
-    startAdvertising(services: unknown, options: unknown): Promise<unknown>;
+    startAdvertising(
+      servicesOrOpts?: PeripheralAdvertiseServices | PeripheralAdvertiseOptions,
+      options?: PeripheralAdvertiseOptions,
+    ): Promise<unknown>;
     stopAdvertising(): Promise<unknown>;
     on(ev: string, cb: (arg: never) => void): void;
     sendNotification(svc: string, uuid: string, value: unknown, confirm: boolean): Promise<unknown>;
@@ -784,12 +1199,16 @@ function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
   const PERM_WRITE = 0x10;
   return async (): Promise<PeripheralAdapter> => {
     const inst = new PeripheralClass(); // throws when the native module is not linked
-    await new Promise<void>((resolve, reject) => {
-      inst.once('ready', () => resolve());
-      inst.once('error', (err: unknown) =>
-        reject(new Error(describeAdvertiseError(err).replace('ble: advertise failed: ', 'ble: peripheral ready failed: '))),
-      );
-    });
+    await withBleTimeout(
+      new Promise<void>((resolve, reject) => {
+        inst.once('ready', () => resolve());
+        inst.once('error', (err: unknown) =>
+          reject(new Error(describeAdvertiseError(err).replace('ble: advertise failed: ', 'ble: peripheral ready failed: '))),
+        );
+      }),
+      BLE_TIMEOUT_MS.ready,
+      'peripheral ready',
+    );
     return {
       startAdvertising: async (tag, identHex) => {
         // R3: stage-tag every native step. The R2 run's failure was a
@@ -822,16 +1241,29 @@ function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
         ];
         for (const [stage, run] of stages) {
           try {
-            await run();
+            await withBleTimeout(run(), BLE_TIMEOUT_MS.advertise, `advertise ${stage}`);
           } catch (err) {
             throw new Error(`ble: advertise failed at ${stage}: ${describeAdvertiseError(err).replace('ble: advertise failed: ', '')}`);
           }
         }
-        // Advertise manufacturer data only (12 bytes): the 128-bit service
-        // UUID cannot share the 31-byte legacy packet with service data.
+        // Advertise manufacturer data only: the 128-bit service UUID is
+        // not passed (services are null on this call path, see the type
+        // pin above), so the library adds no service UUID or service
+        // data. The manufacturer AD field itself is 12 bytes; the full
+        // legacy packet is 15 bytes minimum once Android Flags are added
+        // (see advertiseInner).
       },
       stopAdvertising: async () => {
         await inst.stopAdvertising();
+      },
+      onError: (cb) => {
+        // eventemitter3: the instance emits 'error' beyond the once
+        // creation gate (whose reject is a no-op once ready resolved).
+        const handler = (err: unknown) => cb(err);
+        (inst as unknown as { on(ev: string, cb: (arg: unknown) => void): void }).on('error', handler);
+        return () => {
+          (inst as unknown as { removeListener(ev: string, cb: unknown): void }).removeListener('error', handler);
+        };
       },
       onWrite: (cb) => {
         // NOTE: the lib's TS WriteEvent type is wrong; at runtime the event
@@ -843,6 +1275,7 @@ function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
           if (typeof raw === 'string') bytes = base64ToBytes(raw);
           else if (Array.isArray(raw)) bytes = new Uint8Array(raw as number[]);
           if (bytes && typeof e?.device === 'string') cb({ device: e.device, value: bytes });
+          else logBleDropThrottled('malformed-write', 'dropped write event with unexpected shape');
         };
         inst.on('write', handler);
         return () => {
@@ -864,10 +1297,14 @@ function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
  * Default native dependencies: lazy-require both BLE libraries, never throw.
  * Null roles mean the port fails closed for that role.
  */
-export function defaultBleDeps(requestPermissions: () => Promise<boolean>): BleNativeDeps {
+export function defaultBleDeps(
+  requestPermissions: () => Promise<boolean>,
+  checkPermissions?: () => Promise<boolean>,
+): BleNativeDeps {
   return {
     central: loadCentralAdapter(),
     createPeripheral: loadPeripheralFactory(),
     requestPermissions,
+    checkPermissions,
   };
 }

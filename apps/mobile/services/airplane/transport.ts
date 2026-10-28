@@ -33,8 +33,10 @@ import { addBreadcrumb } from '../../src/sentry';
 import { GattBlePort, defaultBleDeps, type BleNativeDeps } from './ble/gatt';
 import { ensureBlePermissions, checkBlePermissions, requestBlePermissions } from './ble/permissions';
 import {
+  recordAdvertiseStopped,
   recordDedupDrop,
   recordMessage,
+  recordScanStopped,
   setDiagnosticsAdapterState,
   type DiagnosticsMessageAttempt,
 } from './diagnostics';
@@ -75,10 +77,34 @@ function getNetInfo() {
  * throw descriptive Errors or stay inert; the app keeps running Nostr-only).
  * RADIO-UNVERIFIED - see services/airplane/ble/gatt.ts.
  */
+/**
+ * Mid-session scan failure: reclassify the radio by re-checking
+ * permissions at that moment (permission-blocked when grants vanished,
+ * unavailable otherwise). Runs only while the radio reports on; bring-up
+ * failures are classified by the start path instead.
+ */
+async function handleScanFailure(_code: string): Promise<void> {
+  if (bleRadioState !== 'on') return;
+  try {
+    if (!(await checkBlePermissions().catch(() => false))) {
+      await tearDownBleRadio();
+      bleRadioState = 'permission-blocked';
+    } else {
+      bleRadioState = 'unavailable';
+    }
+  } catch {
+    bleRadioState = 'unavailable';
+  }
+  syncDiagnosticsAdapterState();
+}
+
 function makeBlePort(): { port: TransportPort; close: () => Promise<void> } {
   let deps: BleNativeDeps;
   try {
-    deps = defaultBleDeps(ensureBlePermissions);
+    deps = defaultBleDeps(ensureBlePermissions, checkBlePermissions);
+    deps.onScanFailure = (code) => {
+      void handleScanFailure(code);
+    };
   } catch {
     // Even building the deps failed: fall back to a fully inert port.
     return { port: new NoopBlePort(), close: async () => {} };
@@ -125,6 +151,10 @@ let bleScanUnsub: (() => void) | null = null;
  */
 export type BleRadioState = 'starting' | 'on' | 'permission-blocked' | 'unavailable';
 let bleRadioState: BleRadioState = 'starting';
+/** True once the radio has been up this launch. Guards foreground
+ * re-validation: a radio that never came up is the priming UI's job, not
+ * an automatic bring-up on every foreground. */
+let radioWasOn = false;
 
 const SYNC_INTERVAL_MS = 60_000; // re-check World status every minute when online
 const PRUNE_INTERVAL_MS = 3600_000; // retention cleanup at most hourly via sync ticks
@@ -331,6 +361,81 @@ async function runSync(): Promise<void> {
   }
 }
 
+/** Subscribe the transport to native adapter-state events from the port. */
+function registerAdapterStateListener(): void {
+  const port = blePort?.port as GattBlePort | null | undefined;
+  if (!port || typeof port.onAdapterState !== 'function') return;
+  port.onAdapterState((state) => {
+    if (state === 'off') {
+      // Powered-off: the one-time bring-up mirror is now wrong. Set
+      // unavailable plus stopped events; powered-on below re-runs bring-up.
+      if (bleRadioState === 'on') {
+        recordScanStopped();
+        recordAdvertiseStopped();
+        bleRadioState = 'unavailable';
+        syncDiagnosticsAdapterState();
+      }
+    } else if (state === 'on' && radioWasOn && bleRadioState !== 'on') {
+      void revalidateBleRadio();
+    }
+  });
+}
+
+/**
+ * Re-validate the radio on foreground (AppState active) and on
+ * adapter-powered-on. Guarded: runs only when the radio was previously on
+ * (or is currently on, for the revocation check); a radio that never came
+ * up stays with the priming UI. When the radio is on, a missing grant or
+ * a powered-off adapter reclassifies it; when it is not on, a live adapter
+ * plus grants re-runs bring-up. Never throws.
+ */
+export async function revalidateBleRadio(): Promise<void> {
+  if (!hybrid || !blePort) return;
+  if (bleRadioState === 'starting') return;
+  // Guard: a radio that was never on and is not permission-blocked stays
+  // with the priming UI. Permission-blocked is included because a grant
+  // made in Settings while the app runs must be picked up on foreground,
+  // not only on next launch.
+  if (!radioWasOn && bleRadioState !== 'on' && bleRadioState !== 'permission-blocked') return;
+  try {
+    // Permission revocation mid-session: grants can vanish while the app
+    // is backgrounded, and a grant made in Settings is only picked up on
+    // next launch without this check. Re-check here: missing grants tear
+    // the radio down to permission-blocked, present grants allow bring-up.
+    if (!(await checkBlePermissions().catch(() => false))) {
+      if (bleRadioState === 'on') await tearDownBleRadio();
+      bleRadioState = 'permission-blocked';
+      syncDiagnosticsAdapterState();
+      return;
+    }
+    const port = blePort.port as GattBlePort;
+    const adapterState = typeof port.checkAdapterState === 'function' ? await port.checkAdapterState() : null;
+    if (adapterState === 'off') {
+      if (bleRadioState === 'on') {
+        recordScanStopped();
+        recordAdvertiseStopped();
+      }
+      bleRadioState = 'unavailable';
+      syncDiagnosticsAdapterState();
+      return;
+    }
+    if (bleRadioState !== 'on') {
+      const publicKey = await getDevicePublicKey();
+      await tearDownBleRadio();
+      await bringUpBleRadio(toHex(publicKey));
+      bleRadioState = 'on';
+      radioWasOn = true;
+      syncDiagnosticsAdapterState();
+    }
+  } catch {
+    // A failed revalidation leaves the radio unavailable, not wedged.
+    if (bleRadioState !== 'on') {
+      bleRadioState = 'unavailable';
+      syncDiagnosticsAdapterState();
+    }
+  }
+}
+
 /**
  * Start the hybrid transport. Idempotent. Call once at app launch.
  * BLE runs always; Nostr follows connectivity.
@@ -343,6 +448,7 @@ export async function startTransport(): Promise<void> {
   if (hybrid) return;
 
   blePort = makeBlePort();
+  registerAdapterStateListener();
   // BLE ingress verifies signatures, matching the Nostr path (T11 §23.6):
   // an unsigned/tampered event from a mesh peer never reaches the store.
   const ble = new BleTransport(blePort.port, {
@@ -442,6 +548,7 @@ export async function startTransport(): Promise<void> {
       const publicKey = await getDevicePublicKey();
       await bringUpBleRadio(toHex(publicKey));
       bleRadioState = 'on';
+      radioWasOn = true;
     } catch {
       // R3: do not conflate a permission loss between the check and the
       // bring-up (or a permanently denied grant) with a dead radio.
@@ -575,6 +682,7 @@ export async function enableBleRadio(): Promise<boolean> {
     const publicKey = await getDevicePublicKey();
     await bringUpBleRadio(toHex(publicKey));
     bleRadioState = 'on';
+    radioWasOn = true;
     syncDiagnosticsAdapterState();
     return true;
   } catch {
@@ -583,6 +691,40 @@ export async function enableBleRadio(): Promise<boolean> {
     // OS request returns denied without showing a dialog) stays
     // permission-blocked, so Diagnostics keeps offering Open Settings
     // instead of reporting a dead radio.
+    bleRadioState = (await checkBlePermissions().catch(() => false)) ? 'unavailable' : 'permission-blocked';
+    syncDiagnosticsAdapterState();
+    return false;
+  }
+}
+
+/**
+ * Diagnostics Retry Bluetooth: the force path. Normal priming is
+ * idempotent by design (same peerId early return, existing scan skipped),
+ * which makes Retry a no-op in exactly the broken-radio cases it should
+ * fix: a held-but-dead adapter, a natively dead scan, or a null port.
+ * So Retry tears down scan and advertise first, clears the scan
+ * unsubscribe, and brings the radio up again with no state-on early
+ * return; a null port is recreated instead of throwing. Never throws.
+ */
+export async function retryBleRadio(): Promise<boolean> {
+  try {
+    if (!blePort) {
+      blePort = makeBlePort();
+      registerAdapterStateListener();
+    }
+    await tearDownBleRadio();
+    if (!(await requestBlePermissions())) {
+      bleRadioState = 'permission-blocked';
+      syncDiagnosticsAdapterState();
+      return false;
+    }
+    const publicKey = await getDevicePublicKey();
+    await bringUpBleRadio(toHex(publicKey));
+    bleRadioState = 'on';
+    radioWasOn = true;
+    syncDiagnosticsAdapterState();
+    return true;
+  } catch {
     bleRadioState = (await checkBlePermissions().catch(() => false)) ? 'unavailable' : 'permission-blocked';
     syncDiagnosticsAdapterState();
     return false;
@@ -700,6 +842,7 @@ export async function stopTransport(): Promise<void> {
   blePort = null;
   hybrid = null;
   sync = null;
+  radioWasOn = false;
   bleRadioState = 'unavailable';
   syncDiagnosticsAdapterState();
 }
