@@ -21,7 +21,7 @@ import {
   getDiagnosticsLogStatus,
   shareDiagnosticsLogFile,
 } from '../../services/airplane/diagnosticsLogExpo';
-import { enableBleRadio } from '../../services/airplane/transport';
+import { retryBleRadio } from '../../services/airplane/transport';
 
 interface DiagnosticsProps {
   onBack: () => void;
@@ -219,12 +219,14 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
             <Pressable
               style={styles.button}
               onPress={() => {
-                // R3: restart the radio from Diagnostics, not only on
-                // next launch. enableBleRadio re-requests (a no-op when
-                // granted) and brings up advertise + scan; a permanently
-                // denied grant returns false and keeps the Open Settings
-                // path above, it never loops an OS dialog.
-                void enableBleRadio().then(() => {
+                // Restart the radio from Diagnostics, not only on next
+                // launch. retryBleRadio is the force path: it tears down
+                // scan and advertise first and brings the radio up again
+                // even when state says on, so a held-but-dead adapter or
+                // dead scan actually recovers. A permanently denied grant
+                // returns false and keeps the Open Settings path above,
+                // it never loops an OS dialog.
+                void retryBleRadio().then(() => {
                   refreshPermissions();
                   setSnapshot(getDiagnosticsSnapshot());
                 });

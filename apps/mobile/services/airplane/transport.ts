@@ -550,6 +550,40 @@ export async function enableBleRadio(): Promise<boolean> {
 }
 
 /**
+ * Diagnostics Retry Bluetooth: the force path. Normal priming is
+ * idempotent by design (same peerId early return, existing scan skipped),
+ * which makes Retry a no-op in exactly the broken-radio cases it should
+ * fix: a held-but-dead adapter, a natively dead scan, or a null port.
+ * So Retry tears down scan and advertise first, clears the scan
+ * unsubscribe, and brings the radio up again with no state-on early
+ * return; a null port is recreated instead of throwing. Never throws.
+ */
+export async function retryBleRadio(): Promise<boolean> {
+  try {
+    if (!blePort) {
+      blePort = makeBlePort();
+      registerAdapterStateListener();
+    }
+    await tearDownBleRadio();
+    if (!(await requestBlePermissions())) {
+      bleRadioState = 'permission-blocked';
+      syncDiagnosticsAdapterState();
+      return false;
+    }
+    const publicKey = await getDevicePublicKey();
+    await bringUpBleRadio(toHex(publicKey));
+    bleRadioState = 'on';
+    radioWasOn = true;
+    syncDiagnosticsAdapterState();
+    return true;
+  } catch {
+    bleRadioState = (await checkBlePermissions().catch(() => false)) ? 'unavailable' : 'permission-blocked';
+    syncDiagnosticsAdapterState();
+    return false;
+  }
+}
+
+/**
  * Test seam: the live HybridTransport, or null before startTransport().
  * Lets tests drive ingress() through the real app wiring (e.g. verify a
  * relay-observed post gets World-confirmed).
