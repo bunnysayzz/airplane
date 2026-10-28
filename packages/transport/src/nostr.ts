@@ -122,10 +122,16 @@ export function wrapEvent(event: SignedEvent, keys: NostrKeypair, createdAtSec?:
  * is what matters.
  */
 export function unwrapEvent(nostr: NostrEvent): SignedEvent | null {
-  if (nostr.kind !== AIRPLANE_NOSTR_KIND) return null;
-  if (!nostr.tags.some((t) => t[0] === 'airplane' && t[1] === '1')) return null;
   let event: SignedEvent;
   try {
+    // All frame validation lives inside this try: a hostile relay may
+    // send any shape (missing/null/non-array tags, non-string content),
+    // and a malformed frame must be ignored, never throw out of the
+    // socket handler and kill delivery of later frames.
+    if (nostr.kind !== AIRPLANE_NOSTR_KIND) return null;
+    if (!Array.isArray(nostr.tags)) return null;
+    if (!nostr.tags.some((t) => Array.isArray(t) && t[0] === 'airplane' && t[1] === '1')) return null;
+    if (typeof nostr.content !== 'string') return null;
     event = decodeEvent(fromHex(nostr.content));
   } catch {
     return null;
@@ -496,7 +502,13 @@ export class NostrTransport {
     if (msg[0] !== 'EVENT') return;
     const nostr = msg[2] as NostrEvent | undefined;
     if (!nostr || typeof nostr !== 'object') return;
-    const event = unwrapEvent(nostr);
+    let event: SignedEvent | null;
+    try {
+      event = unwrapEvent(nostr);
+    } catch {
+      // Belt and braces: one bad frame must never kill the socket handler.
+      return;
+    }
     if (!event) return;
     for (const h of this.receiveHandlers) {
       try {

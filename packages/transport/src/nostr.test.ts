@@ -132,6 +132,16 @@ describe('wrapEvent / unwrapEvent', () => {
     const wrapped = wrapEvent(makePost(), keys);
     expect(unwrapEvent({ ...wrapped, content: 'zzzz' })).toBeNull();
   });
+
+  test('unwrapEvent ignores malformed frames without throwing', () => {
+    const keys = generateNostrKeypair();
+    const wrapped = wrapEvent(makePost(), keys);
+    expect(unwrapEvent({ ...wrapped, tags: null as never })).toBeNull();
+    expect(unwrapEvent({ ...wrapped, tags: 'airplane' as never })).toBeNull();
+    expect(unwrapEvent({ ...wrapped, tags: [null as never] })).toBeNull();
+    expect(unwrapEvent({ ...wrapped, content: 42 as never })).toBeNull();
+    expect(unwrapEvent({ ...wrapped, content: null as never })).toBeNull();
+  });
 });
 
 describe('NostrTransport', () => {
@@ -356,6 +366,26 @@ describe('NostrTransport inbound edge cases', () => {
     sockets[0].receive(['EVENT', 'sub1']);
     await tick(10);
     expect(count).toBe(0);
+    await t.stop();
+  });
+
+  test('EVENT with malformed envelope is ignored and later frames still deliver', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    let count = 0;
+    t.onReceive(() => {
+      count++;
+    });
+    const keys = generateNostrKeypair();
+    const good = wrapEvent(makePost('good frame'), keys);
+    // tags null previously threw out of the socket handler.
+    expect(() =>
+      sockets[0].receive(['EVENT', 'sub1', { ...good, tags: null }]),
+    ).not.toThrow();
+    sockets[0].receive(['EVENT', 'sub1', good]);
+    await tick(10);
+    expect(count).toBe(1);
     await t.stop();
   });
 
