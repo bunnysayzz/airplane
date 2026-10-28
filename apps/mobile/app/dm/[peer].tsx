@@ -105,9 +105,11 @@ export default function DmThreadScreen() {
     const send = () => {
         const text = draft.trim();
         if (!text) return;
-        setDraft('');
+        // The draft clears only on success: a failed send used to lose the
+        // typed text, leaving the user to retype after the error Alert.
         sendDm(peerHex, text)
             .then(() => {
+                setDraft('');
                 void refresh().catch(() => {});
             })
             .catch((e: unknown) => Alert.alert('Could not send', dmUserErrorMessage(e)));
