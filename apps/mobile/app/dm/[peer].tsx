@@ -4,7 +4,7 @@
 // dropped). No read receipts, in either direction. Delete is LOCAL ONLY and
 // the confirm copy says so. Requests landing here get Accept / Block / Ignore.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -128,8 +128,13 @@ export default function DmThreadScreen() {
 
     const isRequest = conv?.state === 'request';
 
+    // F10: the keyboard must never cover the input and Send button. iOS has
+    // no window resize, so a padding avoiding view lifts the send row; on
+    // Android the view is inert and the manifest's adjustResize window mode
+    // does the same job (no double adjustment). The avoiding view is the
+    // screen root, so no vertical offset is needed.
     return (
-        <View style={[styles.root, { backgroundColor: colors.background }]}>
+        <KeyboardAvoidingView style={[styles.root, { backgroundColor: colors.background }]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
             <View style={[styles.header, { borderBottomColor: colors.borderColor, paddingTop: insets.top + 16 }]}>
                 <Pressable onPress={() => router.back()}>
                     <Text style={[type.meta, { color: colors.accentText }]}>Back</Text>
@@ -194,6 +199,7 @@ export default function DmThreadScreen() {
                 scrollEventThrottle={100}
                 onContentSizeChange={handleListContentSizeChange}
                 renderItem={renderItem}
+                keyboardShouldPersistTaps="handled"
             />
 
             <View style={[styles.sendRow, { borderTopColor: colors.borderColor, paddingBottom: insets.bottom + 12 }]}>
@@ -209,7 +215,7 @@ export default function DmThreadScreen() {
                     <Text style={{ color: colors.buttonTextColor }}>Send</Text>
                 </Pressable>
             </View>
-        </View>
+        </KeyboardAvoidingView>
     );
 }
 
