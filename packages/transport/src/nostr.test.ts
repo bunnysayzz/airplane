@@ -321,6 +321,22 @@ describe('NostrTransport reconnect', () => {
     await t.stop();
   });
 
+  test('a socket error reconnects even when onclose never fires', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    // Break the close-to-onclose link: this socket errors and its close
+    // fires nothing, the case the old code stalled on forever.
+    sockets[0].close = () => {
+      sockets[0].closed = true;
+    };
+    sockets[0].onerror?.({});
+    await tick(40);
+    expect(sockets).toHaveLength(2);
+    expect(t.getRelayState('wss://test.relay')).toBe('open');
+    await t.stop();
+  });
+
   test('stop before start is a safe no-op', async () => {
     const { t } = makeTransport();
     await expect(t.stop()).resolves.toBeUndefined();

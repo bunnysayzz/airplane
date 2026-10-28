@@ -302,14 +302,26 @@ export class NostrTransport {
     };
     ws.onmessage = (ev) => this.handleMessage(url, ev.data);
     ws.onerror = () => {
-      // onclose follows; reconnect there
+      // Never assume onclose follows an error: close the socket, which
+      // drives the normal close path (and its reconnect). If this
+      // WebSocket implementation does not fire onclose for the close,
+      // run the close path directly so the relay is not stalled.
+      try {
+        ws.close();
+      } catch {
+        // fall through to the direct close path below
+      }
+      if (this.sockets.get(url) === ws) this.handleClose(url);
     };
-    ws.onclose = () => {
-      this.sockets.delete(url);
-      this.states.set(url, 'closed');
-      this.noteRelayGone(url);
-      this.scheduleReconnect(url);
-    };
+    ws.onclose = () => this.handleClose(url);
+  }
+
+  /** Shared close path for onclose and for errors without a close. */
+  private handleClose(url: string): void {
+    this.sockets.delete(url);
+    this.states.set(url, 'closed');
+    this.noteRelayGone(url);
+    this.scheduleReconnect(url);
   }
 
   private scheduleReconnect(url: string): void {
