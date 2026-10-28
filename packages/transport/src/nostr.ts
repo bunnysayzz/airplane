@@ -25,6 +25,7 @@ import {
   NobleCrypto,
   toHex,
   fromHex,
+  MAX_EVENT_BYTES,
   type Hex64,
   type SignedEvent,
 } from '@airplane/protocol';
@@ -49,6 +50,9 @@ export const DEFAULT_RELAYS = [
   'wss://relay.nostr.band',
   'wss://relay.primal.net',
 ];
+
+/** Max inbound relay message, bytes: far above any real frame (4 KiB event plus envelope). */
+export const MAX_RELAY_MESSAGE_BYTES = 65536;
 
 /** A Nostr event per NIP-01 (JSON-serializable). */
 export interface NostrEvent {
@@ -132,6 +136,9 @@ export function unwrapEvent(nostr: NostrEvent): SignedEvent | null {
     if (!Array.isArray(nostr.tags)) return null;
     if (!nostr.tags.some((t) => Array.isArray(t) && t[0] === 'airplane' && t[1] === '1')) return null;
     if (typeof nostr.content !== 'string') return null;
+    // Pre-check BEFORE fromHex allocates: hex is 2 chars per byte, so a
+    // content longer than twice the event cap can never decode validly.
+    if (nostr.content.length > MAX_EVENT_BYTES * 2) return null;
     event = decodeEvent(fromHex(nostr.content));
   } catch {
     return null;
@@ -487,6 +494,9 @@ export class NostrTransport {
   }
 
   private handleMessage(relayUrl: string, data: string): void {
+    // Size gate BEFORE JSON.parse: an unbounded relay message must not
+    // force a large allocation and parse first.
+    if (typeof data !== 'string' || data.length > MAX_RELAY_MESSAGE_BYTES) return;
     let msg: unknown[];
     try {
       msg = JSON.parse(data) as unknown[];

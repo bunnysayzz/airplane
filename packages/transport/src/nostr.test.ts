@@ -133,6 +133,12 @@ describe('wrapEvent / unwrapEvent', () => {
     expect(unwrapEvent({ ...wrapped, content: 'zzzz' })).toBeNull();
   });
 
+  test('oversize hex content is rejected before decode', () => {
+    const keys = generateNostrKeypair();
+    const wrapped = wrapEvent(makePost(), keys);
+    expect(unwrapEvent({ ...wrapped, content: 'ab'.repeat(5000) })).toBeNull();
+  });
+
   test('unwrapEvent ignores malformed frames without throwing', () => {
     const keys = generateNostrKeypair();
     const wrapped = wrapEvent(makePost(), keys);
@@ -364,6 +370,20 @@ describe('NostrTransport inbound edge cases', () => {
       count++;
     });
     sockets[0].receive(['EVENT', 'sub1']);
+    await tick(10);
+    expect(count).toBe(0);
+    await t.stop();
+  });
+
+  test('oversize relay message is dropped before parsing', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    let count = 0;
+    t.onReceive(() => {
+      count++;
+    });
+    sockets[0].onmessage?.({ data: 'x'.repeat(70000) });
     await tick(10);
     expect(count).toBe(0);
     await t.stop();

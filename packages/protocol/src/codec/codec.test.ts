@@ -116,6 +116,19 @@ describe('codec', () => {
     expect(() => decodeEvent(encode(reshareArr))).not.toThrow();
   });
 
+  test('tag count and tag string length are capped before decode', () => {
+    const good = makePost('ok');
+    const mutate = (idx: number, value: unknown) => {
+      const arr = decode(encodeEvent(good)) as unknown[];
+      arr[idx] = value;
+      return encode(arr);
+    };
+    const manyTags = Array.from({ length: 17 }, (_, i) => ['t', String(i)]);
+    expect(() => decodeEvent(mutate(5, manyTags))).toThrow(CodecError);
+    expect(() => decodeEvent(mutate(5, [['x', 'y'.repeat(129)]]))).toThrow(CodecError);
+    expect(() => decodeEvent(mutate(5, [['x', 'y'.repeat(128)]]))).not.toThrow();
+  });
+
   test('bad lengths / kind / geohash throw CodecError', () => {    const good = makePost('ok');
     const mutate = (idx: number, value: unknown) => {
       const arr = decode(encodeEvent(good)) as unknown[];
