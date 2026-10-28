@@ -65,10 +65,14 @@ function ThemedStatusBar() {
 export default function RootLayout() {
     useEffect(() => {
         // LOG: automatic diagnostics logging starts on launch, before
-        // transport, with no tap. AppState markers follow below.
+        // transport, with no tap. AppState markers follow below. The
+        // background marker is awaited, not fire-and-forget, so the
+        // flush gets its grace window; a kill inside that window can
+        // still lose the tail (no native background task: not
+        // justified for a diagnostics marker).
         void startDiagnosticsLogFile().catch(() => {});
-        const appStateSub = AppState.addEventListener('change', (state) => {
-          recordDiagnosticsLogAppState(state);
+        const appStateSub = AppState.addEventListener('change', async (state) => {
+          await recordDiagnosticsLogAppState(state);
           // Foreground retention cleanup (best-effort, shared in-flight
           // guard with the startup and sync prunes).
           if (state === 'active') void pruneExpiredStore();

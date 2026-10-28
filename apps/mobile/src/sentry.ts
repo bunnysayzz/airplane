@@ -11,14 +11,21 @@
  * Sentry envelope format over plain fetch instead: events land in the same
  * Sentry project dashboard, with zero native code and zero new dependency.
  *
- * SCOPE: publish-path diagnostics only. initSentry() runs at app startup
- * (imported from apps/mobile/index.js, after fatalShim). captureError() is
- * called from the compose modal's publish catch. NOTHING else is reported
- * yet, and no global error handler is installed (fatalShim owns that).
+ * SCOPE: publish failures, feed-cell resolution failures, and
+ * keystore/connectivity breadcrumbs. initSentry() runs at app startup
+ * (imported from apps/mobile/index.js, after fatalShim). captureError()
+ * is called from the compose modal's publish catch and from feed-cell
+ * resolution (feedCells), and breadcrumbs are added for keystore
+ * fallback (identity) and connectivity changes (transport). No global
+ * error handler is installed (fatalShim owns that).
  *
  * PRIVACY: an event carries ONLY the error name/message/stack, the publish
  * stage tag, and breadcrumbs. Post text, location, pubkeys, and secrets are
- * never passed to this module and never appear in a payload.
+ * never passed to this module and never appear in a payload. As a second
+ * layer, captureError scrubs runs of 32 or more hex chars and
+ * latitude/longitude-like number pairs from the message, and drops any
+ * breadcrumb data value failing the same check, so a future call site
+ * that embeds such data cannot leak it through this egress point.
  *
  * SAFETY: every public function is wrapped so it can never throw — a
  * logging failure must never break launch or posting. When the DSN env var
@@ -43,6 +50,25 @@ export interface SentryBreadcrumb {
 const MAX_BREADCRUMBS = 20;
 const MAX_MESSAGE_LENGTH = 1000;
 const MAX_FRAMES = 50;
+
+/**
+ * Egress scrubbing (P2-5): a run of 32 or more hex chars is long enough
+ * to be a pubkey fragment, an id, or a key, and a pair of long decimals
+ * separated by a comma looks like latitude/longitude. Neither belongs
+ * in a telemetry event, whatever the call site embedded.
+ */
+function containsSensitiveValue(value: string): boolean {
+  return (
+    /[0-9a-fA-F]{32,}/.test(value) ||
+    /-?\d{1,3}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,}/.test(value)
+  );
+}
+
+function scrubMessage(message: string): string {
+  return message
+    .replace(/[0-9a-fA-F]{32,}/g, '[redacted]')
+    .replace(/-?\d{1,3}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,}/g, '[redacted]');
+}
 
 /** Parse a Sentry DSN. Returns null for anything malformed. */
 export function parseDsn(dsn: string): SentryDsnParts | null {
@@ -110,6 +136,18 @@ function parseStack(stack: string): StackFrame[] {
 let enabled = false;
 let dsnParts: SentryDsnParts | null = null;
 let breadcrumbs: SentryBreadcrumb[] = [];
+/** Last DSN string init saw, so re-init with the same DSN keeps crumbs. */
+let lastDsnSeen: string | undefined = undefined;
+let haveLastDsn = false;
+/**
+ * Disabled-state note (P2-6): when init ends disabled, one log line is
+ * owed to the diagnostics log. The log sink is not attached yet at
+ * import time, so init only arms the note; the log starter consumes
+ * it once per launch. An enabled init re-arms, so a later disable in
+ * the same launch can note again.
+ */
+let disabledNotePending = false;
+let disabledNoteConsumed = false;
 
 /**
  * Initialize the client. The DSN comes from EXPO_PUBLIC_SENTRY_DSN (inlined
@@ -118,15 +156,45 @@ let breadcrumbs: SentryBreadcrumb[] = [];
  */
 export function initSentry(dsn?: string): void {
   try {
-    breadcrumbs = [];
     const raw =
       dsn ?? (typeof process !== 'undefined' ? process.env['EXPO_PUBLIC_SENTRY_DSN'] : undefined);
+    // Only clear breadcrumbs when the DSN actually changes: a re-init
+    // with the same DSN (for example after a settings change) must not
+    // silently drop the breadcrumbs collected for the next event.
+    if (!haveLastDsn || raw !== lastDsnSeen) {
+      breadcrumbs = [];
+      haveLastDsn = true;
+      lastDsnSeen = raw;
+    }
     dsnParts = raw ? parseDsn(raw) : null;
     enabled = dsnParts !== null;
+    if (enabled) {
+      disabledNotePending = false;
+      disabledNoteConsumed = false;
+    } else if (!disabledNoteConsumed) {
+      disabledNotePending = true;
+    }
   } catch {
     enabled = false;
     dsnParts = null;
+    if (!disabledNoteConsumed) disabledNotePending = true;
   }
+}
+
+/** True when the client has a valid DSN and will send events. */
+export function isSentryEnabled(): boolean {
+  return enabled;
+}
+
+/**
+ * Consume the owed disabled note, if any. Returns true exactly once
+ * per disabled stretch; the caller records the diagnostics log line.
+ */
+export function takeSentryDisabledNote(): boolean {
+  if (!disabledNotePending) return false;
+  disabledNotePending = false;
+  disabledNoteConsumed = true;
+  return true;
 }
 
 /** Record a breadcrumb for the next captured event. Never throws. */
@@ -156,10 +224,29 @@ export function captureError(error: unknown): void {
 
     const name = error instanceof Error ? error.name : 'UnknownError';
     const rawMessage = error instanceof Error ? error.message : String(error);
-    const message = rawMessage.slice(0, MAX_MESSAGE_LENGTH);
+    const message = scrubMessage(rawMessage).slice(0, MAX_MESSAGE_LENGTH);
     const stack = error instanceof Error ? error.stack : undefined;
     const stage = (error as { stage?: unknown } | null)?.stage ?? undefined;
     const eventId = randomEventId();
+    const abortSignalCtor = (
+      globalThis as { AbortSignal?: { timeout?: (ms: number) => unknown } }
+    ).AbortSignal;
+    const timeoutSignal =
+      abortSignalCtor?.timeout !== undefined ? abortSignalCtor.timeout(10_000) : undefined;
+    const scrubbedBreadcrumbs: SentryBreadcrumb[] = breadcrumbs.map((crumb) => {
+      const scrubbed: SentryBreadcrumb = {
+        timestamp: crumb.timestamp,
+        message: scrubMessage(crumb.message),
+      };
+      if (crumb.data) {
+        const data: Record<string, string> = {};
+        for (const [key, value] of Object.entries(crumb.data)) {
+          if (!containsSensitiveValue(value)) data[key] = value;
+        }
+        scrubbed.data = data;
+      }
+      return scrubbed;
+    });
 
     const event: Record<string, unknown> = {
       event_id: eventId,
@@ -177,7 +264,7 @@ export function captureError(error: unknown): void {
         ],
       },
       tags: typeof stage === 'string' && stage.length > 0 ? { publish_stage: stage } : {},
-      breadcrumbs: { values: breadcrumbs },
+      breadcrumbs: { values: scrubbedBreadcrumbs },
     };
 
     const envelope =
@@ -197,6 +284,9 @@ export function captureError(error: unknown): void {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-sentry-envelope' },
         body: envelope,
+        // A hung request must not linger: abort after about 10 seconds.
+        // No retry: retrying error telemetry risks duplicate events.
+        ...(timeoutSignal !== undefined ? { signal: timeoutSignal } : {}),
       },
     );
     if (result && typeof (result as { catch?: unknown }).catch === 'function') {

@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Linking, Pressable, ScrollView, Text, View } from 'react-native';
+import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Card, SectionLabel } from '../../components/ui';
 import { useTheme } from '../../src/theme/themeContext';
@@ -39,6 +40,8 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
   const [snapshot, setSnapshot] = useState<DiagnosticsSnapshot>(() => getDiagnosticsSnapshot());
   const [logStatus, setLogStatus] = useState(() => getDiagnosticsLogStatus());
   const [shareFailed, setShareFailed] = useState<boolean>(false);
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [retryFailed, setRetryFailed] = useState<boolean>(false);
 
   const refreshPermissions = () => {
     checkBlePermissionStates()
@@ -61,15 +64,26 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
   useEffect(() => {
     refreshPermissions();
     const unsub = subscribeDiagnostics(() => setSnapshot(getDiagnosticsSnapshot()));
+    // Slower poll, not every second: the throttled subscription drives
+    // snapshot updates, and this poll only needs to catch log status
+    // changes that arrive without a collector event. Share and focus
+    // refresh log status explicitly, so nothing waits on the poll.
     const timer = setInterval(() => {
       setSnapshot(getDiagnosticsSnapshot());
       setLogStatus(getDiagnosticsLogStatus());
-    }, 1000);
+    }, 5000);
     return () => {
       unsub();
       clearInterval(timer);
     };
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      setSnapshot(getDiagnosticsSnapshot());
+      setLogStatus(getDiagnosticsLogStatus());
+    }, []),
+  );
 
   const formatTime = (atMs: number | null): string =>
     atMs === null ? t('settings.diagnosticsNever') : new Date(atMs).toLocaleTimeString();
@@ -186,6 +200,7 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
             onPress={() => {
               refreshPermissions();
               setSnapshot(getDiagnosticsSnapshot());
+              setLogStatus(getDiagnosticsLogStatus());
             }}
             accessibilityRole="button"
             accessibilityLabel={t('settings.diagnosticsRefresh')}
@@ -196,9 +211,22 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
             style={styles.button}
             onPress={() => {
               setShareFailed(false);
+              setShareError(null);
               void shareDiagnosticsLogFile()
                 .then(() => setLogStatus(getDiagnosticsLogStatus()))
-                .catch(() => setShareFailed(true));
+                .catch((error: unknown) => {
+                  setShareFailed(true);
+                  // Local, owner-visible only: at most a file path, which
+                  // the screen already displays. Keeping the message
+                  // distinguishes sharing-unavailable from flush
+                  // failure from a missing file.
+                  setShareError(
+                    String(error instanceof Error ? error.message : error)
+                      .replace(/[\r\n]+/g, ' ')
+                      .trim()
+                      .slice(0, 120),
+                  );
+                });
             }}
             accessibilityRole="button"
             accessibilityLabel={t('settings.diagnosticsShareLog')}
@@ -227,9 +255,10 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
                 // dead scan actually recovers. A permanently denied grant
                 // returns false and keeps the Open Settings path above,
                 // it never loops an OS dialog.
-                void retryBleRadio().then(() => {
+                void retryBleRadio().then((ok) => {
                   refreshPermissions();
                   setSnapshot(getDiagnosticsSnapshot());
+                  setRetryFailed(!ok);
                 });
               }}
               accessibilityRole="button"
@@ -242,8 +271,18 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
         {anyDenied && (
           <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsOpenSettingsNote')}</Text>
         )}
-        <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogFile', { count: logStatus.lineCount })}</Text>
-        <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogLoaded', { count: logStatus.loadedFromFile })}</Text>
+        {retryFailed && (
+          <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsRetryFailedNote')}</Text>
+        )}
+        {logStatus.loadOk === null ? (
+          <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogLoading')}</Text>
+        ) : (
+          <>
+            <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogMemory', { count: logStatus.lineCount })}</Text>
+            <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogOnDisk', { count: logStatus.flushedLineCount })}</Text>
+            <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogLoaded', { count: logStatus.loadedFromFile })}</Text>
+          </>
+        )}
         <Text style={[type.body, styles.kvValue]}>{formatLogWriteStatus()}</Text>
         {logStatus.loadOk === false && (
           <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsLogLoadFailed')}</Text>
@@ -254,8 +293,16 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
           </Text>
         )}
         <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogPath', { path: logStatus.fileUri })}</Text>
+        <Text style={[type.body, styles.kvValue]}>
+          {logStatus.sentryEnabled
+            ? t('settings.diagnosticsSentryEnabled')
+            : t('settings.diagnosticsSentryDisabled')}
+        </Text>
         {shareFailed && (
-          <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsShareUnavailable')}</Text>
+          <Text style={[type.meta, styles.note]}>
+            {t('settings.diagnosticsShareUnavailable')}
+            {shareError !== null ? `: ${shareError}` : ''}
+          </Text>
         )}
 
         <SectionLabel style={styles.sectionLabel}>{t('settings.diagnosticsRadio')}</SectionLabel>

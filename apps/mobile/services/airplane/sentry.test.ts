@@ -8,6 +8,8 @@ import {
   captureError,
   addBreadcrumb,
   parseDsn,
+  isSentryEnabled,
+  takeSentryDisabledNote,
   __getBreadcrumbsForTests,
 } from '../../src/sentry';
 
@@ -141,6 +143,20 @@ describe('captureError', () => {
     expect(JSON.stringify(event)).not.toContain('publickey123');
   });
 
+  test('scrubs a 64-char hex string and a coordinate pair from the event', () => {
+    initSentry(TEST_DSN);
+    const fullId = 'cd'.repeat(32);
+    addBreadcrumb('keystore-fallback', { reason: 'ok', leaked: fullId });
+    captureError(new Error(`publish failed for ${fullId} at 12.345678, 77.123456`));
+    const event = sentEvent();
+    const body = JSON.stringify(event);
+    expect(body).not.toContain(fullId);
+    expect(body).not.toContain('12.345678, 77.123456');
+    const crumbs = breadcrumbValues(event);
+    expect(crumbs).toHaveLength(1);
+    expect(crumbs[0]['data']).toEqual({ reason: 'ok' });
+  });
+
   test('attaches breadcrumbs to the event', () => {
     initSentry(TEST_DSN);
     addBreadcrumb('keystore-fallback', { reason: 'Error' });
@@ -149,6 +165,25 @@ describe('captureError', () => {
     const crumbs = breadcrumbValues(event);
     expect(crumbs).toHaveLength(1);
     expect(crumbs[0]['message']).toBe('keystore-fallback');
+  });
+
+  test('disabled note is consumable once per disabled stretch', () => {
+    expect(isSentryEnabled()).toBe(false);
+    expect(takeSentryDisabledNote()).toBe(true);
+    expect(takeSentryDisabledNote()).toBe(false);
+    initSentry(TEST_DSN);
+    expect(isSentryEnabled()).toBe(true);
+    expect(takeSentryDisabledNote()).toBe(false);
+    initSentry('garbage');
+    expect(isSentryEnabled()).toBe(false);
+    expect(takeSentryDisabledNote()).toBe(true);
+  });
+
+  test('sentry fetch carries an abort signal', () => {
+    initSentry(TEST_DSN);
+    captureError(new Error('boom'));
+    const init = fetchMock.mock.calls[0][1] as { signal?: unknown };
+    expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
   test('never throws, even when fetch rejects', async () => {
@@ -161,6 +196,15 @@ describe('captureError', () => {
 });
 
 describe('addBreadcrumb', () => {
+  test('re-init with the same DSN keeps breadcrumbs, a changed DSN clears them', () => {
+    initSentry(TEST_DSN);
+    addBreadcrumb('keep-me');
+    initSentry(TEST_DSN);
+    expect(__getBreadcrumbsForTests()).toHaveLength(1);
+    initSentry('https://otherkey@o0.ingest.sentry.io/456');
+    expect(__getBreadcrumbsForTests()).toHaveLength(0);
+  });
+
   test('caps the buffer at 20, dropping the oldest', () => {
     for (let i = 0; i < 25; i++) {
       addBreadcrumb(`crumb-${i}`);

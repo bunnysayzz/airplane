@@ -10,6 +10,7 @@
 
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+import { isSentryEnabled, takeSentryDisabledNote } from '../../src/sentry';
 import {
   attachDiagnosticsLogWriter,
   detachDiagnosticsLogWriter,
@@ -19,9 +20,12 @@ import {
 } from './diagnosticsLog';
 
 export const DIAGNOSTICS_LOG_FILE_NAME = 'airplane-diagnostics.log';
+/** Status marker when no document directory exists: never a bare filename. */
+export const DIAGNOSTICS_LOG_FILE_UNAVAILABLE = 'unavailable';
 
 function logFileUri(): string {
-  const dir = FileSystem.documentDirectory ?? '';
+  const dir = FileSystem.documentDirectory;
+  if (!dir) return DIAGNOSTICS_LOG_FILE_UNAVAILABLE;
   return `${dir}${DIAGNOSTICS_LOG_FILE_NAME}`;
 }
 
@@ -29,12 +33,24 @@ function createExpoDiagnosticsLogPort(): DiagnosticsLogFilePort {
   const uri = logFileUri();
   return {
     read: async () => {
+      // No directory: skip the read instead of probing a bare filename.
+      if (uri === DIAGNOSTICS_LOG_FILE_UNAVAILABLE) return null;
       const info = await FileSystem.getInfoAsync(uri);
       if (!info.exists) return null;
       return FileSystem.readAsStringAsync(uri);
     },
     write: async (content: string) => {
-      await FileSystem.writeAsStringAsync(uri, content);
+      // No directory: fail loudly so the write status reports it,
+      // instead of silently pretending the flush landed.
+      if (uri === DIAGNOSTICS_LOG_FILE_UNAVAILABLE) {
+        throw new Error('document directory unavailable');
+      }
+      // Atomic replace on the same volume: a kill mid-write leaves
+      // either the old file or the new file, never a truncation.
+      // The tmp name is constant, so no user input reaches the path.
+      const tmpUri = `${uri}.tmp`;
+      await FileSystem.writeAsStringAsync(tmpUri, content);
+      await FileSystem.moveAsync({ from: tmpUri, to: uri });
     },
   };
 }
@@ -55,6 +71,11 @@ export async function startDiagnosticsLogFile(): Promise<void> {
   await writer.load();
   attachDiagnosticsLogWriter(writer);
   writer.append(formatDiagnosticsLogLine(Date.now(), 'app', 'started'));
+  // A disabled Sentry client is otherwise invisible: one log line per
+  // launch says so plainly instead of looking like "no errors happened".
+  if (takeSentryDisabledNote()) {
+    writer.append(formatDiagnosticsLogLine(Date.now(), 'sentry', 'disabled'));
+  }
 }
 
 export function stopDiagnosticsLogFile(): void {
@@ -65,14 +86,20 @@ export function stopDiagnosticsLogFile(): void {
   writer = null;
 }
 
-/** Foreground/background markers, wired from AppState in _layout. */
-export function recordDiagnosticsLogAppState(state: string): void {
+/** Foreground/background markers, wired from AppState in _layout. The
+ * background marker awaits flush quiescence (see flushComplete) so
+ * the marker and the unflushed tail get their best chance to land
+ * before the OS suspends the app. Honest limit: a kill during the
+ * grace window can still lose the tail, because Expo FileSystem
+ * offers no synchronous write and a native background task is not
+ * justified for a diagnostics marker. */
+export async function recordDiagnosticsLogAppState(state: string): Promise<void> {
   if (writer === null) return;
   if (state === 'active') {
     writer.append(formatDiagnosticsLogLine(Date.now(), 'app', 'foreground'));
   } else if (state === 'background') {
     writer.append(formatDiagnosticsLogLine(Date.now(), 'app', 'background'));
-    void writer.flush();
+    await writer.flushComplete();
   }
 }
 
@@ -87,6 +114,10 @@ export interface DiagnosticsLogFileStatus {
   lastWriteOk: boolean | null;
   lastWriteAtMs: number | null;
   lastWriteError: string | null;
+  /** Lines confirmed on disk by the last successful flush. */
+  flushedLineCount: number;
+  /** Sentry client state at status time: false means disabled, never throwing. */
+  sentryEnabled: boolean;
   fileName: string;
   fileUri: string;
 }
@@ -97,10 +128,12 @@ export function getDiagnosticsLogStatus(): DiagnosticsLogFileStatus {
     lineCount: writer?.getLineCount() ?? 0,
     byteCount: writer?.getByteCount() ?? 0,
     loadedFromFile: writer?.getLoadedFromFileCount() ?? 0,
+    flushedLineCount: writer?.getFlushedLineCount() ?? 0,
     loadOk: writer?.getLoadOk() ?? null,
     lastWriteOk: lastWrite.ok,
     lastWriteAtMs: lastWrite.atMs,
     lastWriteError: lastWrite.error,
+    sentryEnabled: isSentryEnabled(),
     fileName: DIAGNOSTICS_LOG_FILE_NAME,
     fileUri: logFileUri(),
   };
@@ -115,7 +148,10 @@ export async function shareDiagnosticsLogFile(): Promise<void> {
   if (writer === null) {
     await startDiagnosticsLogFile();
   }
-  await writer?.flush();
+  await writer?.flushComplete();
+  if (logFileUri() === DIAGNOSTICS_LOG_FILE_UNAVAILABLE) {
+    throw new Error('log file unavailable');
+  }
   const available = await Sharing.isAvailableAsync();
   if (!available) throw new Error('sharing unavailable');
   await Sharing.shareAsync(logFileUri(), {

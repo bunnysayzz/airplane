@@ -41,13 +41,25 @@ export function formatDiagnosticsLogLine(atMs: number, kind: string, detail: str
   return clean.length > 0 ? `${stamp} ${kind} ${clean}` : `${stamp} ${kind}`;
 }
 
+/** A complete log line starts with an ISO timestamp and a kind token. */
+const TIMESTAMPED_LINE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \S+/;
+
+/** Byte length of a line in UTF-8, not UTF-16 code units. */
+function utf8ByteLength(line: string): number {
+  const encoder = (
+    globalThis as { TextEncoder?: new () => { encode(input: string): Uint8Array } }
+  ).TextEncoder;
+  if (encoder === undefined) return line.length;
+  return new encoder().encode(line).length;
+}
+
 /** Drop oldest lines until both caps hold. Pure, for tests and the writer. */
 export function rotateDiagnosticsLogLines(lines: string[]): string[] {
   const kept = lines.slice();
   while (kept.length > MAX_DIAGNOSTICS_LOG_LINES) kept.shift();
-  let bytes = kept.reduce((sum, line) => sum + line.length + 1, 0);
+  let bytes = kept.reduce((sum, line) => sum + utf8ByteLength(line) + 1, 0);
   while (kept.length > 0 && bytes > MAX_DIAGNOSTICS_LOG_BYTES) {
-    bytes -= kept[0].length + 1;
+    bytes -= utf8ByteLength(kept[0]) + 1;
     kept.shift();
   }
   return kept;
@@ -67,6 +79,13 @@ export function rotateDiagnosticsLogLines(lines: string[]): string[] {
  * Appends that land while the file is still loading are buffered and
  * drained in order once the read finishes, so the load can never wipe
  * lines that arrived during its own async window.
+ * Sink appends (via appendCoalesced) are coalesced on the same trailing
+ * 250ms window as the collector notify throttle: lines arriving in a
+ * burst are held and written once, and per-chunk frame lines are
+ * collapsed to one summary line per peer per window with the fragment
+ * counts summed. The collector snapshot counters stay exact; only the
+ * file lines are coalesced. flush() always drains the coalesced
+ * queue first, so share and background paths never miss the tail.
  */
 export interface DiagnosticsLogWriteStatus {
   /** Null until the first write attempt finishes. */
@@ -91,6 +110,25 @@ export class DiagnosticsLogWriter {
   /** Null until load() finishes; false when the file could not be read. */
   private loadOk: boolean | null = null;
   private lastWrite: DiagnosticsLogWriteStatus = { ok: null, atMs: null, error: null };
+  /**
+   * Lines confirmed on disk. Updated only when a flush write succeeds,
+   * never on append: after a failed write the in-memory count keeps
+   * growing while this one stays at the last good write, so the screen
+   * can show memory vs on-disk honestly instead of one blended count.
+   */
+  private flushedLineCount = 0;
+  /**
+   * Sink coalescing queue (P1-21). Fragment entries aggregate by peer
+   * label and direction; plain entries pass through in order.
+   */
+  private coalesced: Array<{
+    label: string | null;
+    direction: string | null;
+    prefix: string | null;
+    count: number;
+    plain: string | null;
+  }> = [];
+  private coalesceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(port: DiagnosticsLogFilePort) {
     this.port = port;
@@ -103,7 +141,15 @@ export class DiagnosticsLogWriter {
     try {
       const content = await this.port.read();
       if (content !== null && content.length > 0) {
-        this.lines = rotateDiagnosticsLogLines(content.split('\n').filter((l) => l.length > 0));
+        const loaded = content.split('\n').filter((l) => l.length > 0);
+        // A kill mid-write can leave a partial last line even with the
+        // tmp-plus-rename port (an older file written the same way).
+        // Drop a trailing line that does not match the timestamped
+        // format instead of keeping a fragment as if it were a line.
+        if (loaded.length > 0 && !TIMESTAMPED_LINE_RE.test(loaded[loaded.length - 1])) {
+          loaded.pop();
+        }
+        this.lines = rotateDiagnosticsLogLines(loaded);
       }
       this.loadOk = true;
     } catch {
@@ -119,8 +165,11 @@ export class DiagnosticsLogWriter {
     for (const line of pending) {
       this.pushLine(line);
     }
-    this.byteCount = this.lines.reduce((sum, line) => sum + line.length + 1, 0);
-    if (pending.length > 0) {
+    this.byteCount = this.lines.reduce((sum, line) => sum + utf8ByteLength(line) + 1, 0);
+    // The final flush runs whenever a flush was requested during load
+    // (dirty), not only when pending lines exist: without it, a flush
+    // requested during the load window would never land.
+    if (pending.length > 0 || this.dirty) {
       void this.flush();
     }
   }
@@ -130,7 +179,12 @@ export class DiagnosticsLogWriter {
   }
 
   getByteCount(): number {
-    return this.byteCount;
+    // Pending lines count too: during load the line count already
+    // includes them, and the byte count must describe the same set.
+    return (
+      this.byteCount +
+      this.pendingLines.reduce((sum, line) => sum + utf8ByteLength(line) + 1, 0)
+    );
   }
 
   /**
@@ -140,6 +194,11 @@ export class DiagnosticsLogWriter {
    */
   getLoadedFromFileCount(): number {
     return this.loadedFromFile;
+  }
+
+  /** Lines confirmed on disk by the last successful flush. */
+  getFlushedLineCount(): number {
+    return this.flushedLineCount;
   }
 
   getLoadOk(): boolean | null {
@@ -152,14 +211,67 @@ export class DiagnosticsLogWriter {
 
   private pushLine(line: string): void {
     this.lines.push(line);
-    this.byteCount += line.length + 1;
+    this.byteCount += utf8ByteLength(line) + 1;
     this.lines = rotateDiagnosticsLogLines(this.lines);
-    this.byteCount = this.lines.reduce((sum, l) => sum + l.length + 1, 0);
+    this.byteCount = this.lines.reduce((sum, l) => sum + utf8ByteLength(l) + 1, 0);
   }
 
   /** Test seam: the current lines, oldest first. */
   getLines(): string[] {
     return [...this.lines];
+  }
+
+  /**
+   * Coalesced sink append: hold the line for at most one trailing
+   * 250ms window, collapsing per-chunk fragment lines for the same
+   * peer and direction into a single summed summary line. Falls back
+   * to the plain append path while the file is still loading, so the
+   * load buffer contract still holds.
+   */
+  appendCoalesced(line: string): void {
+    if (!this.loadComplete) {
+      this.append(line);
+      return;
+    }
+    const fragment = /^(\S+ frames \S+) (fragments-sent|fragments-received) (\d+)$/.exec(line);
+    if (fragment) {
+      const [, prefix, direction, countText] = fragment;
+      const label = prefix.split(' ').pop() ?? prefix;
+      const existing = this.coalesced.find(
+        (entry) => entry.label === label && entry.direction === direction,
+      );
+      if (existing) {
+        existing.count += Number(countText);
+      } else {
+        this.coalesced.push({ label, direction, prefix, count: Number(countText), plain: null });
+      }
+    } else {
+      this.coalesced.push({ label: null, direction: null, prefix: null, count: 0, plain: line });
+    }
+    if (this.coalesceTimer === null) {
+      this.coalesceTimer = setTimeout(() => {
+        this.coalesceTimer = null;
+        this.drainCoalesced();
+        void this.flush();
+      }, DIAGNOSTICS_LOG_SINK_THROTTLE_MS);
+    }
+  }
+
+  /** Move coalesced lines into the line list, preserving order. */
+  private drainCoalesced(): void {
+    if (this.coalesceTimer !== null) {
+      clearTimeout(this.coalesceTimer);
+      this.coalesceTimer = null;
+    }
+    const queued = this.coalesced;
+    this.coalesced = [];
+    for (const entry of queued) {
+      if (entry.plain !== null) {
+        this.pushLine(entry.plain);
+      } else if (entry.prefix !== null && entry.direction !== null) {
+        this.pushLine(`${entry.prefix} ${entry.direction} ${entry.count}`);
+      }
+    }
   }
 
   append(line: string): void {
@@ -178,6 +290,25 @@ export class DiagnosticsLogWriter {
   }
 
   async flush(): Promise<void> {
+    if (!this.loadComplete) {
+      // The file is still loading and this.lines is empty: writing now
+      // would blank the surviving file. Mark dirty so load's final
+      // flush writes the loaded lines plus anything appended since.
+      this.dirty = true;
+      return;
+    }
+    if (this.loadOk === false) {
+      // The load failed, so this.lines does not hold the surviving
+      // file: flushing now would destroy history a transient read
+      // failure left behind. Lines stay in memory; flush stays a
+      // no-op while loadOk is false, and the screen already reports
+      // the load failure. Deliberately not marked dirty, so a share
+      // waiting on quiescence does not hang on a blocked flush.
+      return;
+    }
+    // Coalesced sink lines belong in this flush, not the next one:
+    // drain them into the line list before deciding anything else.
+    this.drainCoalesced();
     if (this.flushing) {
       this.dirty = true;
       return;
@@ -188,6 +319,7 @@ export class DiagnosticsLogWriter {
         this.dirty = false;
         const content = this.lines.length > 0 ? `${this.lines.join('\n')}\n` : '';
         await this.port.write(content);
+        this.flushedLineCount = this.lines.length;
         this.lastWrite = { ok: true, atMs: Date.now(), error: null };
       } while (this.dirty);
     } catch (error) {
@@ -215,16 +347,35 @@ export class DiagnosticsLogWriter {
       }
     }
   }
+
+  /**
+   * Resolve only when the writer is quiescent: no write in flight and
+   * nothing dirty. flush() alone cannot promise this: it returns
+   * immediately when a write is already in flight, just marking dirty.
+   * Share awaits this instead of flush so the shared file contains
+   * the lines that triggered the last flush, not the previous write.
+   */
+  async flushComplete(): Promise<void> {
+    await this.flush();
+    while (this.flushing || this.dirty) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
 }
+
+/** Trailing coalescing window for sink appends, matching the notify throttle. */
+const DIAGNOSTICS_LOG_SINK_THROTTLE_MS = 250;
 
 /**
  * Attach a writer as the collector sink. From this point every
  * collector event becomes one timestamped log line, with no call-site
- * changes beyond the hooks already in diagnostics.ts.
+ * changes beyond the hooks already in diagnostics.ts. Lines go through
+ * the coalesced append path, so per-chunk bursts cost one write per
+ * window instead of one write per chunk.
  */
 export function attachDiagnosticsLogWriter(writer: DiagnosticsLogWriter): void {
   setDiagnosticsLogSink((kind: string, detail: string) => {
-    writer.append(formatDiagnosticsLogLine(Date.now(), kind, detail));
+    writer.appendCoalesced(formatDiagnosticsLogLine(Date.now(), kind, detail));
   });
 }
 

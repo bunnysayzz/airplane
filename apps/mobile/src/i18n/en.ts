@@ -454,6 +454,13 @@ export const en = {
     diagnosticsLogWriteError: 'Write error',
     diagnosticsLogLoadFailed: 'File could not be read at launch, so the count starts from this launch only.',
     diagnosticsLogPath: 'File: {{path}}',
+    diagnosticsLogLoading: 'Log file: loading...',
+    diagnosticsRetryFailedNote:
+      'Retry did not restart Bluetooth. Check permissions in system settings.',
+    diagnosticsLogMemory: 'Lines in memory: {{count}}',
+    diagnosticsLogOnDisk: 'Lines on disk: {{count}}',
+    diagnosticsSentryEnabled: 'Sentry: enabled',
+    diagnosticsSentryDisabled: 'Sentry: disabled',
     diagnosticsShareUnavailable: 'Sharing is not available on this device, so the log file cannot be shared from here.',
     diagnosticsOpenSettings: 'Open system settings',
     diagnosticsOpenSettingsNote:

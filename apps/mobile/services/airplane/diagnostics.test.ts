@@ -112,6 +112,50 @@ describe('diagnostics collector', () => {
     }
   });
 
+  test('notify visits subscribers from a snapshot, not the live set', async () => {
+    const calls: string[] = [];
+    let unsubSecond: (() => void) | null = null;
+    subscribeDiagnostics(() => {
+      calls.push('first');
+      unsubSecond?.();
+    });
+    unsubSecond = subscribeDiagnostics(() => {
+      calls.push('second');
+    });
+    setDiagnosticsAdapterState('on');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    // The first subscriber unsubscribes the second mid-notify, but the
+    // snapshot copy still visits it; live-set iteration would skip it.
+    expect(calls).toEqual(['first', 'second']);
+  });
+
+  test('peer cap evicts a seen peer before a connected one and never exceeds 100', () => {
+    for (let i = 0; i < 100; i++) {
+      recordPeerSeen(`tag:${i.toString(16).padStart(16, '0')}`, -60, '0123456789abcdef');
+    }
+    recordPeerConnected('tag:0000000000000000', 128, true);
+    recordPeerSeen('tag:ffffffffffffffff', -60, '0123456789abcdef');
+    const snap = getDiagnosticsSnapshot();
+    expect(snap.peers).toHaveLength(100);
+    expect(snap.peers.some((p) => p.peerId === 'tag:0000000000000000')).toBe(true);
+    expect(snap.peers.some((p) => p.peerId === 'tag:ffffffffffffffff')).toBe(true);
+  });
+
+  test('peer resolve carries over connection state the survivor lacks', () => {
+    recordPeerSeen('tag:0102030405060708', -70, '0102030405060708');
+    recordPeerConnected('tag:0102030405060708', 256, true);
+    recordPeerSeen('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', -60, '0807060504030201');
+    recordPeerResolved(
+      'tag:0102030405060708',
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    );
+    const snap = getDiagnosticsSnapshot();
+    expect(snap.peers).toHaveLength(1);
+    expect(snap.peers[0].gattState).toBe('connected');
+    expect(snap.peers[0].mtu).toBe(256);
+    expect(snap.peers[0].cccdSubscribed).toBe(true);
+  });
+
   test('peer upsert keeps the newest sighting and survives a resolve', () => {
     recordPeerSeen('tag:0102030405060708', -70, '0102030405060708');
     recordPeerSeen('tag:0102030405060708', -55, '0102030405060708');
