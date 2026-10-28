@@ -272,27 +272,33 @@ export class DmService {
   /**
    * Flush the outbox. Per-conversation FIFO: within one conversation the
    * oldest due message goes first and a failure stops that conversation's
-   * queue (other conversations are unaffected). Never silently drops: a
-   * message that exhausts DM_MAX_ATTEMPTS becomes Failed, not deleted.
+   * queue. Conversations are independent, so they flush concurrently
+   * (a slow first conversation no longer delays every other one); the
+   * sequential first-OK-wins relay order inside one publish is kept.
+   * Never silently drops: a message that exhausts DM_MAX_ATTEMPTS
+   * becomes Failed, not deleted.
    */
   async flushOutbox(nowMs?: number): Promise<void> {
     const now = nowMs ?? this.now();
     const convs = await this.store.listConversations();
-    let changed = false;
-    for (const conv of convs) {
-      if (conv.state === 'blocked') continue;
-      const messages = (await this.store.listMessages(conv.peerHex)).sort(
-        (a, b) => a.createdAtMs - b.createdAtMs,
-      );
-      for (const m of messages) {
-        if (m.direction !== 'out' || m.status !== 'Sending') continue;
-        if (m.nextAttemptAtMs > now) continue;
-        const ok = await this.tryPublish(m, now);
-        changed = true;
-        if (!ok) break; // FIFO head-of-line: stop this conversation's queue
-      }
-    }
-    if (changed) this.emit();
+    const results = await Promise.all(
+      convs.map(async (conv) => {
+        if (conv.state === 'blocked') return false;
+        const messages = (await this.store.listMessages(conv.peerHex)).sort(
+          (a, b) => a.createdAtMs - b.createdAtMs,
+        );
+        let changed = false;
+        for (const m of messages) {
+          if (m.direction !== 'out' || m.status !== 'Sending') continue;
+          if (m.nextAttemptAtMs > now) continue;
+          const ok = await this.tryPublish(m, now);
+          changed = true;
+          if (!ok) break; // FIFO head-of-line: stop this conversation's queue
+        }
+        return changed;
+      }),
+    );
+    if (results.some(Boolean)) this.emit();
   }
 
   private async tryPublish(m: DmMessageRow, now: number): Promise<boolean> {
