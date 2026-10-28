@@ -55,6 +55,14 @@ export async function getDmService(): Promise<DmService> {
     service = svc;
     return svc;
   })();
+  // A rejected creation must not poison the singleton for the session:
+  // clear the cached promise (and service) so the next caller retries,
+  // mirroring identity.ts getDeviceKeypair. The rejection still reaches
+  // this caller; the catch only resets the cache.
+  servicePromise.catch(() => {
+    servicePromise = null;
+    service = null;
+  });
   return servicePromise;
 }
 

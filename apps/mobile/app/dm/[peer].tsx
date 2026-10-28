@@ -25,6 +25,8 @@ export default function DmThreadScreen() {
     const [thread, setThread] = useState<DmThreadRow[]>([]);
     const [conv, setConv] = useState<DmConversationRow | null>(null);
     const [draft, setDraft] = useState('');
+    // A failed refresh used to leave a stale thread with no error shown.
+    const [refreshError, setRefreshError] = useState(false);
 
     // F4: the thread lands on the latest message and follows new arrivals,
     // but only while the user is already near the bottom, so reading history
@@ -57,13 +59,20 @@ export default function DmThreadScreen() {
             setConv(null);
             return;
         }
-        void getDmService().then(async svc => {
-            setThread(await svc.getThread(peerHex));
-            const inbox = await svc.listInbox();
-            const requests = await svc.listRequests();
-            const blocked = await svc.listBlocked();
-            setConv([...inbox, ...requests, ...blocked].find(c => c.peerHex === peerHex) ?? null);
-        });
+        void getDmService()
+            .then(async svc => {
+                setThread(await svc.getThread(peerHex));
+                const inbox = await svc.listInbox();
+                const requests = await svc.listRequests();
+                const blocked = await svc.listBlocked();
+                setConv([...inbox, ...requests, ...blocked].find(c => c.peerHex === peerHex) ?? null);
+                setRefreshError(false);
+            })
+            .catch(() => {
+                // A getDmService rejection (or a refresh failure) shows the
+                // retry affordance instead of leaving a stale thread.
+                setRefreshError(true);
+            });
     }, [peerHex, peerValid]);
 
     useEffect(() => {
@@ -74,10 +83,14 @@ export default function DmThreadScreen() {
         }
         refresh();
         let unsub: (() => void) | undefined;
-        void getDmService().then(svc => {
-            unsub = svc.subscribe(refresh);
-            void svc.markRead(peerHex);
-        });
+        void getDmService()
+            .then(svc => {
+                unsub = svc.subscribe(refresh);
+                void svc.markRead(peerHex);
+            })
+            .catch(() => {
+                setRefreshError(true);
+            });
         return () => unsub?.();
     }, [refresh, peerHex, peerValid]);
 
@@ -219,6 +232,15 @@ export default function DmThreadScreen() {
                     <Text style={[type.name, { color: colors.buttonTextColor }]}>Delete (this device only)</Text>
                 </Pressable>
             </View>
+
+            {refreshError ? (
+                <View style={[styles.requestBar, { borderBottomColor: colors.borderColor }]}>
+                    <Text style={[type.meta, { color: colors.textMuted }]}>Could not load conversation.</Text>
+                    <Pressable onPress={refresh}>
+                        <Text style={[type.meta, { color: colors.accentText }]}>Retry</Text>
+                    </Pressable>
+                </View>
+            ) : null}
 
             <FlatList
                 ref={listRef}

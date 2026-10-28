@@ -26,28 +26,34 @@ export default function MessagesTab() {
     const [refreshError, setRefreshError] = useState(false);
 
     const refresh = useCallback(() => {
-        void getDmService().then(async svc => {
-            try {
-                const nextInbox = await svc.listInbox();
-                const nextRequests = await svc.listRequests();
-                const nextBlocked = await svc.listBlocked();
-                const convs = [...nextInbox, ...nextRequests];
-                // Previews used to load one conversation at a time (each a
-                // potential decrypt); one parallel batch instead.
-                const previewValues = await Promise.all(convs.map(c => svc.previewFor(c.peerHex)));
-                const nextPreviews: Record<string, string | null> = {};
-                convs.forEach((c, i) => {
-                    nextPreviews[c.peerHex] = previewValues[i];
-                });
-                setInbox(nextInbox);
-                setRequests(nextRequests);
-                setBlocked(nextBlocked);
-                setPreviews(nextPreviews);
-                setRefreshError(false);
-            } catch {
+        void getDmService()
+            .then(async svc => {
+                try {
+                    const nextInbox = await svc.listInbox();
+                    const nextRequests = await svc.listRequests();
+                    const nextBlocked = await svc.listBlocked();
+                    const convs = [...nextInbox, ...nextRequests];
+                    // Previews used to load one conversation at a time (each a
+                    // potential decrypt); one parallel batch instead.
+                    const previewValues = await Promise.all(convs.map(c => svc.previewFor(c.peerHex)));
+                    const nextPreviews: Record<string, string | null> = {};
+                    convs.forEach((c, i) => {
+                        nextPreviews[c.peerHex] = previewValues[i];
+                    });
+                    setInbox(nextInbox);
+                    setRequests(nextRequests);
+                    setBlocked(nextBlocked);
+                    setPreviews(nextPreviews);
+                    setRefreshError(false);
+                } catch {
+                    setRefreshError(true);
+                }
+            })
+            .catch(() => {
+                // A getDmService rejection used to bypass the inner catch
+                // entirely and leave stale lists with no retry affordance.
                 setRefreshError(true);
-            }
-        });
+            });
     }, []);
 
     useFocusEffect(refresh);
