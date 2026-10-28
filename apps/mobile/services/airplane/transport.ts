@@ -33,8 +33,10 @@ import { addBreadcrumb } from '../../src/sentry';
 import { GattBlePort, defaultBleDeps, type BleNativeDeps } from './ble/gatt';
 import { ensureBlePermissions, checkBlePermissions, requestBlePermissions } from './ble/permissions';
 import {
+  recordAdvertiseStopped,
   recordDedupDrop,
   recordMessage,
+  recordScanStopped,
   setDiagnosticsAdapterState,
   type DiagnosticsMessageAttempt,
 } from './diagnostics';
@@ -125,6 +127,10 @@ let bleScanUnsub: (() => void) | null = null;
  */
 export type BleRadioState = 'starting' | 'on' | 'permission-blocked' | 'unavailable';
 let bleRadioState: BleRadioState = 'starting';
+/** True once the radio has been up this launch. Guards foreground
+ * re-validation: a radio that never came up is the priming UI's job, not
+ * an automatic bring-up on every foreground. */
+let radioWasOn = false;
 
 const SYNC_INTERVAL_MS = 60_000; // re-check World status every minute when online
 
@@ -248,6 +254,67 @@ async function runSync(): Promise<void> {
   }
 }
 
+/** Subscribe the transport to native adapter-state events from the port. */
+function registerAdapterStateListener(): void {
+  const port = blePort?.port as GattBlePort | null | undefined;
+  if (!port || typeof port.onAdapterState !== 'function') return;
+  port.onAdapterState((state) => {
+    if (state === 'off') {
+      // Powered-off: the one-time bring-up mirror is now wrong. Set
+      // unavailable plus stopped events; powered-on below re-runs bring-up.
+      if (bleRadioState === 'on') {
+        recordScanStopped();
+        recordAdvertiseStopped();
+        bleRadioState = 'unavailable';
+        syncDiagnosticsAdapterState();
+      }
+    } else if (state === 'on' && radioWasOn && bleRadioState !== 'on') {
+      void revalidateBleRadio();
+    }
+  });
+}
+
+/**
+ * Re-validate the radio on foreground (AppState active) and on
+ * adapter-powered-on. Guarded: runs only when the radio was previously on
+ * (or is currently on, for the revocation check); a radio that never came
+ * up stays with the priming UI. When the radio is on, a missing grant or
+ * a powered-off adapter reclassifies it; when it is not on, a live adapter
+ * plus grants re-runs bring-up. Never throws.
+ */
+export async function revalidateBleRadio(): Promise<void> {
+  if (!hybrid || !blePort) return;
+  if (bleRadioState === 'starting') return;
+  if (!radioWasOn && bleRadioState !== 'on') return;
+  try {
+    const port = blePort.port as GattBlePort;
+    const adapterState = typeof port.checkAdapterState === 'function' ? await port.checkAdapterState() : null;
+    if (adapterState === 'off') {
+      if (bleRadioState === 'on') {
+        recordScanStopped();
+        recordAdvertiseStopped();
+      }
+      bleRadioState = 'unavailable';
+      syncDiagnosticsAdapterState();
+      return;
+    }
+    if (bleRadioState !== 'on') {
+      const publicKey = await getDevicePublicKey();
+      await tearDownBleRadio();
+      await bringUpBleRadio(toHex(publicKey));
+      bleRadioState = 'on';
+      radioWasOn = true;
+      syncDiagnosticsAdapterState();
+    }
+  } catch {
+    // A failed revalidation leaves the radio unavailable, not wedged.
+    if (bleRadioState !== 'on') {
+      bleRadioState = 'unavailable';
+      syncDiagnosticsAdapterState();
+    }
+  }
+}
+
 /**
  * Start the hybrid transport. Idempotent. Call once at app launch.
  * BLE runs always; Nostr follows connectivity.
@@ -260,6 +327,7 @@ export async function startTransport(): Promise<void> {
   if (hybrid) return;
 
   blePort = makeBlePort();
+  registerAdapterStateListener();
   // BLE ingress verifies signatures, matching the Nostr path (T11 §23.6):
   // an unsigned/tampered event from a mesh peer never reaches the store.
   const ble = new BleTransport(blePort.port, {
@@ -337,6 +405,7 @@ export async function startTransport(): Promise<void> {
       const publicKey = await getDevicePublicKey();
       await bringUpBleRadio(toHex(publicKey));
       bleRadioState = 'on';
+      radioWasOn = true;
     } catch {
       // R3: do not conflate a permission loss between the check and the
       // bring-up (or a permanently denied grant) with a dead radio.
@@ -465,6 +534,7 @@ export async function enableBleRadio(): Promise<boolean> {
     const publicKey = await getDevicePublicKey();
     await bringUpBleRadio(toHex(publicKey));
     bleRadioState = 'on';
+    radioWasOn = true;
     syncDiagnosticsAdapterState();
     return true;
   } catch {
@@ -569,6 +639,7 @@ export async function stopTransport(): Promise<void> {
   blePort = null;
   hybrid = null;
   sync = null;
+  radioWasOn = false;
   bleRadioState = 'unavailable';
   syncDiagnosticsAdapterState();
 }

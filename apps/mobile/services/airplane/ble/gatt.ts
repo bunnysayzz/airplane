@@ -100,6 +100,15 @@ export interface CentralAdapter {
   startNotification(id: string, serviceUuid: string, charUuid: string): Promise<void>;
   onNotification(cb: (ev: { id: string; value: Uint8Array }) => void): () => void;
   onDisconnect(cb: (id: string) => void): () => void;
+  /**
+   * Adapter-state events, when the native library exposes them
+   * (react-native-ble-manager 12.6.0: onDidUpdateState, states 'on' /
+   * 'off' / 'unsupported' / 'unauthorized'). Absent on older shapes; the
+   * transport then falls back to AppState-active re-validation.
+   */
+  onState?(cb: (state: string) => void): () => void;
+  /** Current adapter state via checkState, or null when unavailable. */
+  checkState?(): Promise<string | null>;
 }
 
 /** Peripheral-role native surface (react-native-multi-ble-peripheral shaped). */
@@ -220,6 +229,8 @@ export class GattBlePort implements TransportPort {
   private peripheral: PeripheralAdapter | null = null;
   private readonly peripheralUnsubs: (() => void)[] = [];
   private centralUnsubs: (() => void)[] = [];
+  private readonly adapterStateSubs = new Set<(state: 'on' | 'off') => void>();
+  private adapterStateUnsub: (() => void) | null = null;
 
   constructor(private readonly deps: BleNativeDeps) {}
 
@@ -340,6 +351,27 @@ export class GattBlePort implements TransportPort {
     };
   }
 
+  /**
+   * Subscribe to adapter-state changes ('on' / 'off'). The port forwards
+   * native state events; the transport decides what a transition means
+   * (powered-off reclassifies the radio, powered-on re-runs bring-up).
+   */
+  onAdapterState(cb: (state: 'on' | 'off') => void): () => void {
+    this.adapterStateSubs.add(cb);
+    return () => {
+      this.adapterStateSubs.delete(cb);
+    };
+  }
+
+  /** Current adapter state when the central library exposes checkState, else null. Never throws. */
+  async checkAdapterState(): Promise<string | null> {
+    try {
+      return (await this.deps.central?.checkState?.()) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   private async ensureCentral(): Promise<void> {
     const central = this.deps.central;
     if (!central) return; // scan stays inert; unsub still works
@@ -360,6 +392,19 @@ export class GattBlePort implements TransportPort {
         );
         this.centralUnsubs.push(...registeredInThisCall);
         this.centralStarted = true;
+        if (central.onState && !this.adapterStateUnsub) {
+          this.adapterStateUnsub = central.onState((state) => {
+            const normalized = state === 'on' ? 'on' : state === 'off' ? 'off' : null;
+            if (!normalized) return;
+            for (const cb of this.adapterStateSubs) {
+              try {
+                cb(normalized);
+              } catch {
+                // subscriber errors must not break state handling
+              }
+            }
+          });
+        }
       }
       await withBleTimeout(central.scan(), BLE_TIMEOUT_MS.scan, 'central scan');
     } catch (err) {
@@ -368,6 +413,8 @@ export class GattBlePort implements TransportPort {
       for (const u of [...new Set([...registeredInThisCall, ...this.centralUnsubs])]) uSafe(u);
       this.centralUnsubs = [];
       this.centralStarted = false;
+      uSafe(this.adapterStateUnsub);
+      this.adapterStateUnsub = null;
       recordScanFailure(err instanceof Error ? err.message : String(err));
       throw err;
     }
@@ -381,6 +428,8 @@ export class GattBlePort implements TransportPort {
         }
       }
       this.centralStarted = false;
+      uSafe(this.adapterStateUnsub);
+      this.adapterStateUnsub = null;
     };
   }
 
@@ -744,6 +793,8 @@ export class GattBlePort implements TransportPort {
     await this.deps.central?.stopScan().catch(() => {});
     for (const u of this.centralUnsubs.splice(0)) uSafe(u);
     this.centralStarted = false;
+    uSafe(this.adapterStateUnsub);
+    this.adapterStateUnsub = null;
     for (const key of [...this.conns.keys()]) {
       const conn = this.conns.get(key);
       this.dropConn(key);
@@ -885,6 +936,40 @@ function loadCentralAdapter(): CentralAdapter | null {
           if (periph) cb(String(periph));
         });
         return () => sub.remove();
+      },
+      // Adapter state (ble-manager 12.6.0): the class API exposes
+      // onDidUpdateState with { state: BleState } ('on' / 'off' /
+      // 'unsupported' / ...). Prefer it; fall back to the legacy
+      // 'BleManagerDidUpdateState' emitter event for older shapes.
+      onState: (cb) => {
+        const mgrAny = mgr as unknown as {
+          onDidUpdateState?: (cb: (ev: { state?: unknown }) => void) => { remove: () => void };
+          checkState?: () => Promise<unknown>;
+        };
+        if (typeof mgrAny.onDidUpdateState === 'function') {
+          const sub = mgrAny.onDidUpdateState((ev) => cb(String(ev?.state ?? '')));
+          return () => {
+            try {
+              sub.remove();
+            } catch {
+              // ignore
+            }
+          };
+        }
+        const sub = emitter.addListener('BleManagerDidUpdateState', (e: unknown) => {
+          cb(String((e as { state?: unknown })?.state ?? ''));
+        });
+        return () => sub.remove();
+      },
+      checkState: async () => {
+        const mgrAny = mgr as unknown as { checkState?: () => Promise<unknown> };
+        if (typeof mgrAny.checkState !== 'function') return null;
+        try {
+          const state = await mgrAny.checkState();
+          return typeof state === 'string' ? state : null;
+        } catch {
+          return null;
+        }
       },
     };
   } catch {

@@ -7,6 +7,7 @@ import { I18nProvider, useI18n } from '../src/i18n/i18nContext';
 import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
 import { startTransport, stopTransport } from '../services/airplane';
+import { revalidateBleRadio } from '../services/airplane/transport';
 import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
 import {
   recordDiagnosticsLogAppState,
@@ -67,6 +68,10 @@ export default function RootLayout() {
         void startDiagnosticsLogFile().catch(() => {});
         const appStateSub = AppState.addEventListener('change', (state) => {
           recordDiagnosticsLogAppState(state);
+          // Foreground re-validation: a radio toggled off, or an adapter
+          // lost while backgrounded, must not keep claiming to be on.
+          // revalidateBleRadio itself guards to radios that were on.
+          if (state === 'active') void revalidateBleRadio().catch(() => {});
         });
         // Start hybrid transport (BLE always, Nostr when online) AFTER first
         // paint so nothing blocks the UI thread during launch. Failures are

@@ -55,6 +55,8 @@ class FakeCentral implements CentralAdapter {
   failConnect = new Set<string>();
   failStart = false;
   failWrite = false;
+  stateCb: ((state: string) => void) | null = null;
+  adapterState = 'on';
   listenerRegistrations = 0;
   identHex: string = PEER_HEX;
 
@@ -110,6 +112,15 @@ class FakeCentral implements CentralAdapter {
     return () => {
       this.disconnectCb = null;
     };
+  }
+  onState(cb: (state: string) => void): () => void {
+    this.stateCb = cb;
+    return () => {
+      this.stateCb = null;
+    };
+  }
+  async checkState(): Promise<string | null> {
+    return this.adapterState;
   }
 
   /** Reassemble what was written to a characteristic into datagrams. */
@@ -831,6 +842,23 @@ describe('auto-connect bounded retry (audit P1-19)', () => {
     central.failConnect.clear();
     await new Promise((r) => setTimeout(r, 2200));
     expect(port.peerCount).toBe(1);
+    await port.close();
+  });
+});
+
+describe('adapter-state subscription (audit P1-14)', () => {
+  test('native state events reach port subscribers and checkAdapterState reports the state', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    const states: string[] = [];
+    port.onAdapterState((state) => states.push(state));
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    expect(await port.checkAdapterState()).toBe('on');
+    central.stateCb!('off');
+    central.stateCb!('on');
+    central.stateCb!('unsupported'); // ignored: only on/off are forwarded
+    expect(states).toEqual(['off', 'on']);
     await port.close();
   });
 });
