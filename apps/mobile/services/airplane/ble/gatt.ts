@@ -408,6 +408,9 @@ export class GattBlePort implements TransportPort {
     if (!this.ownPeerId) throw new Error('ble: advertise() must run before connect');
     if (this.conns.size >= MAX_BLE_PEERS) throw new Error('ble: peer limit reached');
     await withBleTimeout(central.connect(bleId), BLE_TIMEOUT_MS.connect, 'central connect');
+    // Set only once a connection is registered in this call, so the catch
+    // below drops exactly the stale registration this call created.
+    let registeredKey: string | null = null;
     try {
       await withBleTimeout(central.retrieveServices(bleId), BLE_TIMEOUT_MS.retrieveServices, 'retrieveServices');
       let mtu = ATT_DEFAULT_MTU;
@@ -420,6 +423,12 @@ export class GattBlePort implements TransportPort {
       const identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
       const peerId = new TextDecoder().decode(identRaw);
       if (!HEX64_RE.test(peerId)) throw new Error('ble: peer IDENT malformed');
+      // Bind the claimed identity to the discovery hint: the IDENT pubkey
+      // must carry the advertised tag, or this is a different peer (or a
+      // spoofed IDENT) and the connect must fail, not register.
+      if (toHex(peerTagOf(fromHex(peerId))) !== toHex(tag)) {
+        throw new Error('ble: peer IDENT does not match advertised tag');
+      }
       // Register before the hello so any inbound traffic is attributed.
       // Keyed by the full peerId (known from IDENT) - not the provisional
       // tag key - so send()/disconnect() resolve by peerId.
@@ -432,6 +441,7 @@ export class GattBlePort implements TransportPort {
         inbound: new DatagramReassembler(),
         partialOpen: false,
       });
+      registeredKey = peerId;
       // Announce ourselves: the peripheral side learns our identity + MTU.
       const hello = encodeHello(fromHex(this.ownPeerId), mtu);
       for (const chunk of chunkBytes(hello, mtu - ATT_OVERHEAD)) {
@@ -454,6 +464,11 @@ export class GattBlePort implements TransportPort {
       }
     } catch (err) {
       await central.disconnect(bleId).catch(() => {});
+      // Previously the native disconnect ran but the registration stayed:
+      // a dead peer kept counting as connected and publish fan-out kept
+      // targeting it, with no disconnected event. Drop it when this call
+      // registered it; the native disconnect above is kept.
+      if (registeredKey !== null) this.dropConn(registeredKey);
       throw err instanceof Error ? err : new Error(`ble: connect failed: ${String(err)}`);
     }
   }

@@ -53,6 +53,7 @@ class FakeCentral implements CentralAdapter {
   mtu = 512;
   failConnect = new Set<string>();
   failStart = false;
+  failWrite = false;
   listenerRegistrations = 0;
   identHex: string = PEER_HEX;
 
@@ -88,6 +89,7 @@ class FakeCentral implements CentralAdapter {
     return ascii(this.identHex);
   }
   async write(id: string, _svc: string, char: string, chunk: Uint8Array): Promise<void> {
+    if (this.failWrite) throw new Error('write refused');
     this.writes.push({ id, char, chunk });
   }
   async startNotification(id: string): Promise<void> {
@@ -694,6 +696,46 @@ describe('ensureCentral failure cleanup (audit P1-15)', () => {
     await tick(50);
     expect(central.connects).toEqual(['ble-1']);
     expect(seen).toEqual([`tag:${toHex(PEER_TAG)}`, PEER_HEX]);
+    await port.close();
+  });
+});
+
+describe('connectCentral cleanup + IDENT tag binding (audit P1-16)', () => {
+  test('a hello-write failure after registration drops the conn, it does not stay connected', async () => {
+    const { deps, central } = makeDeps();
+    central.failWrite = true;
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(0);
+    expect(port.connectedPeerIds()).toEqual([]);
+    expect(central.disconnects).toContain('ble-1');
+    // The bleId is free again: a later discovery can connect.
+    central.failWrite = false;
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(1);
+    await port.close();
+  });
+
+  test('an IDENT pubkey whose tag differs from the advertised tag fails the connect', async () => {
+    const { deps, central } = makeDeps();
+    const mismatchPub = new Uint8Array(32).fill(0x0c);
+    central.identHex = toHex(mismatchPub);
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(0);
+    expect(port.connectedPeerIds()).toEqual([]);
+    // With the matching IDENT the same bleId connects.
+    central.identHex = PEER_HEX;
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(1);
     await port.close();
   });
 });
