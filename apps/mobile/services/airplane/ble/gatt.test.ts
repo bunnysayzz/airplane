@@ -931,3 +931,16 @@ describe('discovered peer pruning and cap (audit F-P2-1)', () => {
     await port.close();
   });
 });
+
+describe('scan failure callback (audit F-P2-5)', () => {
+  test('ensureCentral failure notifies the transport callback with the failure code', async () => {
+    const codes: string[] = [];
+    const { deps, central } = makeDeps({ onScanFailure: (code) => codes.push(code) });
+    central.failStart = true;
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await expect(port.scan(() => {})).rejects.toThrow();
+    expect(codes).toEqual(['central start refused']);
+    await port.close();
+  });
+});

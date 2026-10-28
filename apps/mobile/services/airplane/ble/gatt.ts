@@ -132,6 +132,12 @@ export interface BleNativeDeps {
    * the OS dialog and must only run from a user action.
    */
   checkPermissions?: () => Promise<boolean>;
+  /**
+   * Mid-session scan-failure callback for the transport: the port records
+   * the failure, the transport reclassifies the radio state by re-checking
+   * permissions at that moment. Absent in tests and older callers.
+   */
+  onScanFailure?: (code: string) => void;
 }
 
 type Role = 'central' | 'peripheral';
@@ -435,7 +441,9 @@ export class GattBlePort implements TransportPort {
       this.centralStarted = false;
       uSafe(this.adapterStateUnsub);
       this.adapterStateUnsub = null;
-      recordScanFailure(err instanceof Error ? err.message : String(err));
+      const code = err instanceof Error ? err.message : String(err);
+      recordScanFailure(code);
+      this.deps.onScanFailure?.(code);
       throw err;
     }
     recordScanStarted();

@@ -18,6 +18,7 @@ import {
   recordPeerDisconnected,
   recordPeerResolved,
   recordPeerSeen,
+  recordScanFailure,
   recordScanStarted,
   recordScanStopped,
   resetDiagnosticsForTests,
@@ -76,6 +77,15 @@ describe('diagnostics collector', () => {
     recordAdvertiseSuccess(12);
     recordAdvertiseStopped();
     expect(getDiagnosticsSnapshot().advertising.state).toBe('stopped');
+  });
+
+  test('a scan failure stops the scanning state instead of only logging', () => {
+    recordScanStarted();
+    expect(getDiagnosticsSnapshot().scanning.state).toBe('started');
+    recordScanFailure('native scan died');
+    const snap = getDiagnosticsSnapshot();
+    expect(snap.scanning.state).toBe('stopped');
+    expect(snap.scanning.lastFailure).toBe('native scan died');
   });
 
   test('scan start count prunes starts older than 30 seconds', () => {

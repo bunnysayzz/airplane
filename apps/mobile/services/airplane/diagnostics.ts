@@ -291,6 +291,11 @@ export function recordScanStopped(): void {
 
 export function recordScanFailure(code: string): void {
   scanningLastFailure = code;
+  // A failed scan is a stopped scan: previously the failure was only
+  // logged while scanningState stayed started, so Diagnostics kept
+  // showing a live scan on a dead radio. The transport reclassifies the
+  // adapter state separately (see the port onScanFailure callback).
+  scanningState = 'stopped';
   logEvent('scan', `failed ${code}`);
   notifyThrottled();
 }

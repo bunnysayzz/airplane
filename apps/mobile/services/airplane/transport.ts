@@ -77,10 +77,34 @@ function getNetInfo() {
  * throw descriptive Errors or stay inert; the app keeps running Nostr-only).
  * RADIO-UNVERIFIED - see services/airplane/ble/gatt.ts.
  */
+/**
+ * Mid-session scan failure: reclassify the radio by re-checking
+ * permissions at that moment (permission-blocked when grants vanished,
+ * unavailable otherwise). Runs only while the radio reports on; bring-up
+ * failures are classified by the start path instead.
+ */
+async function handleScanFailure(_code: string): Promise<void> {
+  if (bleRadioState !== 'on') return;
+  try {
+    if (!(await checkBlePermissions().catch(() => false))) {
+      await tearDownBleRadio();
+      bleRadioState = 'permission-blocked';
+    } else {
+      bleRadioState = 'unavailable';
+    }
+  } catch {
+    bleRadioState = 'unavailable';
+  }
+  syncDiagnosticsAdapterState();
+}
+
 function makeBlePort(): { port: TransportPort; close: () => Promise<void> } {
   let deps: BleNativeDeps;
   try {
     deps = defaultBleDeps(ensureBlePermissions, checkBlePermissions);
+    deps.onScanFailure = (code) => {
+      void handleScanFailure(code);
+    };
   } catch {
     // Even building the deps failed: fall back to a fully inert port.
     return { port: new NoopBlePort(), close: async () => {} };
