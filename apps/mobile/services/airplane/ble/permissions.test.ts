@@ -140,3 +140,15 @@ describe('checkBlePermissionStates (R3 location fix)', () => {
     expect(checked).not.toContain('android.permission.ACCESS_COARSE_LOCATION');
   });
 });
+
+describe('checkBlePermissionStates pre-31 (audit F-P3-6)', () => {
+  test('API <= 30 reports scan/advertise/connect as granted (install-time)', async () => {
+    RN.__resetReactNativeMock();
+    RN.Platform.OS = 'android';
+    RN.Platform.Version = 30;
+    const report = await checkBlePermissionStates();
+    expect(report.scan).toBe('granted');
+    expect(report.advertise).toBe('granted');
+    expect(report.connect).toBe('granted');
+  });
+});
