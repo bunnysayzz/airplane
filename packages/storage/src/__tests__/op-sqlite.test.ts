@@ -198,23 +198,48 @@ describe('migrate', () => {
     expect(await store.isWorldConfirmed(bytesToHex(e.id))).toBe(true);
   });
 
-  test('failed migration rolls back and records no version row', async () => {
+  test('missing version row resumes gracefully: tables exist, migrate re-records', async () => {
     const db = new DatabaseSync(':memory:');
     openDbs.push(db);
     const port = makePort(db, false);
     await OpSqliteStore.migrate(port); // v5, healthy
-    // Force a re-migration of 004 by deleting its version row (and the
-    // later 005 row, so MAX(version) drops back to 3 and the runner
-    // re-enters the upgrade path instead of returning early): the
-    // CREATE TABLE must fail and roll back.
+    // Simulate a kill after the 004 DDL committed but before its version
+    // row landed: drop the 004 and 005 rows so MAX(version) drops to 3.
+    // Re-running migrate must succeed (IF NOT EXISTS) and re-record both.
     await port.exec(`DELETE FROM schema_version WHERE version = 4`);
     await port.exec(`DELETE FROM schema_version WHERE version = 5`);
-    await expect(OpSqliteStore.migrate(port)).rejects.toThrow(/already exists/i);
-    expect(await schemaVersion(port)).toEqual([1, 2, 3]); // 004 not recorded
-    // Earlier migrations' data still intact.
+    await expect(OpSqliteStore.migrate(port)).resolves.toBeUndefined();
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5]);
     const store = new OpSqliteStore(port);
     const e = makeEvent({ seed: 103 });
     await expect(store.getEvent(bytesToHex(e.id))).resolves.toBeNull();
+  });
+
+  test('kill between 002 DDL and version row resumes without losing data', async () => {
+    const db = new DatabaseSync(':memory:');
+    openDbs.push(db);
+    const port = makePort(db, false);
+    // v1 install: 001 applied, version row 1 recorded, 002 DDL applied
+    // but its version row never landed, with a confirmed id already stored.
+    for (const stmt of splitStatements(MIGRATION_001)) {
+      await port.exec(stmt);
+    }
+    await port.exec(
+      `CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`,
+    );
+    await port.exec(`INSERT INTO schema_version (version, applied_at) VALUES (1, ?)`, [NOW]);
+    for (const stmt of splitStatements(MIGRATION_002)) {
+      await port.exec(stmt);
+    }
+    const e = makeEvent({ seed: 104 });
+    await port.exec(`INSERT INTO world_confirmed (event_id, confirmed_at) VALUES (?, ?)`, [
+      e.id,
+      NOW,
+    ]);
+    await expect(OpSqliteStore.migrate(port)).resolves.toBeUndefined();
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5]);
+    const store = new OpSqliteStore(port);
+    expect(await store.isWorldConfirmed(bytesToHex(e.id))).toBe(true);
   });
 
   test('failed 003 migration rolls back and records no version row', async () => {

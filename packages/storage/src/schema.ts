@@ -77,11 +77,11 @@ CREATE INDEX idx_logs_ts ON logs(ts);
  * Confirmation is sticky - there is no un-confirm path by design.
  */
 export const MIGRATION_002 = `
-CREATE TABLE world_confirmed(
+CREATE TABLE IF NOT EXISTS world_confirmed(
   event_id     BLOB PRIMARY KEY,
   confirmed_at INTEGER NOT NULL
 );
-CREATE INDEX idx_world_confirmed_at ON world_confirmed(confirmed_at);
+CREATE INDEX IF NOT EXISTS idx_world_confirmed_at ON world_confirmed(confirmed_at);
 `;
 
 /**
@@ -117,7 +117,7 @@ CREATE INDEX idx_tombstones_target ON tombstones(target_id);
  * Stars are display-only; no ranking input lives here.
  */
 export const MIGRATION_004 = `
-CREATE TABLE star_events(
+CREATE TABLE IF NOT EXISTS star_events(
   event_id   BLOB PRIMARY KEY,
   pubkey     BLOB NOT NULL,
   target_id  BLOB NOT NULL,
@@ -127,8 +127,8 @@ CREATE TABLE star_events(
   content    TEXT NOT NULL,
   sig        BLOB NOT NULL
 );
-CREATE INDEX idx_star_events_target ON star_events(target_id, created_at);
-CREATE TABLE star_known_posts(
+CREATE INDEX IF NOT EXISTS idx_star_events_target ON star_events(target_id, created_at);
+CREATE TABLE IF NOT EXISTS star_known_posts(
   post_id BLOB PRIMARY KEY
 );
 `;

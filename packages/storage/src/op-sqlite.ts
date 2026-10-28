@@ -151,9 +151,11 @@ export class OpSqliteStore implements StorePort {
    * - v == 1: apply 002, 003, 004, 005. v == 2: apply 003, 004, 005.
    *   v == 3: apply 004, 005.
    * - Each numbered migration runs inside a transaction (BEGIN IMMEDIATE;
-   *   COMMIT; ROLLBACK + rethrow on error); the version row is recorded
-   *   only after the migration commits, so a failed upgrade never wipes
-   *   user data and can be retried.
+   *   COMMIT; ROLLBACK + rethrow on error) together with its version row,
+   *   so a kill between the DDL commit and the version insert cannot
+   *   brick the store: re-running a migration whose tables already exist
+   *   is safe (IF NOT EXISTS) and records the missing version row.
+   *   A failed upgrade records no version row and can be retried.
    */
   static async migrate(db: DatabasePort): Promise<void> {
     await db.exec(
@@ -171,15 +173,19 @@ export class OpSqliteStore implements StorePort {
       for (const s of stmts.filter((stmt) => /^pragma\b/i.test(stmt))) {
         await db.exec(s);
       }
+      // The version row lives inside the same transaction as the DDL, so
+      // a kill mid-migration leaves either neither or both on disk. A
+      // later migrate then resumes instead of re-applying DDL over
+      // tables that already exist (002/004 are IF NOT EXISTS as well).
       await runTransaction(db, async () => {
         for (const s of stmts.filter((stmt) => !/^pragma\b/i.test(stmt))) {
           await db.exec(s);
         }
+        await db.exec(
+          `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
+          [version, Math.floor(Date.now() / 1000)],
+        );
       });
-      await db.exec(
-        `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
-        [version, Math.floor(Date.now() / 1000)],
-      );
     };
 
     if (v >= 5) return;
