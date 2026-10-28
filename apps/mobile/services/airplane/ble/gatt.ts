@@ -150,6 +150,45 @@ function isProvisionalKey(key: string): boolean {
  * R2 run's "null BluetoothGattServer addService" case); those must not
  * be recorded verbatim, or diagnostics shows a meaningless "null".
  */
+/**
+ * Per-operation native deadlines (ms). No BLE operation has a native
+ * guarantee to settle: a radio that is off or wedged can leave a promise
+ * pending forever, which used to hang advertise, connect, send, and
+ * transport startup with no fallback. Every native await in this file
+ * goes through withBleTimeout; on timeout the caller cleans up (disconnect,
+ * drop the registered conn) and throws, so the transport falls back to
+ * Nostr-only. No new dependency.
+ */
+export const BLE_TIMEOUT_MS = {
+  ready: 10_000,
+  start: 10_000,
+  scan: 10_000,
+  connect: 10_000,
+  retrieveServices: 10_000,
+  requestMtu: 10_000,
+  read: 10_000,
+  write: 5_000,
+  startNotification: 10_000,
+  advertise: 15_000,
+  notify: 5_000,
+} as const;
+
+/**
+ * Race a native promise against a deadline. Rejects with a stage-tagged
+ * error on timeout. A late native rejection after the race settles is
+ * swallowed by the attached no-op handler so it is never unhandled.
+ */
+export function withBleTimeout<T>(promise: Promise<T>, timeoutMs: number, stage: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<T>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`ble: ${stage} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  void promise.catch(() => {});
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== null) clearTimeout(timer);
+  });
+}
+
 export function describeAdvertiseError(err: unknown): string {
   if (err instanceof Error && err.message.trim() !== '') return `ble: advertise failed: ${err.message}`;
   if (typeof err === 'string' && err.trim() !== '' && err !== 'null' && err !== 'undefined') {
@@ -198,8 +237,8 @@ export class GattBlePort implements TransportPort {
     const tag = peerTagOf(fromHex(peerId));
     let adapter: PeripheralAdapter | null = null;
     try {
-      adapter = await factory();
-      await adapter.startAdvertising(tag, peerId);
+      adapter = await withBleTimeout(factory(), BLE_TIMEOUT_MS.ready, 'peripheral ready');
+      await withBleTimeout(adapter.startAdvertising(tag, peerId), BLE_TIMEOUT_MS.advertise, 'advertise');
     } catch (err) {
       await adapter?.destroy().catch(() => {});
       // R3: the R2 device run surfaced this failure as a bare "null"
@@ -278,7 +317,7 @@ export class GattBlePort implements TransportPort {
     const central = this.deps.central;
     if (!central) return; // scan stays inert; unsub still works
     if (!this.centralStarted) {
-      await central.start();
+      await withBleTimeout(central.start(), BLE_TIMEOUT_MS.start, 'central start');
       this.centralStarted = true;
       this.centralUnsubs.push(
         central.onDiscover((info) => this.onDiscover(info)),
@@ -287,7 +326,7 @@ export class GattBlePort implements TransportPort {
       );
     }
     try {
-      await central.scan();
+      await withBleTimeout(central.scan(), BLE_TIMEOUT_MS.scan, 'central scan');
     } catch (err) {
       recordScanFailure(err instanceof Error ? err.message : String(err));
       throw err;
@@ -352,17 +391,17 @@ export class GattBlePort implements TransportPort {
     if (this.bleIndex.has(bleId)) return;
     if (!this.ownPeerId) throw new Error('ble: advertise() must run before connect');
     if (this.conns.size >= MAX_BLE_PEERS) throw new Error('ble: peer limit reached');
-    await central.connect(bleId);
+    await withBleTimeout(central.connect(bleId), BLE_TIMEOUT_MS.connect, 'central connect');
     try {
-      await central.retrieveServices(bleId);
+      await withBleTimeout(central.retrieveServices(bleId), BLE_TIMEOUT_MS.retrieveServices, 'retrieveServices');
       let mtu = ATT_DEFAULT_MTU;
       try {
-        const negotiated = await central.requestMtu(bleId, ATT_REQUEST_MTU);
+        const negotiated = await withBleTimeout(central.requestMtu(bleId, ATT_REQUEST_MTU), BLE_TIMEOUT_MS.requestMtu, 'requestMtu');
         if (Number.isInteger(negotiated) && negotiated >= ATT_DEFAULT_MTU) mtu = negotiated;
       } catch {
         // keep default 23
       }
-      const identRaw = await central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID);
+      const identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
       const peerId = new TextDecoder().decode(identRaw);
       if (!HEX64_RE.test(peerId)) throw new Error('ble: peer IDENT malformed');
       // Register before the hello so any inbound traffic is attributed.
@@ -380,9 +419,9 @@ export class GattBlePort implements TransportPort {
       // Announce ourselves: the peripheral side learns our identity + MTU.
       const hello = encodeHello(fromHex(this.ownPeerId), mtu);
       for (const chunk of chunkBytes(hello, mtu - ATT_OVERHEAD)) {
-        await central.write(bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk);
+        await withBleTimeout(central.write(bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk), BLE_TIMEOUT_MS.write, 'hello write');
       }
-      await central.startNotification(bleId, MESH_SERVICE_UUID, MESH_TX_CHAR_UUID);
+      await withBleTimeout(central.startNotification(bleId, MESH_SERVICE_UUID, MESH_TX_CHAR_UUID), BLE_TIMEOUT_MS.startNotification, 'startNotification');
       // Subscribed to the peer TX characteristic: CCCD is on for this link.
       recordPeerConnected(peerId, mtu, true);
       // Surface the resolved identity through the scan channel, matching
@@ -431,7 +470,7 @@ export class GattBlePort implements TransportPort {
       const central = this.deps.central;
       if (!central) throw new Error('ble: central role unavailable');
       for (const chunk of chunkBytes(datagram, chunkSize)) {
-        await central.write(conn.bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk);
+        await withBleTimeout(central.write(conn.bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk), BLE_TIMEOUT_MS.write, 'frame write');
         recordFragmentsSent(peerId, 1);
       }
       recordPacketSent(peerId);
@@ -443,7 +482,7 @@ export class GattBlePort implements TransportPort {
     // limitation); non-target peers drop the frames at the mesh layer via
     // event-ID dedup. Bandwidth-inefficient, not incorrect.
     for (const chunk of chunkBytes(datagram, chunkSize)) {
-      await peripheral.notify(chunk);
+      await withBleTimeout(peripheral.notify(chunk), BLE_TIMEOUT_MS.notify, 'notify');
       recordFragmentsSent(peerId, 1);
     }
     recordPacketSent(peerId);
@@ -784,12 +823,16 @@ function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
   const PERM_WRITE = 0x10;
   return async (): Promise<PeripheralAdapter> => {
     const inst = new PeripheralClass(); // throws when the native module is not linked
-    await new Promise<void>((resolve, reject) => {
-      inst.once('ready', () => resolve());
-      inst.once('error', (err: unknown) =>
-        reject(new Error(describeAdvertiseError(err).replace('ble: advertise failed: ', 'ble: peripheral ready failed: '))),
-      );
-    });
+    await withBleTimeout(
+      new Promise<void>((resolve, reject) => {
+        inst.once('ready', () => resolve());
+        inst.once('error', (err: unknown) =>
+          reject(new Error(describeAdvertiseError(err).replace('ble: advertise failed: ', 'ble: peripheral ready failed: '))),
+        );
+      }),
+      BLE_TIMEOUT_MS.ready,
+      'peripheral ready',
+    );
     return {
       startAdvertising: async (tag, identHex) => {
         // R3: stage-tag every native step. The R2 run's failure was a
@@ -822,7 +865,7 @@ function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
         ];
         for (const [stage, run] of stages) {
           try {
-            await run();
+            await withBleTimeout(run(), BLE_TIMEOUT_MS.advertise, `advertise ${stage}`);
           } catch (err) {
             throw new Error(`ble: advertise failed at ${stage}: ${describeAdvertiseError(err).replace('ble: advertise failed: ', '')}`);
           }

@@ -10,6 +10,7 @@ import {
   GattBlePort,
   defaultBleDeps,
   describeAdvertiseError,
+  withBleTimeout,
   extractTag,
   type BleNativeDeps,
   type CentralAdapter,
@@ -643,5 +644,23 @@ describe('defaultBleDeps adapter delegation', () => {
     // The real multi-ble-peripheral module loads, but its native module is
     // absent in jest, so constructing throws -> factory rejects.
     await expect(deps.createPeripheral!()).rejects.toThrow();
+  });
+});
+
+describe('withBleTimeout (audit P1-13)', () => {
+  test('passes a settling value through', async () => {
+    await expect(withBleTimeout(Promise.resolve(7), 1000, 'test stage')).resolves.toBe(7);
+  });
+
+  test('rejects with a stage-tagged error when the native call never settles', async () => {
+    await expect(withBleTimeout(new Promise(() => {}), 10, 'central connect')).rejects.toThrow(
+      /central connect timed out/,
+    );
+  });
+
+  test('passes a native rejection through unchanged', async () => {
+    await expect(withBleTimeout(Promise.reject(new Error('native boom')), 1000, 'test stage')).rejects.toThrow(
+      'native boom',
+    );
   });
 });
