@@ -47,4 +47,4 @@ export {
   reshareViewFor,
 } from './reshares';
 export { getKv } from './kv';
-export { startTransport, stopTransport, publishViaTransport } from './transport';
+export { startTransport, stopTransport, publishViaTransport, pruneExpiredStore } from './transport';

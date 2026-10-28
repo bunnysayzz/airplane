@@ -30,7 +30,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus } from './transport';
+import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 import { __resetDeviceKeypairForTests } from './identity';
 import {
@@ -136,6 +136,19 @@ describe('transport manager', () => {
     // WorldSync traffic goes to the custom relay, not the defaults.
     expect(hybrid!.nostr.relayUrls).toEqual(['wss://custom.relay']);
     expect(FakeSocket.instances.map((s) => s.url)).toEqual(['wss://custom.relay']);
+  });
+
+  test('startTransport prunes expired posts at startup', async () => {
+    const store = getStore();
+    const expired = makeSignedEvent(); // created_at 1_700_000_000: long expired
+    const fresh = { ...makeSignedEvent(), id: new Uint8Array(32).fill(8), created_at: Math.floor(Date.now() / 1000) };
+    await store.saveEvent(expired);
+    await store.saveEvent(fresh);
+    expect(await store.getEvent('07'.repeat(32))).not.toBeNull();
+    await startTransport();
+    expect(await store.getEvent('07'.repeat(32))).toBeNull();
+    expect(await store.getEvent('08'.repeat(32))).not.toBeNull();
+    await expect(pruneExpiredStore()).resolves.toBeUndefined();
   });
 
   test('startTransport is idempotent - second call is a no-op', async () => {
