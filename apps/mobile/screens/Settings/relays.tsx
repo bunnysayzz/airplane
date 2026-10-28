@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Card, SectionLabel } from '../../components/ui';
@@ -43,9 +43,17 @@ const Relays: React.FC<RelaysProps> = ({ onBack }) => {
     return (
         <>
             <SettingsHeader title={t('settings.relaysTitle')} onBack={onBack} backLabel={t('appearance.back')} />
+            {/* F10: same keyboard rule as the DM thread: iOS gets a padding
+                avoiding view so the add row is never covered; on Android the
+                view is inert and the manifest's adjustResize mode lifts it.
+                The parent SafeAreaView is flex 1, so the avoiding view fills
+                the page. Persisting taps lets Add fire while the keyboard is
+                open instead of merely dismissing it. */}
+            <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
             <ScrollView
                 contentContainerStyle={[styles.content, { paddingBottom: tabBarClearance(insets.bottom) }]}
                 showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
             >
                 <Text style={[type.body, styles.lead]}>{t('settings.relaysLead')}</Text>
                 <Text style={[type.meta, styles.restartNote]}>{t('settings.relaysRestartNote')}</Text>
@@ -119,6 +127,7 @@ const Relays: React.FC<RelaysProps> = ({ onBack }) => {
                     </Pressable>
                 )}
             </ScrollView>
+            </KeyboardAvoidingView>
         </>
     );
 };

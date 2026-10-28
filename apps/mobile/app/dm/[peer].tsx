@@ -3,13 +3,15 @@
 // states Sending / Sent / Failed (Failed = tap to retry, never silently
 // dropped). No read receipts, in either direction. Delete is LOCAL ONLY and
 // the confirm copy says so. Requests landing here get Accept / Block / Ignore.
-import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow, DmThreadRow } from '@airplane/transport';
-import { DM_UNDECRYPTABLE_PLACEHOLDER } from '@airplane/transport';
 import { getDmService, dmPeerLabel, sendDm } from '../../services/airplane/dm';
+import { isNearBottom } from '../../src/lib/dmThread';
+import { DmBubble } from '../../components/DmBubble';
 import { useTheme } from '../../src/theme/themeContext';
 
 export default function DmThreadScreen() {
@@ -20,6 +22,31 @@ export default function DmThreadScreen() {
     const [thread, setThread] = useState<DmThreadRow[]>([]);
     const [conv, setConv] = useState<DmConversationRow | null>(null);
     const [draft, setDraft] = useState('');
+
+    // F4: the thread lands on the latest message and follows new arrivals,
+    // but only while the user is already near the bottom, so reading history
+    // is never yanked away. The list ref and the two refs below are the
+    // whole mechanism: onScroll tracks nearness, onContentSizeChange drives
+    // the scroll (content size changes exactly when messages arrive).
+    const listRef = useRef<FlatList<DmThreadRow>>(null);
+    const nearBottomRef = useRef(true);
+    const initialScrollDoneRef = useRef(false);
+    const handleListScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+        const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+        nearBottomRef.current = isNearBottom({
+            contentHeight: contentSize.height,
+            offsetY: contentOffset.y,
+            viewportHeight: layoutMeasurement.height,
+        });
+    }, []);
+    const handleListContentSizeChange = useCallback(() => {
+        if (!initialScrollDoneRef.current) {
+            initialScrollDoneRef.current = true;
+            listRef.current?.scrollToEnd({ animated: false });
+        } else if (nearBottomRef.current) {
+            listRef.current?.scrollToEnd({ animated: true });
+        }
+    }, []);
 
     const refresh = useCallback(() => {
         void getDmService().then(async svc => {
@@ -49,6 +76,24 @@ export default function DmThreadScreen() {
             .then(refresh)
             .catch((e: unknown) => Alert.alert('Could not send', e instanceof Error ? e.message : 'Unknown error'));
     };
+
+    // F5: stable retry + renderItem so keystrokes in the draft input do not
+    // re-render bubbles. The retry chain is unchanged from the previous
+    // inline handler (retry, flush outbox, refresh); only its identity is
+    // now stable, which is what makes the DmBubble memo comparison hold.
+    const handleRetry = useCallback(
+        (messageId: string) => {
+            void getDmService()
+                .then(svc => svc.retryMessage(peerHex, messageId))
+                .then(() => getDmService().then(svc => svc.flushOutbox()))
+                .then(refresh);
+        },
+        [peerHex, refresh],
+    );
+    const renderItem = useCallback(
+        ({ item }: { item: DmThreadRow }) => <DmBubble item={item} onRetry={handleRetry} />,
+        [handleRetry],
+    );
 
     // Returns true on success, false after showing an error: actions used
     // to fail silently (a bare act() rejection went nowhere), and Delete
@@ -83,8 +128,13 @@ export default function DmThreadScreen() {
 
     const isRequest = conv?.state === 'request';
 
+    // F10: the keyboard must never cover the input and Send button. iOS has
+    // no window resize, so a padding avoiding view lifts the send row; on
+    // Android the view is inert and the manifest's adjustResize window mode
+    // does the same job (no double adjustment). The avoiding view is the
+    // screen root, so no vertical offset is needed.
     return (
-        <View style={[styles.root, { backgroundColor: colors.background }]}>
+        <KeyboardAvoidingView style={[styles.root, { backgroundColor: colors.background }]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
             <View style={[styles.header, { borderBottomColor: colors.borderColor, paddingTop: insets.top + 16 }]}>
                 <Pressable onPress={() => router.back()}>
                     <Text style={[type.meta, { color: colors.accentText }]}>Back</Text>
@@ -141,30 +191,15 @@ export default function DmThreadScreen() {
             </View>
 
             <FlatList
+                ref={listRef}
                 data={thread}
                 keyExtractor={item => item.id}
                 contentContainerStyle={styles.list}
-                renderItem={({ item }) => (
-                    <View style={[styles.bubble, item.direction === 'out' ? styles.out : styles.in, { backgroundColor: item.direction === 'out' ? colors.accentSoft : colors.cardBackground }]}>
-                        <Text style={{ color: colors.textPrimary }}>{item.text ?? DM_UNDECRYPTABLE_PLACEHOLDER}</Text>
-                        {item.direction === 'out' ? (
-                            <Pressable
-                                onPress={() => {
-                                    if (item.status === 'Failed') {
-                                        void getDmService()
-                                            .then(svc => svc.retryMessage(peerHex, item.id))
-                                            .then(() => getDmService().then(svc => svc.flushOutbox()))
-                                            .then(refresh);
-                                    }
-                                }}
-                            >
-                                <Text style={[type.meta, { color: colors.textMuted }]}>
-                                    {item.status === 'Failed' ? 'Failed, tap to retry' : item.status}
-                                </Text>
-                            </Pressable>
-                        ) : null}
-                    </View>
-                )}
+                onScroll={handleListScroll}
+                scrollEventThrottle={100}
+                onContentSizeChange={handleListContentSizeChange}
+                renderItem={renderItem}
+                keyboardShouldPersistTaps="handled"
             />
 
             <View style={[styles.sendRow, { borderTopColor: colors.borderColor, paddingBottom: insets.bottom + 12 }]}>
@@ -180,7 +215,7 @@ export default function DmThreadScreen() {
                     <Text style={{ color: colors.buttonTextColor }}>Send</Text>
                 </Pressable>
             </View>
-        </View>
+        </KeyboardAvoidingView>
     );
 }
 
@@ -194,9 +229,6 @@ const styles = StyleSheet.create({
     actionButton: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 8, alignItems: 'center' },
     actionNeutral: { borderWidth: 1 },
     list: { padding: 16, gap: 8 },
-    bubble: { padding: 10, borderRadius: 12, maxWidth: '80%', gap: 2 },
-    out: { alignSelf: 'flex-end' },
-    in: { alignSelf: 'flex-start' },
     sendRow: { flexDirection: 'row', gap: 8, padding: 12, borderTopWidth: StyleSheet.hairlineWidth },
     input: { flex: 1, borderWidth: 1, borderRadius: 8, padding: 10, maxHeight: 120 },
     send: { borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
