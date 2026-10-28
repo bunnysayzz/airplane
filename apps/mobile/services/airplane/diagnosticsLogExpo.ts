@@ -35,7 +35,12 @@ function createExpoDiagnosticsLogPort(): DiagnosticsLogFilePort {
       return FileSystem.readAsStringAsync(uri);
     },
     write: async (content: string) => {
-      await FileSystem.writeAsStringAsync(uri, content);
+      // Atomic replace on the same volume: a kill mid-write leaves
+      // either the old file or the new file, never a truncation.
+      // The tmp name is constant, so no user input reaches the path.
+      const tmpUri = `${uri}.tmp`;
+      await FileSystem.writeAsStringAsync(tmpUri, content);
+      await FileSystem.moveAsync({ from: tmpUri, to: uri });
     },
   };
 }

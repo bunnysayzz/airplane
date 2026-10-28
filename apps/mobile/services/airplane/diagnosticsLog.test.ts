@@ -193,7 +193,9 @@ describe('diagnostics log restart survival', () => {
   });
 
   test('load and write status are visible for the device re-check', async () => {
-    const port = memoryPort('line-one\nline-two\nline-three\n');
+    const port = memoryPort(
+      '2026-10-27T00:00:00.000Z app started\n2026-10-27T00:00:01.000Z scan started\n2026-10-27T00:00:02.000Z adapter on\n',
+    );
     const writer = new DiagnosticsLogWriter(port);
     expect(writer.getLastWriteStatus()).toEqual({ ok: null, atMs: null, error: null });
     await writer.load();
@@ -248,6 +250,16 @@ describe('diagnostics log restart survival', () => {
     }
     expect(writes.every((w) => w.length > 0)).toBe(true);
     expect(port.content).toContain('app started');
+    expect(writer.getLoadedFromFileCount()).toBe(1);
+  });
+
+  test('load drops a partial trailing line instead of keeping it', async () => {
+    const port = memoryPort(
+      '2026-10-27T00:00:00.000Z app started\n2026-10-27T00:00:01.00',
+    );
+    const writer = new DiagnosticsLogWriter(port);
+    await writer.load();
+    expect(writer.getLines()).toEqual(['2026-10-27T00:00:00.000Z app started']);
     expect(writer.getLoadedFromFileCount()).toBe(1);
   });
 });

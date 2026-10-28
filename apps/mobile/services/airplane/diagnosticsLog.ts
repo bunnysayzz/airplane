@@ -41,6 +41,9 @@ export function formatDiagnosticsLogLine(atMs: number, kind: string, detail: str
   return clean.length > 0 ? `${stamp} ${kind} ${clean}` : `${stamp} ${kind}`;
 }
 
+/** A complete log line starts with an ISO timestamp and a kind token. */
+const TIMESTAMPED_LINE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \S+/;
+
 /** Drop oldest lines until both caps hold. Pure, for tests and the writer. */
 export function rotateDiagnosticsLogLines(lines: string[]): string[] {
   const kept = lines.slice();
@@ -122,7 +125,15 @@ export class DiagnosticsLogWriter {
     try {
       const content = await this.port.read();
       if (content !== null && content.length > 0) {
-        this.lines = rotateDiagnosticsLogLines(content.split('\n').filter((l) => l.length > 0));
+        const loaded = content.split('\n').filter((l) => l.length > 0);
+        // A kill mid-write can leave a partial last line even with the
+        // tmp-plus-rename port (an older file written the same way).
+        // Drop a trailing line that does not match the timestamped
+        // format instead of keeping a fragment as if it were a line.
+        if (loaded.length > 0 && !TIMESTAMPED_LINE_RE.test(loaded[loaded.length - 1])) {
+          loaded.pop();
+        }
+        this.lines = rotateDiagnosticsLogLines(loaded);
       }
       this.loadOk = true;
     } catch {
