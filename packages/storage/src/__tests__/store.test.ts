@@ -445,7 +445,9 @@ describe('world confirmation', () => {
 
 describe('schema MIGRATION_002', () => {
   test('creates world_confirmed table', () => {
-    expect(MIGRATION_002).toContain('CREATE TABLE world_confirmed(');
+    // IF NOT EXISTS since the audit fix: re-applying 002 after a kill
+    // between its DDL commit and its version row must be safe.
+    expect(MIGRATION_002).toContain('CREATE TABLE IF NOT EXISTS world_confirmed(');
     expect(MIGRATION_002).toContain('event_id     BLOB PRIMARY KEY');
   });
 });
