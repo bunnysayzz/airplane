@@ -138,6 +138,26 @@ export function decodeEvent(bytes: Uint8Array): SignedEvent {
     throw new CodecError('sig must be a 64-byte bstr');
   }
 
+  // Conservative per-kind shape rules (audit F10): only shapes no valid
+  // client produces are rejected here. A kind-1 post must carry content;
+  // a kind-2 receipt must not (its payload is its tags); a kind-5
+  // reshare must name a valid target post id in its e tag. Tighter
+  // shapes (whitespace-only posts, tombstone content, reshare content
+  // vocabulary) are deliberately NOT enforced here: valid clients may
+  // use them, and the service layers own those rules.
+  if (kind === EVENT_KIND_POST && content.length === 0) {
+    throw new CodecError('kind 1 post must have content');
+  }
+  if (kind === EVENT_KIND_RECEIPT && content.length !== 0) {
+    throw new CodecError('kind 2 receipt must have empty content');
+  }
+  if (kind === EVENT_KIND_RESHARE) {
+    const target = tags.find((row) => row[0] === 'e')?.[1];
+    if (typeof target !== 'string' || !/^[0-9a-fA-F]{64}$/.test(target)) {
+      throw new CodecError('kind 5 reshare must carry a valid e tag target');
+    }
+  }
+
   return {
     id,
     pubkey,

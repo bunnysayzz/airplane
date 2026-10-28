@@ -90,8 +90,33 @@ describe('codec', () => {
     expect(() => decodeEvent(raw)).toThrow(CodecError);
   });
 
-  test('bad lengths / kind / geohash throw CodecError', () => {
+  test('conservative per-kind shapes: empty post, content receipt, targetless reshare rejected', () => {
     const good = makePost('ok');
+    const mutate = (idx: number, value: unknown) => {
+      const arr = decode(encodeEvent(good)) as unknown[];
+      arr[idx] = value;
+      return encode(arr);
+    };
+    // Kind 1 with no content.
+    expect(() => decodeEvent(mutate(6, ''))).toThrow(CodecError);
+    // Kind 2 carrying content.
+    const receipt = mutate(3, 2);
+    const receiptArr = decode(receipt) as unknown[];
+    receiptArr[6] = 'not empty';
+    expect(() => decodeEvent(encode(receiptArr))).toThrow(CodecError);
+    // Kind 5 without a valid e tag target.
+    const reshare = mutate(3, 5);
+    const reshareArr = decode(reshare) as unknown[];
+    reshareArr[5] = [];
+    expect(() => decodeEvent(encode(reshareArr))).toThrow(CodecError);
+    reshareArr[5] = [['e', 'not-hex']];
+    expect(() => decodeEvent(encode(reshareArr))).toThrow(CodecError);
+    // Same reshare with a valid target passes the shape check.
+    reshareArr[5] = [['e', 'ab'.repeat(32)]];
+    expect(() => decodeEvent(encode(reshareArr))).not.toThrow();
+  });
+
+  test('bad lengths / kind / geohash throw CodecError', () => {    const good = makePost('ok');
     const mutate = (idx: number, value: unknown) => {
       const arr = decode(encodeEvent(good)) as unknown[];
       arr[idx] = value;
