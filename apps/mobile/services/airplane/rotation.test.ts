@@ -12,7 +12,7 @@
 //   which is why the rotation screen must say old DM peers can't reach the
 //   new identity.
 
-import { MemoryKeyStore } from '@airplane/crypto';
+import { MemoryKeyStore, type DeviceKeypair } from '@airplane/crypto';
 import {
   NobleCrypto,
   verifyEvent,
@@ -23,6 +23,7 @@ import { dmKeypairFromDeviceSecret } from '@airplane/transport';
 import {
   getDeviceKeypair,
   getDevicePublicKey,
+  onIdentityChange,
   rotateDeviceKey,
   setKeyStore,
   signDeviceEvent,
@@ -110,6 +111,28 @@ describe('rotateDeviceKey', () => {
     expect(Buffer.from(newDm.publicKey).toString('hex')).not.toBe(
       Buffer.from(oldDm.publicKey).toString('hex'),
     );
+  });
+
+  test('F14: a store failure after wipe still notifies identity-change listeners', async () => {
+    const failing = new (class extends MemoryKeyStore {
+      failStores = false;
+      override async storeKeypair(kp: DeviceKeypair): Promise<void> {
+        if (this.failStores) throw new Error('keystore store exploded');
+        return super.storeKeypair(kp);
+      }
+    })();
+    setKeyStore(failing);
+    __resetDeviceKeypairForTests();
+    setKeyStore(failing);
+    await getDeviceKeypair();
+    failing.failStores = true;
+    let notified = 0;
+    const unsub = onIdentityChange(() => {
+      notified += 1;
+    });
+    await expect(rotateDeviceKey()).rejects.toThrow('keystore store exploded');
+    expect(notified).toBe(1);
+    unsub();
   });
 
   test('a wipe failure aborts rotation with the old identity intact', async () => {
