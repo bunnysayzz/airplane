@@ -65,14 +65,20 @@ export function stopDiagnosticsLogFile(): void {
   writer = null;
 }
 
-/** Foreground/background markers, wired from AppState in _layout. */
-export function recordDiagnosticsLogAppState(state: string): void {
+/** Foreground/background markers, wired from AppState in _layout. The
+ * background marker awaits flush quiescence (see flushComplete) so
+ * the marker and the unflushed tail get their best chance to land
+ * before the OS suspends the app. Honest limit: a kill during the
+ * grace window can still lose the tail, because Expo FileSystem
+ * offers no synchronous write and a native background task is not
+ * justified for a diagnostics marker. */
+export async function recordDiagnosticsLogAppState(state: string): Promise<void> {
   if (writer === null) return;
   if (state === 'active') {
     writer.append(formatDiagnosticsLogLine(Date.now(), 'app', 'foreground'));
   } else if (state === 'background') {
     writer.append(formatDiagnosticsLogLine(Date.now(), 'app', 'background'));
-    void writer.flush();
+    await writer.flushComplete();
   }
 }
 
