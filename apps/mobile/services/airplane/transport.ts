@@ -673,7 +673,12 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
       transport: 'relay',
       atMs: nowMs,
       outcome: 'ok',
-      detail: `published to ${result.relays.length} relays (OK)`,
+      // P3-1: result.relays is the first-OK list, not every relay that
+      // holds the event (the event was sent to every open relay before
+      // any OK arrived). The fuller ack set is NOT collected: waiting
+      // for it would delay the router past its first-OK resolution and
+      // break the mesh fallback timing. The wording says exactly that.
+      detail: `relay OK from ${result.relays.length} relay(s); event sent to open relays`,
     });
   } else {
     attempts.push({
