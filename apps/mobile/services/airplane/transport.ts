@@ -7,6 +7,14 @@
 //   Play Services dependency).
 // - Incoming posts from any source are stored and fed to the UI.
 // - WorldSync runs when online to push unconfirmed posts and check relays.
+//
+// RETRY POLICIES (actual, per transport; no single ladder exists):
+// - Nostr reconnect: base 5 s doubling, capped at 60 s, plus/minus 20%
+//   jitter, while started (see packages/transport/src/nostr.ts).
+// - DM outbox: [0, 1, 5, 30, 120] s, capped at 5 attempts, then Failed
+//   (see packages/transport/src/dm.ts).
+// - WorldSync: fixed 60 s timer, no backoff (SYNC_INTERVAL_MS below).
+// - BLE: no retry backoff at all for connect or send.
 
 import type { NetInfoState } from '@react-native-community/netinfo';
 import {

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Nostr transport: relay WebSocket client + Airplane event wrapper codec.
 //
+// RETRY POLICY (actual): reconnect base 5 s doubling, capped at 60 s,
+// plus/minus 20% jitter, while started; a successful open resets the
+// per-relay failure count. This is one of four distinct policies in the
+// app (DM outbox [0, 1, 5, 30, 120] s capped at 5, WorldSync fixed 60 s,
+// BLE none); there is no single shared ladder.
+//
 // DESIGN NOTE - why wrap instead of mapping 1:1:
 //
 // Our SignedEvent uses Ed25519 signatures over a CBOR canonical pre-image
