@@ -3,13 +3,15 @@
 // states Sending / Sent / Failed (Failed = tap to retry, never silently
 // dropped). No read receipts, in either direction. Delete is LOCAL ONLY and
 // the confirm copy says so. Requests landing here get Accept / Block / Ignore.
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow, DmThreadRow } from '@airplane/transport';
 import { DM_UNDECRYPTABLE_PLACEHOLDER } from '@airplane/transport';
 import { getDmService, dmPeerLabel, sendDm } from '../../services/airplane/dm';
+import { isNearBottom } from '../../src/lib/dmThread';
 import { useTheme } from '../../src/theme/themeContext';
 
 export default function DmThreadScreen() {
@@ -20,6 +22,31 @@ export default function DmThreadScreen() {
     const [thread, setThread] = useState<DmThreadRow[]>([]);
     const [conv, setConv] = useState<DmConversationRow | null>(null);
     const [draft, setDraft] = useState('');
+
+    // F4: the thread lands on the latest message and follows new arrivals,
+    // but only while the user is already near the bottom, so reading history
+    // is never yanked away. The list ref and the two refs below are the
+    // whole mechanism: onScroll tracks nearness, onContentSizeChange drives
+    // the scroll (content size changes exactly when messages arrive).
+    const listRef = useRef<FlatList<DmThreadRow>>(null);
+    const nearBottomRef = useRef(true);
+    const initialScrollDoneRef = useRef(false);
+    const handleListScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+        const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+        nearBottomRef.current = isNearBottom({
+            contentHeight: contentSize.height,
+            offsetY: contentOffset.y,
+            viewportHeight: layoutMeasurement.height,
+        });
+    }, []);
+    const handleListContentSizeChange = useCallback(() => {
+        if (!initialScrollDoneRef.current) {
+            initialScrollDoneRef.current = true;
+            listRef.current?.scrollToEnd({ animated: false });
+        } else if (nearBottomRef.current) {
+            listRef.current?.scrollToEnd({ animated: true });
+        }
+    }, []);
 
     const refresh = useCallback(() => {
         void getDmService().then(async svc => {
@@ -141,9 +168,13 @@ export default function DmThreadScreen() {
             </View>
 
             <FlatList
+                ref={listRef}
                 data={thread}
                 keyExtractor={item => item.id}
                 contentContainerStyle={styles.list}
+                onScroll={handleListScroll}
+                scrollEventThrottle={100}
+                onContentSizeChange={handleListContentSizeChange}
                 renderItem={({ item }) => (
                     <View style={[styles.bubble, item.direction === 'out' ? styles.out : styles.in, { backgroundColor: item.direction === 'out' ? colors.accentSoft : colors.cardBackground }]}>
                         <Text style={{ color: colors.textPrimary }}>{item.text ?? DM_UNDECRYPTABLE_PLACEHOLDER}</Text>
