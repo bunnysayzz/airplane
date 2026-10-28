@@ -327,12 +327,14 @@ export const makeDiagnosticsStyles = (colors: ThemeColors) =>
     },
     buttonRow: {
       flexDirection: 'row',
+      flexWrap: 'wrap',
       gap: space.md,
       marginHorizontal: space.xs,
     },
     button: {
       backgroundColor: colors.accentColor,
       borderRadius: radii.input,
+      flexShrink: 1,
       paddingHorizontal: space.lg,
       paddingVertical: space.md,
     },
