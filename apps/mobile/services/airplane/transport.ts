@@ -274,6 +274,15 @@ export async function startTransport(): Promise<void> {
     ble,
     {
       relays: await loadRelayUrls(),
+      // Relay frames that used to vanish: NOTICEs/CLOSEDs land in the
+      // diagnostics breadcrumb trail, and an AUTH challenge is surfaced
+      // there too (the client does not answer NIP-42 challenges yet).
+      onRelayNotice: (relayUrl, frame, message) => {
+        addBreadcrumb(`relay ${frame} ${relayUrl}`, { message });
+      },
+      onAuthChallenge: (relayUrl, challenge) => {
+        addBreadcrumb(`relay AUTH challenge ${relayUrl}`, { challenge });
+      },
     },
     {
       onDedupDrop: (_source, peerId) => recordDedupDrop(peerId),

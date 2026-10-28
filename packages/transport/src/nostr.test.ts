@@ -434,6 +434,45 @@ describe('NostrTransport reconnect', () => {
     await t.stop();
   });
 
+  test('AUTH, NOTICE and CLOSED frames are surfaced; CLOSED resubscribes', async () => {
+    const notices: { frame: string; message: string }[] = [];
+    const auths: string[] = [];
+    const sockets: FakeSocket[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://strict.relay'],
+      reconnectMs: 10,
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+      onRelayNotice: (_url, frame, message) => {
+        notices.push({ frame, message });
+      },
+      onAuthChallenge: (_url, challenge) => {
+        auths.push(challenge);
+      },
+    });
+    await t.start();
+    await tick(20);
+    const mainReq = sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    expect(mainReq).toBeDefined();
+    sockets[0].receive(['NOTICE', 'slow down']);
+    sockets[0].receive(['AUTH', 'challenge-abc']);
+    sockets[0].receive(['CLOSED', mainReq[1], 'auth-required: please auth']);
+    await tick(10);
+    expect(notices).toEqual([
+      { frame: 'NOTICE', message: 'slow down' },
+      { frame: 'CLOSED', message: 'auth-required: please auth' },
+    ]);
+    expect(auths).toEqual(['challenge-abc']);
+    // Resubscribe sent a fresh REQ on the same socket.
+    const reqs = sockets[0].sent.map((s) => JSON.parse(s)).filter((m) => m[0] === 'REQ');
+    expect(reqs.length).toBeGreaterThanOrEqual(2);
+    await t.stop();
+  });
+
   test('stop before start is a safe no-op', async () => {
     const { t } = makeTransport();
     await expect(t.stop()).resolves.toBeUndefined();

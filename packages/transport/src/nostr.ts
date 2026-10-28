@@ -183,6 +183,14 @@ export interface NostrTransportOpts {
    * is tried first with a short grace before the close.
    */
   silenceTimeoutMs?: number;
+  /** Relay NOTICE/CLOSED frames (relay URL, frame type, relay message). */
+  onRelayNotice?: (relayUrl: string, frame: 'NOTICE' | 'CLOSED', message: string) => void;
+  /**
+   * Relay AUTH challenges (NIP-42). The client does not authenticate
+   * yet; the challenge is surfaced so an auth-required failure is
+   * diagnosable instead of a generic publish timeout.
+   */
+  onAuthChallenge?: (relayUrl: string, challenge: string) => void;
 }
 
 /** Connection state per relay. */
@@ -223,6 +231,10 @@ export class NostrTransport {
   private readonly reconnectMs: number;
   private readonly reconnectMaxMs: number;
   private readonly silenceTimeoutMs: number;
+  private readonly onRelayNotice: NostrTransportOpts['onRelayNotice'];
+  private readonly onAuthChallenge: NostrTransportOpts['onAuthChallenge'];
+  /** Main subscription id per socket, for CLOSED-triggered resubscribe. */
+  private mainSubIds = new Map<WebSocketLike, string>();
   /** Last inbound frame time per relay (liveness proof for silence detection). */
   private lastFrameAtMs = new Map<string, number>();
   /** Armed silence timer per relay. */
@@ -255,6 +267,8 @@ export class NostrTransport {
     this.reconnectMs = opts.reconnectMs ?? 5000;
     this.reconnectMaxMs = opts.reconnectMaxMs ?? 60000;
     this.silenceTimeoutMs = opts.silenceTimeoutMs ?? 90000;
+    this.onRelayNotice = opts.onRelayNotice;
+    this.onAuthChallenge = opts.onAuthChallenge;
   }
 
   /** Relay URLs this transport manages. */
@@ -288,6 +302,7 @@ export class NostrTransport {
     this.silenceTimers.clear();
     this.lastFrameAtMs.clear();
     this.silencePinged.clear();
+    this.mainSubIds.clear();
     this.reconnectAttempts.clear();
     // A stop must never leave a publish hanging on an OK that can no
     // longer arrive: resolve every waiter with no OK.
@@ -592,6 +607,7 @@ export class NostrTransport {
   /** Subscribe to new Airplane events from all open relays. */
   private resubscribe(ws: WebSocketLike): void {
     const subId = `sub${++this.subIdCounter}`;
+    this.mainSubIds.set(ws, subId);
     const msg: ClientMsg = ['REQ', subId, { kinds: [AIRPLANE_NOSTR_KIND], since: Math.floor(Date.now() / 1000) - 86400 }];
     try {
       ws.send(JSON.stringify(msg));
@@ -630,9 +646,33 @@ export class NostrTransport {
       return;
     }
     // End of stored events for a one-shot query: close it now instead
-    // of waiting out the fallback timer.
+    // of waiting out the fallback timer. EOSE for the main subscription
+    // is the normal end of stored events, not an error: nothing to do.
     if (msg[0] === 'EOSE') {
       if (typeof msg[1] === 'string') this.closeQuery(msg[1]);
+      return;
+    }
+    // Relay notices (rate limits, bans, errors) are surfaced, never
+    // silently dropped: they explain otherwise generic failures.
+    if (msg[0] === 'NOTICE') {
+      if (typeof msg[1] === 'string') this.onRelayNotice?.(relayUrl, 'NOTICE', msg[1].slice(0, 200));
+      return;
+    }
+    // The relay killed a subscription: log it and, for the main
+    // subscription, resubscribe on the same socket at once.
+    if (msg[0] === 'CLOSED') {
+      if (typeof msg[1] === 'string') {
+        if (typeof msg[2] === 'string') this.onRelayNotice?.(relayUrl, 'CLOSED', msg[2].slice(0, 200));
+        if (this.pendingQueries.has(msg[1])) this.closeQuery(msg[1]);
+        const ws = this.sockets.get(relayUrl);
+        if (ws && this.mainSubIds.get(ws) === msg[1] && this.started) this.resubscribe(ws);
+      }
+      return;
+    }
+    // Auth challenge (NIP-42): surfaced, not answered. Without this
+    // branch an auth-required relay just produced generic timeouts.
+    if (msg[0] === 'AUTH') {
+      if (typeof msg[1] === 'string') this.onAuthChallenge?.(relayUrl, msg[1].slice(0, 200));
       return;
     }
     if (msg[0] !== 'EVENT') return;
