@@ -250,21 +250,29 @@ function notifyThrottled(): void {
 function ensurePeer(peerId: string): DiagnosticsPeer {
   let peer = peers.get(peerId);
   if (!peer) {
-    peer = newPeer(peerId);
-    peers.set(peerId, peer);
-    if (peers.size > MAX_PEERS) {
-      // Evict the stalest peer (null lastSeen sorts first).
-      let stalest: string | null = null;
-      let stalestAt = Number.POSITIVE_INFINITY;
+    // Cap check runs BEFORE insertion, so the map never exceeds the
+    // cap by one: the old post-insertion check skipped eviction
+    // exactly when the new peer (null lastSeen) was itself stalest.
+    // Eviction prefers a seen-only or disconnected peer over a
+    // connected one, whose counters are live, and takes the stalest
+    // within the preferred class.
+    if (peers.size >= MAX_PEERS) {
+      let victim: string | null = null;
+      let victimRank = 2;
+      let victimAt = Number.POSITIVE_INFINITY;
       for (const [id, p] of peers) {
+        const rank = p.gattState === 'connected' ? 1 : 0;
         const at = p.lastSeenAtMs ?? -1;
-        if (at < stalestAt) {
-          stalestAt = at;
-          stalest = id;
+        if (rank < victimRank || (rank === victimRank && at < victimAt)) {
+          victimRank = rank;
+          victimAt = at;
+          victim = id;
         }
       }
-      if (stalest !== null && stalest !== peerId) peers.delete(stalest);
+      if (victim !== null) peers.delete(victim);
     }
+    peer = newPeer(peerId);
+    peers.set(peerId, peer);
   }
   return peer;
 }

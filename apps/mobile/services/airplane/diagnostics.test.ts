@@ -102,6 +102,18 @@ describe('diagnostics collector', () => {
     }
   });
 
+  test('peer cap evicts a seen peer before a connected one and never exceeds 100', () => {
+    for (let i = 0; i < 100; i++) {
+      recordPeerSeen(`tag:${i.toString(16).padStart(16, '0')}`, -60, '0123456789abcdef');
+    }
+    recordPeerConnected('tag:0000000000000000', 128, true);
+    recordPeerSeen('tag:ffffffffffffffff', -60, '0123456789abcdef');
+    const snap = getDiagnosticsSnapshot();
+    expect(snap.peers).toHaveLength(100);
+    expect(snap.peers.some((p) => p.peerId === 'tag:0000000000000000')).toBe(true);
+    expect(snap.peers.some((p) => p.peerId === 'tag:ffffffffffffffff')).toBe(true);
+  });
+
   test('peer upsert keeps the newest sighting and survives a resolve', () => {
     recordPeerSeen('tag:0102030405060708', -70, '0102030405060708');
     recordPeerSeen('tag:0102030405060708', -55, '0102030405060708');
