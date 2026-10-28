@@ -12,15 +12,18 @@
 //   - MESH_IDENT_CHAR_UUID read (+write for the hello)  : 64-char hex peerId
 //
 // Discovery: the peripheral advertises manufacturer data only (company id
-// 0xFFFF + 8-byte peer tag = first 8 bytes of the Ed25519 pubkey) - 12 bytes
-// total, well inside the 31-byte legacy advertise budget. The 128-bit
+// 0xFFFF + 8-byte peer tag = first 8 bytes of the Ed25519 pubkey). The
+// manufacturer AD field is 12 bytes; with the 3-byte Android Flags AD
+// field the minimum legacy packet is 15 bytes, well inside the 31-byte
+// legacy advertise budget. The 128-bit
 // service UUID is deliberately NOT in the advertise packet: it would cost
 // another 18 bytes and this peripheral library always attaches service data
 // alongside a service UUID (another 26), blowing the budget. Consequence:
 // the central scans unfiltered and filters by manufacturer id in JS (no
 // hardware scan filter in v1 - a battery trade-off, documented).
-// R3 audit result, verified against the packet math above: the packet is
-// 2 (AD header) + 2 (company id) + 8 (tag) = 12 bytes, so size is NOT the
+// Audit result, verified against the packet math above: the manufacturer
+// field is 2 (AD header) + 2 (company id) + 8 (tag) = 12 bytes, and the
+// full legacy packet is 15 bytes minimum with Flags, so size is NOT the
 // advertise failure; any scan filter on the service UUID would never
 // match this packet, so the scan must stay unfiltered with the JS
 // manufacturer-data filter (see gatt.ts central scan). Do not "fix"

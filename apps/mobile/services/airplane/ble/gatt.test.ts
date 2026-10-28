@@ -1049,3 +1049,15 @@ describe('scan-before-advertise self filtering (audit F-P3-2)', () => {
     await port.close();
   });
 });
+
+describe('advertisement length (audit F-P3-3)', () => {
+  test('advertise records 15 bytes: 12-byte manufacturer field plus 3-byte Flags', async () => {
+    const { deps } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    const { getDiagnosticsSnapshot, resetDiagnosticsForTests } = await import('../diagnostics');
+    expect(getDiagnosticsSnapshot().advertising.advertisementLengthBytes).toBe(15);
+    resetDiagnosticsForTests();
+    await port.close();
+  });
+});

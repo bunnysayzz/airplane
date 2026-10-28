@@ -321,9 +321,13 @@ export class GattBlePort implements TransportPort {
       recordAdvertiseFailure(message);
       throw new Error(message);
     }
-    // Advertisement length on the air: AD header (2 bytes) + company id
-    // (2 bytes) + 8-byte tag = 12 bytes, inside the 31-byte legacy budget.
-    recordAdvertiseSuccess(2 + 2 + tag.length);
+    // Advertisement length on the air: the manufacturer AD field is
+    // AD header (2 bytes) + company id (2 bytes) + 8-byte tag = 12
+    // bytes, but a legacy packet also carries the 3-byte Android Flags
+    // AD field, so the true minimum packet is 15 bytes, still inside the
+    // 31-byte legacy budget. Previously diagnostics reported 12, which
+    // understated the packet.
+    recordAdvertiseSuccess(2 + 2 + tag.length + 3);
     this.peripheral = adapter;
     this.ownPeerId = peerId;
     this.ownTag = peerTagOf(fromHex(peerId));
