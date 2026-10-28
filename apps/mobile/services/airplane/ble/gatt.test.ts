@@ -51,6 +51,7 @@ class FakeCentral implements CentralAdapter {
   disconnects: string[] = [];
   notificationsStarted: string[] = [];
   writes: { id: string; char: string; chunk: Uint8Array }[] = [];
+  writesWithoutResponse: { id: string; char: string; chunk: Uint8Array }[] = [];
   mtu = 512;
   failConnect = new Set<string>();
   failStart = false;
@@ -95,6 +96,9 @@ class FakeCentral implements CentralAdapter {
   async write(id: string, _svc: string, char: string, chunk: Uint8Array): Promise<void> {
     if (this.failWrite) throw new Error('write refused');
     this.writes.push({ id, char, chunk });
+  }
+  async writeWithoutResponse(id: string, _svc: string, char: string, chunk: Uint8Array): Promise<void> {
+    this.writesWithoutResponse.push({ id, char, chunk });
   }
   async startNotification(id: string): Promise<void> {
     this.notificationsStarted.push(id);
@@ -987,6 +991,25 @@ describe('stopAdvertise failure ordering (audit F-P2-7)', () => {
     await port.stopAdvertise();
     expect(peripheral.advertising).toBe(false);
     expect(peripheral.destroyed).toBe(true);
+    await port.close();
+  });
+});
+
+describe('writeWithoutResponse for frame chunks (audit F-P2-9)', () => {
+  test('send uses without-response writes for frame chunks, hello keeps with-response writes', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    const helloWrites = central.writes.length;
+    const frame = new Uint8Array(100).map((_, i) => i & 0xff);
+    await port.send(PEER_HEX, frame);
+    // Hello went out with-response; the frame went without-response.
+    expect(central.writes.length).toBe(helloWrites);
+    expect(central.writesWithoutResponse.length).toBeGreaterThan(0);
+    expect(central.writesWithoutResponse.every((w) => w.char === 'b44060bc-7918-4e95-aabd-fe08327ad228')).toBe(true);
     await port.close();
   });
 });

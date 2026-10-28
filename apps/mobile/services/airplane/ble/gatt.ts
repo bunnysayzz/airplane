@@ -97,6 +97,13 @@ export interface CentralAdapter {
   requestMtu(id: string, mtu: number): Promise<number>;
   read(id: string, serviceUuid: string, charUuid: string): Promise<Uint8Array>;
   write(id: string, serviceUuid: string, charUuid: string, chunk: Uint8Array): Promise<void>;
+  /**
+   * Without-response write (ble-manager 12.6.0 writeWithoutResponse,
+   * verified in the installed package source). Used for RX frame chunks
+   * in send(), where no per-chunk acknowledgement is needed; hello
+   * writes keep with-response writes. Absent on older shapes.
+   */
+  writeWithoutResponse?(id: string, serviceUuid: string, charUuid: string, chunk: Uint8Array): Promise<void>;
   startNotification(id: string, serviceUuid: string, charUuid: string): Promise<void>;
   onNotification(cb: (ev: { id: string; value: Uint8Array }) => void): () => void;
   onDisconnect(cb: (id: string) => void): () => void;
@@ -718,7 +725,18 @@ export class GattBlePort implements TransportPort {
       const central = this.deps.central;
       if (!central) throw new Error('ble: central role unavailable');
       for (const chunk of chunkBytes(datagram, chunkSize)) {
-        await withBleTimeout(central.write(conn.bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk), BLE_TIMEOUT_MS.write, 'frame write');
+        // RX declares WRITE_NO_RESPONSE: frame chunks go without-response
+        // (no per-chunk round trip), falling back to with-response writes
+        // when the native shape lacks the method.
+        if (central.writeWithoutResponse) {
+          await withBleTimeout(
+            central.writeWithoutResponse(conn.bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk),
+            BLE_TIMEOUT_MS.write,
+            'frame write',
+          );
+        } else {
+          await withBleTimeout(central.write(conn.bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk), BLE_TIMEOUT_MS.write, 'frame write');
+        }
         recordFragmentsSent(peerId, 1);
       }
       recordPacketSent(peerId);
@@ -1014,6 +1032,11 @@ function loadCentralAdapter(): CentralAdapter | null {
       },
       read: async (id, serviceUuid, charUuid) => new Uint8Array((await mgr.read(id, serviceUuid, charUuid)) as number[]),
       write: (id, serviceUuid, charUuid, chunk) => mgr.write(id, serviceUuid, charUuid, Array.from(chunk), chunk.length),
+      // ble-manager 12.6.0 writeWithoutResponse(id, service, char, data,
+      // maxByteSize, queueSleepTime): pass the chunk length as
+      // maxByteSize so the native layer does not re-chunk the frame chunk.
+      writeWithoutResponse: (id, serviceUuid, charUuid, chunk) =>
+        mgr.writeWithoutResponse(id, serviceUuid, charUuid, Array.from(chunk), chunk.length, 10),
       startNotification: (id, serviceUuid, charUuid) => mgr.startNotification(id, serviceUuid, charUuid),
       onNotification: (cb) => {
         const sub = emitter.addListener('BleManagerDidUpdateValueForCharacteristic', (e: unknown) => {
