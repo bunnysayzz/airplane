@@ -306,6 +306,28 @@ describe('diagnostics log restart survival', () => {
     expect(writer.getLoadedFromFileCount()).toBe(1);
   });
 
+  test('byte count includes pending lines during load', async () => {
+    let resolveRead!: (value: string | null) => void;
+    const port: DiagnosticsLogFilePort & { content: string } = {
+      content: '2026-10-27T00:00:00.000Z app started\n',
+      read: () => new Promise((resolve) => {
+        resolveRead = resolve;
+      }),
+      write: async (content: string) => {
+        port.content = content;
+      },
+    };
+    const writer = new DiagnosticsLogWriter(port);
+    const loading = writer.load();
+    const pendingLine = '2026-10-27T00:00:02.000Z app foreground';
+    writer.append(pendingLine);
+    expect(writer.getByteCount()).toBe(pendingLine.length + 1);
+    resolveRead(port.content);
+    await loading;
+    const loadedLine = '2026-10-27T00:00:00.000Z app started';
+    expect(writer.getByteCount()).toBe(loadedLine.length + 1 + pendingLine.length + 1);
+  });
+
   test('load drops a partial trailing line instead of keeping it', async () => {
     const port = memoryPort(
       '2026-10-27T00:00:00.000Z app started\n2026-10-27T00:00:01.00',

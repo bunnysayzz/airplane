@@ -179,7 +179,12 @@ export class DiagnosticsLogWriter {
   }
 
   getByteCount(): number {
-    return this.byteCount;
+    // Pending lines count too: during load the line count already
+    // includes them, and the byte count must describe the same set.
+    return (
+      this.byteCount +
+      this.pendingLines.reduce((sum, line) => sum + utf8ByteLength(line) + 1, 0)
+    );
   }
 
   /**
