@@ -20,10 +20,12 @@ import {
   DmService,
   MemoryDmStore,
   WsDmRelay,
+  dmFromHex,
   dmKeypairFromDeviceSecret,
   dmToHex,
 } from '@airplane/transport';
 import { getDeviceKeypair, onIdentityChange } from './identity';
+import { authorLabelFor } from './names';
 
 let service: DmService | null = null;
 let servicePromise: Promise<DmService> | null = null;
@@ -66,8 +68,10 @@ export async function getDmService(): Promise<DmService> {
   return servicePromise;
 }
 
-/** Anonymous label for a DM peer, same shape as feed author labels. */
+/** Anonymous label for a DM peer, same as feed author labels. */
 export function dmPeerLabel(peerHex: string): string {
+  const bytes = dmFromHex(peerHex);
+  if (bytes && bytes.length === 32) return authorLabelFor(bytes);
   return 'anon·' + peerHex.slice(0, 4);
 }
 

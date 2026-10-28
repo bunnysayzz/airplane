@@ -19,8 +19,10 @@ jest.mock('@airplane/transport', () => {
   };
 });
 
-import { getDmService, __resetDmServiceForTests } from './dm';
+import { dmPeerLabel, getDmService, __resetDmServiceForTests } from './dm';
 import { __resetDeviceKeypairForTests, setKeyStore } from './identity';
+import { authorLabelFor } from './names';
+import { dmFromHex } from '@airplane/transport';
 
 class FailingLoadStore extends MemoryKeyStore {
   override async loadKeypair(): Promise<null> {
@@ -36,6 +38,16 @@ beforeEach(() => {
 afterEach(() => {
   __resetDeviceKeypairForTests();
   __resetDmServiceForTests();
+});
+
+describe('dmPeerLabel (F20)', () => {
+  test('a valid peer hex gets the feed author label, garbage falls back to anon', () => {
+    const hex = 'ab'.repeat(32);
+    const bytes = dmFromHex(hex);
+    expect(bytes).not.toBeNull();
+    expect(dmPeerLabel(hex)).toBe(authorLabelFor(bytes!));
+    expect(dmPeerLabel('garbage')).toBe('anon·garb');
+  });
 });
 
 describe('getDmService rejection recovery (D10)', () => {
