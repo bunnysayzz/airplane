@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Frozen SQLite schema (blueprint Appendix D). Applied by OpSqliteStore.migrate().
 // Do not edit in place: schema changes require a new numbered migration.
+//
+// Reserved, currently unused tables (verified: no store method reads or
+// writes them, and upsertPeer has no app caller): peers, sync_state,
+// seen, frag_buf, logs. They are kept for existing installs (dropping
+// tables is not worth the migration risk for zero runtime cost beyond
+// write overhead), but their indexes are dropped in MIGRATION_006 and
+// no new code should read them. upsertPeer always writes NULL for
+// mtu/platform because PeerInfo carries neither field; fixing that
+// needs a PeerInfo type change and is deferred until peers are wired up.
 
 export const MIGRATION_001 = `PRAGMA journal_mode = WAL;
 CREATE TABLE events(
@@ -177,4 +186,8 @@ CREATE INDEX IF NOT EXISTS idx_reshare_events_target ON reshare_events(target_id
  */
 export const MIGRATION_006 = `
 CREATE INDEX IF NOT EXISTS idx_events_feed_v2 ON events(kind, geohash, created_at DESC, id DESC);
+DROP INDEX IF EXISTS idx_peers_seen;
+DROP INDEX IF EXISTS idx_seen_at;
+DROP INDEX IF EXISTS idx_logs_ts;
+DROP INDEX IF EXISTS idx_world_confirmed_at;
 `;

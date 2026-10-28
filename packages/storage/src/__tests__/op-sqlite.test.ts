@@ -266,6 +266,24 @@ describe('migrate', () => {
     );
   });
 
+  test('MIGRATION_006 drops the unused indexes but keeps the reserved tables', async () => {
+    const { port } = await migratedDb();
+    for (const idx of ['idx_peers_seen', 'idx_seen_at', 'idx_logs_ts', 'idx_world_confirmed_at']) {
+      const rows = await port.query<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`,
+        [idx],
+      );
+      expect(rows).toHaveLength(0);
+    }
+    for (const t of ['peers', 'sync_state', 'seen', 'frag_buf', 'logs']) {
+      const rows = await port.query<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+        [t],
+      );
+      expect(rows).toHaveLength(1);
+    }
+  });
+
   test('failed 003 migration rolls back and records no version row', async () => {
     const db = new DatabaseSync(':memory:');
     openDbs.push(db);
