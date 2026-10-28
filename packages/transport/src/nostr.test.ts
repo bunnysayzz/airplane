@@ -401,6 +401,39 @@ describe('NostrTransport reconnect', () => {
     await t.stop();
   });
 
+  test('queryByIds closes on EOSE instead of waiting for the timer', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    const sent = await t.queryByIds(['aa'.repeat(32)]);
+    expect(sent).toBe(true);
+    const req = sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ' && m[2] && '#e' in m[2]);
+    expect(req).toBeDefined();
+    sockets[0].receive(['EOSE', req[1]]);
+    await tick(10);
+    const closes = sockets[0].sent.map((s) => JSON.parse(s)).filter((m) => m[0] === 'CLOSE');
+    expect(closes).toEqual([['CLOSE', req[1]]]);
+    await t.stop();
+  });
+
+  test('queryByIds re-issues a pending query on reconnect', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    await t.queryByIds(['bb'.repeat(32)]);
+    const req = sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ' && m[2] && '#e' in m[2]);
+    expect(req).toBeDefined();
+    sockets[0].close(); // reconnect in 10ms, auto-opens
+    await tick(50);
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    const reissued = sockets[1].sent
+      .map((s) => JSON.parse(s))
+      .find((m) => m[0] === 'REQ' && m[1] === req[1]);
+    expect(reissued).toBeDefined();
+    expect(reissued[2]['#e']).toEqual(['bb'.repeat(32)]);
+    await t.stop();
+  });
+
   test('stop before start is a safe no-op', async () => {
     const { t } = makeTransport();
     await expect(t.stop()).resolves.toBeUndefined();

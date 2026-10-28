@@ -240,6 +240,8 @@ export class NostrTransport {
   /** In-flight relay OK waiters, indexed by Nostr envelope id. */
   private okWaiters = new Map<string, Set<OkWaiter>>();
   private allOkWaiters = new Set<OkWaiter>();
+  /** One-shot queries awaiting EOSE, by subscription id. */
+  private pendingQueries = new Map<string, { filter: object; timer: ReturnType<typeof setTimeout> }>();
 
   constructor(opts: NostrTransportOpts = {}) {
     this.relays = opts.relays ?? DEFAULT_RELAYS;
@@ -296,6 +298,7 @@ export class NostrTransport {
     }
     this.allOkWaiters.clear();
     this.okWaiters.clear();
+    this.pendingQueries.clear();
     for (const [url, ws] of this.sockets) {
       this.states.set(url, 'closed');
       try {
@@ -549,24 +552,41 @@ export class NostrTransport {
   }
 
   /**
-   * Query relays for specific event IDs (Nostr REQ with `ids` filter).
-   * Responses arrive via onReceive; matches our wrapped events by the `e` tag.
+   * Query relays for specific event IDs (Nostr REQ with an `#e` filter).
+   * Responses arrive via onReceive; matches our wrapped events by the `e`
+   * tag. Returns true when the query reached at least one open relay.
+   * An empty id list is rejected early (no REQ is sent). The subscription
+   * closes on EOSE, with the 5s timer only as a fallback cap, and a
+   * query still awaiting EOSE is re-issued when a socket reconnects.
    */
-  async queryByIds(eventIdsHex: Hex64[]): Promise<void> {
-    if (eventIdsHex.length === 0) return;
+  async queryByIds(eventIdsHex: Hex64[]): Promise<boolean> {
+    if (eventIdsHex.length === 0) return false;
     const subId = `q${++this.subIdCounter}`;
-    const filter = { ids: [] as string[], kinds: [AIRPLANE_NOSTR_KIND], '#e': eventIdsHex };
     // Note: we filter by our event IDs via the `e` tag (Nostr `ids` would
-    // match the *envelope* id, which differs per publisher).
+    // match the *envelope* id, which differs per publisher), so no `ids`
+    // entry is sent at all: an empty `ids` array risks a strict relay
+    // matching nothing.
+    const filter = { kinds: [AIRPLANE_NOSTR_KIND], '#e': eventIdsHex };
     const msg: ClientMsg = ['REQ', subId, filter];
-    for (const url of this.relays) this.sendMsg(url, msg);
-    // Close the subscription shortly after; relays send EOSE then matching
-    // EVENTs. We keep it simple: one-shot query, close after 5s.
+    let sent = false;
+    for (const url of this.relays) if (this.sendMsg(url, msg)) sent = true;
+    if (!sent) return false;
     const timer = setTimeout(() => {
-      this.timers.delete(timer);
-      for (const url of this.relays) this.sendMsg(url, ['CLOSE', subId]);
+      this.closeQuery(subId);
     }, 5000);
     this.timers.add(timer);
+    this.pendingQueries.set(subId, { filter, timer });
+    return true;
+  }
+
+  /** Close one pending query (on EOSE or on the fallback timer). */
+  private closeQuery(subId: string): void {
+    const pending = this.pendingQueries.get(subId);
+    if (!pending) return;
+    this.pendingQueries.delete(subId);
+    clearTimeout(pending.timer);
+    this.timers.delete(pending.timer);
+    for (const url of this.relays) this.sendMsg(url, ['CLOSE', subId]);
   }
 
   /** Subscribe to new Airplane events from all open relays. */
@@ -577,6 +597,14 @@ export class NostrTransport {
       ws.send(JSON.stringify(msg));
     } catch {
       // will retry on reconnect
+    }
+    // Re-issue any query still awaiting EOSE on this reconnected socket.
+    for (const [queryId, pending] of this.pendingQueries) {
+      try {
+        ws.send(JSON.stringify(['REQ', queryId, pending.filter] as ClientMsg));
+      } catch {
+        // will retry on the next reconnect
+      }
     }
   }
 
@@ -599,6 +627,12 @@ export class NostrTransport {
     // Relay acknowledgement for a published envelope: ["OK", id, accepted, message].
     if (msg[0] === 'OK') {
       this.handleOk(relayUrl, msg[1], msg[2]);
+      return;
+    }
+    // End of stored events for a one-shot query: close it now instead
+    // of waiting out the fallback timer.
+    if (msg[0] === 'EOSE') {
+      if (typeof msg[1] === 'string') this.closeQuery(msg[1]);
       return;
     }
     if (msg[0] !== 'EVENT') return;
