@@ -75,6 +75,29 @@ export function dmPeerLabel(peerHex: string): string {
   return 'anon·' + peerHex.slice(0, 4);
 }
 
+/**
+ * User-facing copy for DM failures. Known errors map to friendly lines;
+ * everything else maps to a generic line. Raw error text is never shown:
+ * it can carry file paths, keys, or stack details the user must not see.
+ */
+export function dmUserErrorMessage(e: unknown): string {
+  if (e instanceof Error) {
+    const m = e.message;
+    if (m.includes('peer is blocked')) return 'This conversation is blocked. Unblock it to send again.';
+    if (m.includes('longer than')) return 'That message is too long to send.';
+    if (m.includes('empty DM')) return 'Write a message before sending.';
+    if (m.includes('cannot DM yourself')) return 'You cannot message yourself.';
+    if (
+      m.includes('must be 64 lowercase hex') ||
+      m.includes('bad sender pubkey') ||
+      m.includes('bad recipient pubkey')
+    ) {
+      return 'That conversation key is not valid.';
+    }
+  }
+  return 'Something went wrong. Try again.';
+}
+
 /** Send a DM and immediately attempt delivery (outbox retries on failure). */
 export async function sendDm(peerHex: string, text: string): Promise<void> {
   const svc = await getDmService();

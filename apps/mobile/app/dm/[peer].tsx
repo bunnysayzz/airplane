@@ -9,7 +9,7 @@ import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow, DmThreadRow } from '@airplane/transport';
-import { getDmService, dmPeerLabel, sendDm } from '../../services/airplane/dm';
+import { getDmService, dmPeerLabel, dmUserErrorMessage, sendDm } from '../../services/airplane/dm';
 import { isNearBottom } from '../../src/lib/dmThread';
 import { DmBubble } from '../../components/DmBubble';
 import { useTheme } from '../../src/theme/themeContext';
@@ -100,7 +100,7 @@ export default function DmThreadScreen() {
         setDraft('');
         sendDm(peerHex, text)
             .then(refresh)
-            .catch((e: unknown) => Alert.alert('Could not send', e instanceof Error ? e.message : 'Unknown error'));
+            .catch((e: unknown) => Alert.alert('Could not send', dmUserErrorMessage(e)));
     };
 
     // F5: stable retry + renderItem so keystrokes in the draft input do not
@@ -130,7 +130,7 @@ export default function DmThreadScreen() {
             .then(refresh)
             .then(() => true)
             .catch((e: unknown) => {
-                Alert.alert('Action failed', e instanceof Error ? e.message : 'Unknown error');
+                Alert.alert('Action failed', dmUserErrorMessage(e));
                 return false;
             });
 

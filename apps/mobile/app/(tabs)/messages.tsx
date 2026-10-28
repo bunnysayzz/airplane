@@ -8,7 +8,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow } from '@airplane/transport';
 import { DM_UNDECRYPTABLE_PLACEHOLDER } from '@airplane/transport';
-import { getDmService, dmPeerLabel } from '../../services/airplane/dm';
+import { getDmService, dmPeerLabel, dmUserErrorMessage } from '../../services/airplane/dm';
 import { useTheme } from '../../src/theme/themeContext';
 
 export default function MessagesTab() {
@@ -79,7 +79,7 @@ export default function MessagesTab() {
                 setPaste('');
                 open(key);
             })
-            .catch((e: unknown) => Alert.alert('Could not start conversation', e instanceof Error ? e.message : 'Unknown error'));
+            .catch((e: unknown) => Alert.alert('Could not start conversation', dmUserErrorMessage(e)));
     };
 
     const row = (c: DmConversationRow) => (

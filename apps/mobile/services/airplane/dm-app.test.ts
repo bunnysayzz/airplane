@@ -19,7 +19,7 @@ jest.mock('@airplane/transport', () => {
   };
 });
 
-import { dmPeerLabel, getDmService, __resetDmServiceForTests } from './dm';
+import { dmPeerLabel, dmUserErrorMessage, getDmService, __resetDmServiceForTests } from './dm';
 import { __resetDeviceKeypairForTests, setKeyStore } from './identity';
 import { authorLabelFor } from './names';
 import { dmFromHex } from '@airplane/transport';
@@ -47,6 +47,25 @@ describe('dmPeerLabel (F20)', () => {
     expect(bytes).not.toBeNull();
     expect(dmPeerLabel(hex)).toBe(authorLabelFor(bytes!));
     expect(dmPeerLabel('garbage')).toBe('anon·garb');
+  });
+});
+
+describe('dmUserErrorMessage (F36)', () => {
+  test('known errors map to friendly copy, unknown errors map to generic copy', () => {
+    expect(dmUserErrorMessage(new Error('sendMessage: peer is blocked'))).toBe(
+      'This conversation is blocked. Unblock it to send again.',
+    );
+    expect(dmUserErrorMessage(new Error('sendMessage: DM longer than 4096 bytes'))).toBe(
+      'That message is too long to send.',
+    );
+    expect(dmUserErrorMessage(new Error('blockPeer: peer pubkey must be 64 lowercase hex chars'))).toBe(
+      'That conversation key is not valid.',
+    );
+    // Raw internals (paths, keys, stack-shaped text) never reach the user.
+    expect(dmUserErrorMessage(new Error('sqlite /data/data/app.db failed: key abc123'))).toBe(
+      'Something went wrong. Try again.',
+    );
+    expect(dmUserErrorMessage('not an error')).toBe('Something went wrong. Try again.');
   });
 });
 
