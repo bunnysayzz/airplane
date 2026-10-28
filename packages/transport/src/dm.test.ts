@@ -416,6 +416,29 @@ describe('DmService routing + outbox', () => {
     alice.service.stop();
   });
 
+  test('F15: missing-envelope rows fail fast instead of head-blocking the queue', async () => {
+    const relay = new FailingDmRelay();
+    const nowRef = { now: 110_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const peer = 'b'.repeat(64);
+    await alice.service.sendMessage(peer, 'first after restart');
+    await alice.service.sendMessage(peer, 'second after restart');
+    alice.service.stop();
+    // A fresh service over the same store simulates a restart: the
+    // in-memory outbox envelopes are gone, but the rows survive here.
+    const restarted = new DmService({
+      store: alice.store,
+      relay,
+      ownKeys: () => dmKeypairFromDeviceSecret(alice.secret),
+      ownMeshHex: () => alice.meshHex,
+      now: () => nowRef.now,
+    });
+    await restarted.flushOutbox();
+    const rows = await alice.store.listMessages(peer);
+    expect(rows.map(r => r.status)).toEqual(['Failed', 'Failed']);
+    restarted.stop();
+  });
+
   test('P1-09: the flush scheduler re-arms on the backoff and drains without user action', async () => {
     jest.useFakeTimers();
     try {

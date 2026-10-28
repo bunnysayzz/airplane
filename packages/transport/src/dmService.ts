@@ -379,9 +379,14 @@ export class DmService {
       for (const m of messages) {
         if (m.direction !== 'out' || m.status !== 'Sending') continue;
         if (m.nextAttemptAtMs > now) continue;
+        // A missing envelope is permanent (in-memory outbox lost, e.g.
+        // after restart): tryPublish marks it Failed, and the queue must
+        // continue past it instead of head-blocking on a dead row. A
+        // transient publish failure still stops this conversation's queue.
+        const envelopeMissing = !this.outboxEnvelopes.has(m.id);
         const ok = await this.tryPublish(m, now);
         changed = true;
-        if (!ok) break; // FIFO head-of-line: stop this conversation's queue
+        if (!ok && !envelopeMissing) break; // FIFO head-of-line
       }
     }
     if (changed) this.emit();
