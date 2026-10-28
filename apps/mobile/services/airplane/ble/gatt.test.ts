@@ -862,3 +862,25 @@ describe('adapter-state subscription (audit P1-14)', () => {
     await port.close();
   });
 });
+
+describe('ensureCentral permission check (audit P1-18)', () => {
+  test('scan with revoked grants records a permission-tagged failure and throws', async () => {
+    const { deps } = makeDeps({ checkPermissions: async () => false });
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await expect(port.scan(() => {})).rejects.toThrow(/permissions not granted/);
+    const { getDiagnosticsSnapshot, resetDiagnosticsForTests } = await import('../diagnostics');
+    expect(getDiagnosticsSnapshot().scanning.lastFailure).toMatch(/permissions not granted/);
+    resetDiagnosticsForTests();
+    await port.close();
+  });
+
+  test('scan proceeds when the check passes', async () => {
+    const { deps, central } = makeDeps({ checkPermissions: async () => true });
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    expect(central.started).toBe(true);
+    await port.close();
+  });
+});

@@ -125,6 +125,13 @@ export interface BleNativeDeps {
   central: CentralAdapter | null;
   createPeripheral: (() => Promise<PeripheralAdapter>) | null;
   requestPermissions: () => Promise<boolean>;
+  /**
+   * Non-prompting permission check (checkBlePermissions). Absent in older
+   * callers and tests: ensureCentral then skips the check rather than
+   * prompting from a scan. Distinct from requestPermissions, which fires
+   * the OS dialog and must only run from a user action.
+   */
+  checkPermissions?: () => Promise<boolean>;
 }
 
 type Role = 'central' | 'peripheral';
@@ -383,6 +390,14 @@ export class GattBlePort implements TransportPort {
     // is reset, and the failure is recorded, so a retry starts clean.
     const registeredInThisCall: (() => void)[] = [];
     try {
+      // Scan never checked permissions before: a scan attempted with
+      // revoked grants surfaced only as a native failure, never as a
+      // permission-blocked radio. Check first and record a
+      // permission-tagged scan failure on denial.
+      if (this.deps.checkPermissions) {
+        const granted = await this.deps.checkPermissions().catch(() => false);
+        if (!granted) throw new Error('ble: bluetooth permissions not granted');
+      }
       if (!this.centralStarted) {
         await withBleTimeout(central.start(), BLE_TIMEOUT_MS.start, 'central start');
         registeredInThisCall.push(
@@ -1100,10 +1115,14 @@ function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
  * Default native dependencies: lazy-require both BLE libraries, never throw.
  * Null roles mean the port fails closed for that role.
  */
-export function defaultBleDeps(requestPermissions: () => Promise<boolean>): BleNativeDeps {
+export function defaultBleDeps(
+  requestPermissions: () => Promise<boolean>,
+  checkPermissions?: () => Promise<boolean>,
+): BleNativeDeps {
   return {
     central: loadCentralAdapter(),
     createPeripheral: loadPeripheralFactory(),
     requestPermissions,
+    checkPermissions,
   };
 }

@@ -80,7 +80,7 @@ function getNetInfo() {
 function makeBlePort(): { port: TransportPort; close: () => Promise<void> } {
   let deps: BleNativeDeps;
   try {
-    deps = defaultBleDeps(ensureBlePermissions);
+    deps = defaultBleDeps(ensureBlePermissions, checkBlePermissions);
   } catch {
     // Even building the deps failed: fall back to a fully inert port.
     return { port: new NoopBlePort(), close: async () => {} };
@@ -285,8 +285,22 @@ function registerAdapterStateListener(): void {
 export async function revalidateBleRadio(): Promise<void> {
   if (!hybrid || !blePort) return;
   if (bleRadioState === 'starting') return;
-  if (!radioWasOn && bleRadioState !== 'on') return;
+  // Guard: a radio that was never on and is not permission-blocked stays
+  // with the priming UI. Permission-blocked is included because a grant
+  // made in Settings while the app runs must be picked up on foreground,
+  // not only on next launch.
+  if (!radioWasOn && bleRadioState !== 'on' && bleRadioState !== 'permission-blocked') return;
   try {
+    // Permission revocation mid-session: grants can vanish while the app
+    // is backgrounded, and a grant made in Settings is only picked up on
+    // next launch without this check. Re-check here: missing grants tear
+    // the radio down to permission-blocked, present grants allow bring-up.
+    if (!(await checkBlePermissions().catch(() => false))) {
+      if (bleRadioState === 'on') await tearDownBleRadio();
+      bleRadioState = 'permission-blocked';
+      syncDiagnosticsAdapterState();
+      return;
+    }
     const port = blePort.port as GattBlePort;
     const adapterState = typeof port.checkAdapterState === 'function' ? await port.checkAdapterState() : null;
     if (adapterState === 'off') {
