@@ -149,7 +149,9 @@ class FakePeripheral implements PeripheralAdapter {
     this.advIdent = identHex;
     this.advertising = true;
   }
+  failStop = false;
   async stopAdvertising(): Promise<void> {
+    if (this.failStop) throw new Error('stop refused');
     this.advertising = false;
   }
   onWrite(cb: (ev: { device: string; value: Uint8Array }) => void): () => void {
@@ -967,6 +969,24 @@ describe('persistent peripheral error listener (audit F-P2-6)', () => {
     // instead of returning early for the dead one.
     await port.advertise(OWN_HEX);
     expect(peripheral.advIdent).toBe(OWN_HEX);
+    await port.close();
+  });
+});
+
+describe('stopAdvertise failure ordering (audit F-P2-7)', () => {
+  test('a failed stop keeps the handle and never reports stopped; a later stop retries', async () => {
+    const { deps, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    peripheral.failStop = true;
+    await port.stopAdvertise(); // never throws
+    expect(peripheral.advertising).toBe(true);
+    // Re-advertising the same peer is still idempotent while the handle is kept.
+    await port.advertise(OWN_HEX);
+    peripheral.failStop = false;
+    await port.stopAdvertise();
+    expect(peripheral.advertising).toBe(false);
+    expect(peripheral.destroyed).toBe(true);
     await port.close();
   });
 });

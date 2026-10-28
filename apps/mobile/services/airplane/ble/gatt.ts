@@ -284,6 +284,10 @@ export class GattBlePort implements TransportPort {
     if (!HEX64_RE.test(peerId)) throw new Error('ble: advertise needs a 64-char hex peerId');
     if (this.peripheral && this.ownPeerId === peerId) return;
     await this.stopAdvertise();
+    // stopAdvertise keeps the handle when the native stop fails so a later
+    // stop can retry it; a new advertise must not overwrite that handle
+    // and orphan the old advertiser. Fail instead and let Retry retry.
+    if (this.peripheral) throw new Error('ble: previous advertiser could not be stopped');
     const granted = await this.deps.requestPermissions().catch(() => false);
     if (!granted) {
       recordAdvertiseFailure('bluetooth permissions not granted');
@@ -337,6 +341,29 @@ export class GattBlePort implements TransportPort {
   }
 
   async stopAdvertise(): Promise<void> {
+    const p = this.peripheral;
+    if (p) {
+      // Await stop and destroy FIRST: previously the handle was cleared
+      // before the awaits and both failures were swallowed, so a failed
+      // stop left an orphan advertiser running while JS state said
+      // stopped. Failures are recorded without throwing (the never-throws
+      // contract for callers is kept) and the handle is kept, so a later
+      // stopAdvertise can retry the stop instead of orphaning it.
+      let failed = false;
+      try {
+        await p.stopAdvertising();
+      } catch (err) {
+        failed = true;
+        recordAdvertiseFailure(`ble: stopAdvertising failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      try {
+        await p.destroy();
+      } catch (err) {
+        failed = true;
+        recordAdvertiseFailure(`ble: peripheral destroy failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (failed) return;
+    }
     for (const u of this.peripheralUnsubs.splice(0)) {
       try {
         u();
@@ -344,14 +371,9 @@ export class GattBlePort implements TransportPort {
         // ignore
       }
     }
-    const p = this.peripheral;
     this.peripheral = null;
     this.ownPeerId = null;
     this.ownTag = null;
-    if (p) {
-      await p.stopAdvertising().catch(() => {});
-      await p.destroy().catch(() => {});
-    }
     recordAdvertiseStopped();
     // Forget peripheral-role conns (their radio is gone); central-role conns
     // survive - the GATT client is independent of our advertiser.
