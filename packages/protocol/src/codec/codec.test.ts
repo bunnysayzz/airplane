@@ -125,8 +125,10 @@ describe('codec', () => {
     };
     const manyTags = Array.from({ length: 17 }, (_, i) => ['t', String(i)]);
     expect(() => decodeEvent(mutate(5, manyTags))).toThrow(CodecError);
-    expect(() => decodeEvent(mutate(5, [['x', 'y'.repeat(129)]]))).toThrow(CodecError);
-    expect(() => decodeEvent(mutate(5, [['x', 'y'.repeat(128)]]))).not.toThrow();
+    expect(() => decodeEvent(mutate(5, [['x', 'y'.repeat(5000)]]))).toThrow(CodecError);
+    // Long tag strings up to the event cap stay valid (fragmentation
+    // tests pad large events this way).
+    expect(() => decodeEvent(mutate(5, [['x', 'y'.repeat(1000)]]))).not.toThrow();
   });
 
   test('bad lengths / kind / geohash throw CodecError', () => {    const good = makePost('ok');

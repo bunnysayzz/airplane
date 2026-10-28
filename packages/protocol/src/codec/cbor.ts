@@ -65,8 +65,14 @@ function validTags(t: unknown): t is string[][] {
 
 /** Max tag rows on one event (real events carry a handful). */
 const MAX_TAG_ROWS = 16;
-/** Max chars in one tag string (ids are 64 hex, geohashes 5). */
-const MAX_TAG_STRING_CHARS = 128;
+/**
+ * Max chars in one tag string. Set to the whole-event cap, not a small
+ * guess: the codebase legitimately pads large events via a long tag
+ * string (fragmentation boundary tests), and the 4096-byte total cap
+ * already bounds any tag. The pre-check still rejects absurd strings
+ * before deeper work.
+ */
+const MAX_TAG_STRING_CHARS = MAX_EVENT_BYTES;
 
 /**
  * CBOR-encode the canonical pre-image: the 7-position array
