@@ -518,6 +518,50 @@ describe('pruneExpired', () => {
     expect(await store.countViews(freshId)).toBe(1);
     expect(await store.listFeed({ cells: ['tdr1v'], limit: 10 })).toHaveLength(1);
   });
+
+  test('prunes star, reshare, confirmation, tombstone, and known-post rows for expired posts only', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port, 3600);
+    const oldPost = makeEvent({ seed: 25, createdAt: NOW - 7200 });
+    const oldId = bytesToHex(oldPost.id);
+    const freshPost = makeEvent({ seed: 26, createdAt: NOW - 100 });
+    const freshId = bytesToHex(freshPost.id);
+    await store.saveEvent(oldPost);
+    await store.saveEvent(freshPost);
+    // Star/reshare events need a valid target tag; build them directly.
+    const starFor = (seed: number, postId: string): SignedEvent => ({
+      id: seedBytes(seed), pubkey: seedBytes(seed + 1000), created_at: NOW - 100,
+      kind: 4, geohash: 'tdr1v', tags: [['e', postId]], content: 'star',
+      sig: seedBytes(seed + 2000, 64),
+    });
+    const reshareFor = (seed: number, postId: string): SignedEvent => ({
+      id: seedBytes(seed), pubkey: seedBytes(seed + 1000), created_at: NOW - 100,
+      kind: 5, geohash: 'tdr1v', tags: [['e', postId]], content: '',
+      sig: seedBytes(seed + 2000, 64),
+    });
+    await store.saveStarEvent(starFor(27, oldId));
+    await store.saveStarEvent(starFor(28, freshId));
+    await store.saveReshareEvent(reshareFor(29, oldId));
+    await store.saveReshareEvent(reshareFor(30, freshId));
+    await store.markWorldConfirmed(oldId);
+    await store.markWorldConfirmed(freshId);
+    await store.saveStarKnownPost(oldId);
+    await store.saveStarKnownPost(freshId);
+    await store.markDeleted(oldId);
+    // A tombstone armed before its post arrives must survive prune.
+    const pendingId = 'c'.repeat(64);
+    await store.markDeleted(pendingId);
+
+    await store.pruneExpired(NOW);
+    expect(await store.getEvent(oldId)).toBeNull();
+    expect(await store.listStarEvents()).toHaveLength(1);
+    expect(await store.listReshareEvents()).toHaveLength(1);
+    expect(await store.isWorldConfirmed(oldId)).toBe(false);
+    expect(await store.isWorldConfirmed(freshId)).toBe(true);
+    expect(await store.listStarKnownPosts()).toEqual([freshId]);
+    const tombs = await port.query<{ target_id: Uint8Array }>(`SELECT target_id FROM tombstones`);
+    expect(tombs.map((t) => bytesToHex(t.target_id)).sort()).toEqual([pendingId]);
+  });
 });
 
 describe('world confirmation', () => {

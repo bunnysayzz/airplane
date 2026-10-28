@@ -331,6 +331,17 @@ export class MemoryEventStore implements StorePort {
       for (const key of this.receiptKeys) {
         if (key.includes(`:${postHex}:`)) this.receiptKeys.delete(key);
       }
+      // Same all-tables coverage as the SQLite prune, keyed on the
+      // expired post set only: star/reshare rows for live posts, and
+      // pending tombstones for posts that never arrived, survive.
+      this.worldConfirmed.delete(postHex);
+      this.starKnownPosts.delete(postHex);
+      for (const [idHex, event] of this.starEvents) {
+        if (taggedPostId(event) === postHex) this.starEvents.delete(idHex);
+      }
+      for (const [idHex, event] of this.reshareEvents) {
+        if (taggedPostId(event) === postHex) this.reshareEvents.delete(idHex);
+      }
     }
     return removed;
   }

@@ -509,23 +509,55 @@ export class OpSqliteStore implements StorePort {
   }
 
   async pruneExpired(nowSec: UnixSec): Promise<number> {
-    const count = await this.db.query<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM events WHERE expires_at < ?`,
-      [nowSec],
-    );
-    await this.db.exec(
-      `DELETE FROM receipts
-       WHERE post_id IN (SELECT id FROM events WHERE expires_at < ?)`,
-      [nowSec],
-    );
-    await this.db.exec(`DELETE FROM events WHERE expires_at < ?`, [nowSec]);
-    // Drop view_counts orphaned by pruned posts.
-    await this.db.exec(
-      `DELETE FROM view_counts
-       WHERE post_id NOT IN (SELECT id FROM events)`,
-      [],
-    );
-    return count.length > 0 ? count[0].n : 0;
+    // One transaction covering every table, so a kill mid-prune cannot
+    // leave receipts deleted but events present (or orphaned view
+    // counts). The count is measured inside the same transaction, so
+    // concurrent inserts cannot skew it. Star, reshare, receipt,
+    // confirmation, tombstone, and known-post rows are removed only
+    // when their target post expired: rows for still-live posts are
+    // never wiped by age alone, and a tombstone armed before its post
+    // arrives (no events row yet) must survive prune, or the deleted
+    // post would resurrect on arrival. View counts are the exception:
+    // they are dropped when no events row remains, since a count for a
+    // post with no row can never be displayed.
+    return runTransaction(this.db, async () => {
+      const count = await this.db.query<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM events WHERE expires_at < ?`,
+        [nowSec],
+      );
+      const expired = `SELECT id FROM events WHERE expires_at < ?`;
+      await this.db.exec(
+        `DELETE FROM star_events WHERE target_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(
+        `DELETE FROM reshare_events WHERE target_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(
+        `DELETE FROM receipts WHERE post_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(
+        `DELETE FROM world_confirmed WHERE event_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(
+        `DELETE FROM tombstones WHERE target_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(
+        `DELETE FROM star_known_posts WHERE post_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(`DELETE FROM events WHERE expires_at < ?`, [nowSec]);
+      await this.db.exec(
+        `DELETE FROM view_counts
+         WHERE post_id NOT IN (SELECT id FROM events)`,
+        [],
+      );
+      return count.length > 0 ? count[0].n : 0;
+    });
   }
 
   async markWorldConfirmed(eventId: Hex64): Promise<void> {
