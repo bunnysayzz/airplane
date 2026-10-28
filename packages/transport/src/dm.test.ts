@@ -294,4 +294,34 @@ describe('DmService routing + outbox', () => {
     expect(await bob.service.receiveEnvelope(second)).toBe('request');
     expect(await bob.service.getThread(alice.meshHex)).toHaveLength(2);
   });
+
+  test('P1-09: the flush scheduler re-arms on the backoff and drains without user action', async () => {
+    jest.useFakeTimers();
+    try {
+      const relay = new FailingDmRelay();
+      const nowRef = { now: 60_000_000 };
+      const alice = makePersona(relay, nowRef);
+      alice.service.start();
+      await alice.service.sendMessage('e'.repeat(64), 'scheduler please');
+      const microtasks = async () => {
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+      };
+      await microtasks();
+      // The send scheduled a due-now flush; firing it attempts once.
+      await jest.advanceTimersByTimeAsync(0);
+      await microtasks();
+      let rows = await alice.store.listMessages('e'.repeat(64));
+      expect(rows[0].attempts).toBe(1);
+      expect(rows[0].status).toBe('Sending');
+      // Move the fake clock past the 1000ms backoff and fire the re-armed timer.
+      nowRef.now += 1000;
+      await jest.advanceTimersByTimeAsync(1000);
+      await microtasks();
+      rows = await alice.store.listMessages('e'.repeat(64));
+      expect(rows[0].attempts).toBe(2);
+      alice.service.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

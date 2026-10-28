@@ -70,6 +70,17 @@ export async function sendDm(peerHex: string, text: string): Promise<void> {
   await svc.flushOutbox();
 }
 
+/**
+ * Foreground flush for the outbox scheduler (P1-09): drains Sending rows
+ * when the app returns to foreground, since timers do not reliably fire
+ * while backgrounded. Deliberately a no-op when the service was never
+ * started, so a foreground event never eagerly creates DM subscriptions
+ * for a user who never opened Messages.
+ */
+export async function flushDmOutboxIfStarted(): Promise<void> {
+  if (service) await service.flushOutbox();
+}
+
 /** Test seam: drop the singleton so tests get a fresh service. */
 export function __resetDmServiceForTests(): void {
   resetDmService();

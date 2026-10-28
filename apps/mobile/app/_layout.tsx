@@ -7,6 +7,7 @@ import { I18nProvider, useI18n } from '../src/i18n/i18nContext';
 import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
 import { startTransport, stopTransport } from '../services/airplane';
+import { flushDmOutboxIfStarted } from '../services/airplane/dm';
 import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
 import {
   recordDiagnosticsLogAppState,
@@ -67,6 +68,12 @@ export default function RootLayout() {
         void startDiagnosticsLogFile().catch(() => {});
         const appStateSub = AppState.addEventListener('change', (state) => {
           recordDiagnosticsLogAppState(state);
+          // P1-09: timers do not reliably fire while backgrounded, so a
+          // foreground return also drains the DM outbox (no-op if the DM
+          // service was never started, so this never creates subscriptions).
+          if (state === 'active') {
+            void flushDmOutboxIfStarted().catch(() => {});
+          }
         });
         // Start hybrid transport (BLE always, Nostr when online) AFTER first
         // paint so nothing blocks the UI thread during launch. Failures are

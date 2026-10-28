@@ -180,6 +180,8 @@ export class DmService {
   private readonly now: () => number;
   private readonly listeners = new Set<() => void>();
   private unsub: (() => void) | null = null;
+  /** Single outbox flush timer, armed for the earliest next attempt (P1-09). */
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: DmServiceOpts) {
     this.store = opts.store;
@@ -206,13 +208,59 @@ export class DmService {
     this.unsub = this.relay.subscribe(this.ownMeshHex(), envelope => {
       void this.receiveEnvelope(envelope);
     });
+    // Flush once on start: a failed DM must not wait for the next user action.
+    void this.flushOutbox().catch(() => {});
   }
 
   stop(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
     if (this.unsub) {
       this.unsub();
       this.unsub = null;
     }
+  }
+
+  /**
+   * One flush scheduler: a single timer for the earliest nextAttemptAtMs
+   * across Sending rows, re-armed when the outbox changes (send, retry,
+   * delete) or when a flush attempts a row. Clearing before and after
+   * the store reads keeps exactly one timer live even when schedule
+   * calls overlap. Blocked conversations are skipped, matching
+   * flushOutbox. Timers do not reliably fire while backgrounded, so the
+   * app layer also flushes on foreground (see the AppState hook in
+   * _layout, which flushes only if the service exists).
+   */
+  private async scheduleFlush(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    const now = this.now();
+    const convs = await this.store.listConversations();
+    let earliest: number | null = null;
+    for (const conv of convs) {
+      if (conv.state === 'blocked') continue;
+      const messages = await this.store.listMessages(conv.peerHex);
+      for (const m of messages) {
+        if (m.direction !== 'out' || m.status !== 'Sending') continue;
+        if (earliest === null || m.nextAttemptAtMs < earliest) earliest = m.nextAttemptAtMs;
+      }
+    }
+    if (earliest === null) return;
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.flushTimer = setTimeout(
+      () => {
+        this.flushTimer = null;
+        void this.flushOutbox().catch(() => {});
+      },
+      Math.max(0, earliest - now),
+    );
   }
 
   /** Open (or create) a conversation with a peer. Own-initiated = inbox, never requests. */
@@ -266,6 +314,7 @@ export class DmService {
     await this.store.addMessage(row);
     await this.touchConversation(peerHex, row);
     this.emit();
+    void this.scheduleFlush();
     return row;
   }
 
@@ -293,6 +342,13 @@ export class DmService {
       }
     }
     if (changed) this.emit();
+    // Re-arm only when the flush attempted a row: an attempt moves that
+    // row's next attempt later (or to Failed), so the old timer is stale
+    // and the next attempt needs a timer. A flush that skipped everything
+    // (nothing due) must NOT re-arm, or a timer that fires early would
+    // re-arm forever without progress; the flush that made the timer
+    // stale already re-armed for the new earliest attempt.
+    if (changed) void this.scheduleFlush();
   }
 
   private async tryPublish(m: DmMessageRow, now: number): Promise<boolean> {
@@ -342,6 +398,7 @@ export class DmService {
     m.nextAttemptAtMs = this.now();
     await this.store.updateMessage(m);
     this.emit();
+    void this.scheduleFlush();
   }
 
   /** Route one incoming sealed envelope. Returns what happened (for tests/logs). */
@@ -480,6 +537,8 @@ export class DmService {
     }
     await this.store.deleteConversation(peerHex);
     this.emit();
+    // Deleting may have removed the row the armed timer was waiting for.
+    void this.scheduleFlush();
   }
 
   async markRead(peerHex: string): Promise<void> {
