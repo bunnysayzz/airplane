@@ -118,11 +118,11 @@ describe('diagnostics log writer', () => {
     await writer.load();
     expect(writer.getFlushedLineCount()).toBe(0);
     writer.append('2026-10-27T00:00:01.000Z scan started');
-    await writer.flush();
+    await writer.flushComplete();
     expect(writer.getFlushedLineCount()).toBe(2);
     failWrites = true;
     writer.append('2026-10-27T00:00:02.000Z adapter on');
-    await writer.flush();
+    await writer.flushComplete();
     expect(writer.getLineCount()).toBe(3);
     expect(writer.getFlushedLineCount()).toBe(2);
     expect(writer.getLastWriteStatus().ok).toBe(false);
