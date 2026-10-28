@@ -89,6 +89,13 @@ describe('DM crypto', () => {
     expect(nip44Decrypt('not-base64!!', key)).toBeNull();
   });
 
+  test('F19: sealDm throws on a malformed sender hex', () => {
+    const bob = ed25519.utils.randomSecretKey();
+    const bobHex = dmToHex(ed25519.getPublicKey(bob));
+    expect(() => sealDm('hi', 'not-hex', bobHex)).toThrow('sealDm: bad sender pubkey');
+    expect(() => sealDm('hi', 'a'.repeat(63), bobHex)).toThrow('sealDm: bad sender pubkey');
+  });
+
   test('F18: sealDm lowercases sender and recipient hex', () => {
     const alice = ed25519.utils.randomSecretKey();
     const bob = ed25519.utils.randomSecretKey();

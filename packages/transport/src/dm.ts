@@ -383,6 +383,9 @@ export function sealDm(
   // seal an envelope no lowercase subscribe check would ever match.
   const sender = senderMeshHex.toLowerCase();
   const recipientHex = recipientMeshHex.toLowerCase();
+  // The recipient side rejects a malformed sender on unseal, so sealing
+  // with one used to report Sent while the recipient silently dropped it.
+  if (!isHex64(sender)) throw new Error('sealDm: bad sender pubkey');
   const recipient = dmFromHex(recipientHex);
   if (!recipient || recipient.length !== 32) throw new Error('sealDm: bad recipient pubkey');
   const ephemeralSecret = x25519.utils.randomSecretKey();
