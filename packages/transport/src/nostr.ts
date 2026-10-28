@@ -63,6 +63,9 @@ export const MAX_RELAY_MESSAGE_BYTES = 65536;
 /** Max event ids in one queryByIds filter (audit F38). */
 export const QUERY_BY_IDS_MAX = 100;
 
+/** Max owed query CLOSEs retained (audit F41). */
+export const MAX_PENDING_QUERY_CLOSES = 32;
+
 /** A Nostr event per NIP-01 (JSON-serializable). */
 export interface NostrEvent {
   id: string;
@@ -201,6 +204,12 @@ export interface RelayPublishAck {
   rejected: string[];
   /** True when the deadline expired before any OK arrived. */
   timedOut: boolean;
+  /**
+   * True when stop() resolved the waiter: the publish was cancelled,
+   * not failed by a relay. Callers must treat this as skipped, not as
+   * a relay failure (previously it was indistinguishable from one).
+   */
+  cancelled: boolean;
 }
 
 /** One in-flight OK waiter, shared by every concurrent publish of one envelope. */
@@ -238,6 +247,15 @@ export class NostrTransport {
   /** In-flight relay OK waiters, indexed by Nostr envelope id. */
   private okWaiters = new Map<string, Set<OkWaiter>>();
   private allOkWaiters = new Set<OkWaiter>();
+  /**
+   * Query CLOSEs owed to relays that received a queryByIds REQ but were
+   * not open when its 5 s close timer fired (dropped before the timer, or
+   * still connecting). They are sent when that relay's socket next opens,
+   * so a subscription opened before the timer can never outlive its
+   * window on a later socket. Bounded: oldest entries drop when full
+   * (losing a late CLOSE is no worse than today's behaviour).
+   */
+  private pendingQueryCloses: Array<{ subId: string; url: string }> = [];
 
   constructor(opts: NostrTransportOpts = {}) {
     this.relays = opts.relays ?? DEFAULT_RELAYS;
@@ -286,10 +304,11 @@ export class NostrTransport {
     for (const w of this.allOkWaiters) {
       if (w.timer) clearTimeout(w.timer);
       w.timer = null;
-      w.resolve({ ok: [...w.ok], rejected: [...w.rejected], timedOut: false });
+      w.resolve({ ok: [...w.ok], rejected: [...w.rejected], timedOut: false, cancelled: true });
     }
     this.allOkWaiters.clear();
     this.okWaiters.clear();
+    this.pendingQueryCloses = [];
     for (const [url, ws] of this.sockets) {
       this.states.set(url, 'closed');
       try {
@@ -318,6 +337,21 @@ export class NostrTransport {
       // again from the base delay.
       this.reconnectAttempts.delete(url);
       this.resubscribe(ws);
+      // Owed query CLOSEs for this relay (its close timer fired while it
+      // was down): send them on the fresh socket, then drop them.
+      const owed = this.pendingQueryCloses.filter((entry) => entry.url === url);
+      if (owed.length > 0) {
+        this.pendingQueryCloses = this.pendingQueryCloses.filter((entry) => entry.url !== url);
+        for (let i = 0; i < owed.length; i++) {
+          try {
+            ws.send(JSON.stringify(['CLOSE', owed[i].subId] as ClientMsg));
+          } catch {
+            // Socket died again; the unsent remainder is owed again.
+            this.pendingQueryCloses.push(...owed.slice(i));
+            break;
+          }
+        }
+      }
     };
     ws.onmessage = (ev) => this.handleMessage(url, ev.data);
     ws.onerror = () => {
@@ -396,7 +430,7 @@ export class NostrTransport {
     for (const url of this.relays) {
       if (this.sendMsg(url, msg)) sent.push(url);
     }
-    if (sent.length === 0) return { ok: [], rejected: [], timedOut: false };
+    if (sent.length === 0) return { ok: [], rejected: [], timedOut: false, cancelled: false };
     return new Promise<RelayPublishAck>((resolve) => {
       const waiter: OkWaiter = {
         remaining: new Set(sent),
@@ -421,7 +455,7 @@ export class NostrTransport {
       };
       waiter.resolve = (ack) => finish(ack);
       const timer = setTimeout(() => {
-        finish({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: true });
+        finish({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: true, cancelled: false });
       }, deadlineMs);
       waiter.timer = timer;
       this.timers.add(timer);
@@ -445,7 +479,7 @@ export class NostrTransport {
       if (!waiter.remaining.has(url)) continue;
       waiter.remaining.delete(url);
       if (waiter.remaining.size === 0 && waiter.ok.size === 0) {
-        waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false });
+        waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false, cancelled: false });
       }
     }
   }
@@ -460,11 +494,11 @@ export class NostrTransport {
       waiter.remaining.delete(relayUrl);
       if (accepted) {
         waiter.ok.add(relayUrl);
-        waiter.resolve({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: false });
+        waiter.resolve({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: false, cancelled: false });
       } else {
         waiter.rejected.add(relayUrl);
         if (waiter.remaining.size === 0) {
-          waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false });
+          waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false, cancelled: false });
         }
       }
     }
@@ -487,12 +521,25 @@ export class NostrTransport {
     // Note: we filter by our event IDs via the `e` tag (Nostr `ids` would
     // match the *envelope* id, which differs per publisher).
     const msg: ClientMsg = ['REQ', subId, filter];
-    for (const url of this.relays) this.sendMsg(url, msg);
+    const sentUrls: string[] = [];
+    for (const url of this.relays) {
+      if (this.sendMsg(url, msg)) sentUrls.push(url);
+    }
     // Close the subscription shortly after; relays send EOSE then matching
-    // EVENTs. We keep it simple: one-shot query, close after 5s.
+    // EVENTs. We keep it simple: one-shot query, close after 5s. A relay
+    // that is not open at close time still owes its CLOSE: it is
+    // remembered and sent when that relay's socket next opens, so the
+    // subscription cannot leak onto a post-timer socket.
     const timer = setTimeout(() => {
       this.timers.delete(timer);
-      for (const url of this.relays) this.sendMsg(url, ['CLOSE', subId]);
+      for (const url of sentUrls) {
+        if (!this.sendMsg(url, ['CLOSE', subId])) {
+          this.pendingQueryCloses.push({ subId, url });
+          while (this.pendingQueryCloses.length > MAX_PENDING_QUERY_CLOSES) {
+            this.pendingQueryCloses.shift();
+          }
+        }
+      }
     }, 5000);
     this.timers.add(timer);
   }

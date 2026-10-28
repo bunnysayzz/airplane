@@ -395,4 +395,20 @@ describe('NostrTransport.publishWithAck', () => {
     expect(ack.timedOut).toBe(false);
     await nostr.stop();
   });
+
+  test('stop resolves a pending publish as cancelled, not failed', async () => {
+    const { nostr, sockets } = makeNostr(['wss://mock.relay']);
+    await nostr.start();
+    sockets[0].open();
+    await tick();
+
+    const pending = nostr.publishWithAck(makePost('cancelled by stop'), 5000);
+    await tick();
+    await nostr.stop();
+    const ack = await pending;
+
+    expect(ack.ok).toEqual([]);
+    expect(ack.cancelled).toBe(true);
+    expect(ack.timedOut).toBe(false);
+  });
 });

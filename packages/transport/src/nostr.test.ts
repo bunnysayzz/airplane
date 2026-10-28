@@ -433,6 +433,46 @@ describe('NostrTransport inbound edge cases', () => {
     await t.stop();
   });
 
+  test('query CLOSE owed to a down relay is sent when its socket next opens', async () => {
+    jest.useFakeTimers();
+    try {
+      const sockets: FakeSocket[] = [];
+      const t = new NostrTransport({
+        relays: ['wss://test.relay'],
+        reconnectMs: 10,
+        // No auto-open: the test drives open/close timing by hand.
+        wsFactory: (url: string) => {
+          const s = new FakeSocket(url);
+          sockets.push(s);
+          return s;
+        },
+      });
+      await t.start();
+      sockets[0].open();
+      await t.queryByIds(['aa'.repeat(32)]);
+      expect(
+        sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ'),
+      ).toBeDefined();
+      // Drop before the 5 s close timer: reconnect is scheduled, but the
+      // new socket stays shut until the test opens it after the timer.
+      sockets[0].close();
+      jest.advanceTimersByTime(20);
+      expect(sockets).toHaveLength(2);
+      jest.advanceTimersByTime(5000);
+      // Timer fired while the new socket was down: no CLOSE yet.
+      expect(sockets[1].sent).toHaveLength(0);
+      sockets[1].open();
+      const close = sockets[1].sent
+        .map((s) => JSON.parse(s))
+        .find((m) => m[0] === 'CLOSE');
+      expect(close).toBeDefined();
+      expect(close[1]).toBe('q2');
+      await t.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('publish skips relays whose send throws; others still deliver', async () => {
     const { t, sockets } = makeTransport(['wss://bad.relay', 'wss://good.relay']);
     await t.start();
