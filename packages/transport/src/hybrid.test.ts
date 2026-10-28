@@ -379,6 +379,38 @@ describe('HybridTransport', () => {
     await h.stop();
   });
 
+  test('mesh stage reports queued with zero peers when every BLE send fails', async () => {
+    const port = new FakeBlePort();
+    port.send = async () => {
+      throw new Error('gatt gone');
+    };
+    const ble = new BleTransport(port);
+    const h = new HybridTransport(ble, { relays: [] });
+    await h.start();
+    const res = await h.publish(makePost('all ble failed'), ['p1', 'p2']);
+    expect(res.transport).toBe('none');
+    expect(res.status).toBe('queued');
+    expect(res.blePeers).toBe(0);
+    await h.stop();
+  });
+
+  test('mesh stage counts only peers that actually received the broadcast', async () => {
+    const port = new FakeBlePort();
+    const origSend = port.send.bind(port);
+    port.send = async (peerId: string, bytes: Uint8Array) => {
+      if (peerId === 'bad') throw new Error('gatt gone');
+      return origSend(peerId, bytes);
+    };
+    const ble = new BleTransport(port);
+    const h = new HybridTransport(ble, { relays: [] });
+    await h.start();
+    const res = await h.publish(makePost('one peer ok'), ['bad', 'good']);
+    expect(res.transport).toBe('mesh');
+    expect(res.status).toBe('sent');
+    expect(res.blePeers).toBe(1);
+    await h.stop();
+  });
+
   test('nostrOnline reflects relay connectivity', async () => {
     const { h } = makeHybrid();
     expect(h.nostrOnline).toBe(false);

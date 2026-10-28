@@ -579,7 +579,8 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
   // BLE fan-out targets the currently connected peers. Previously this
   // call passed no peer ids at all, so local posts NEVER went out over
   // BLE — only Nostr — even with phones connected over GATT.
-  const result = await hybrid!.publish(event, blePeerIdsForPublish(blePort?.port));
+  const blePeersAtPublish = blePeerIdsForPublish(blePort?.port);
+  const result = await hybrid!.publish(event, blePeersAtPublish);
   const nowMs = Date.now();
   // Diagnostics record exactly the stages the router actually ran: a
   // relay win never touches BLE, a skipped relay stage is marked
@@ -606,6 +607,15 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
         atMs: nowMs,
         outcome: 'ok',
         detail: `sent to ${result.blePeers} connected peers (no peer ack in current transport)`,
+      });
+    } else if (blePeersAtPublish.length > 0) {
+      // Peers were connected but the router reports queued, so every
+      // BLE send failed: record failed, not skipped and not ok.
+      attempts.push({
+        transport: 'ble',
+        atMs: nowMs,
+        outcome: 'failed',
+        detail: 'BLE send failed for all connected peers',
       });
     } else {
       attempts.push({
