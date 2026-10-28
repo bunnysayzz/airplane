@@ -297,6 +297,10 @@ export async function startTransport(): Promise<void> {
       networkValidated: () => lastOnline !== false,
     },
   );
+  if (pendingSubscribeCells) {
+    hybrid.nostr.setSubscribeCells(pendingSubscribeCells);
+    pendingSubscribeCells = null;
+  }
   sync = new WorldSync(hybrid.nostr, {
     markWorldConfirmed: (id: Hex64) => getStore().markWorldConfirmed(id),
     isWorldConfirmed: (id: Hex64) => getStore().isWorldConfirmed(id),
@@ -495,6 +499,23 @@ export async function enableBleRadio(): Promise<boolean> {
  */
 export function __getHybridForTests(): HybridTransport | null {
   return hybrid;
+}
+
+/**
+ * Narrow the relay subscribe filter to the viewer's in-scope cells
+ * (feed tab owns the current cells). The next reconnect subscribes with
+ * the `#g` filter; until cells are known the filter stays global, so
+ * coverage is never lost. Cells resolved before startTransport are
+ * applied when the transport starts.
+ */
+let pendingSubscribeCells: string[] | null = null;
+
+export function setRelaySubscribeCells(cells: string[]): void {
+  if (hybrid) {
+    hybrid.nostr.setSubscribeCells(cells);
+  } else {
+    pendingSubscribeCells = [...cells];
+  }
 }
 
 /**

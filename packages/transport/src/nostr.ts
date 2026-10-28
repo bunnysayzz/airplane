@@ -191,6 +191,14 @@ export interface NostrTransportOpts {
    * diagnosable instead of a generic publish timeout.
    */
   onAuthChallenge?: (relayUrl: string, challenge: string) => void;
+  /**
+   * Viewer geohash-5 cells in scope (own cell plus neighbours). When
+   * known, the subscribe filter narrows to `#g` for these cells; when
+   * absent, the filter stays global so coverage is never lost on a
+   * relay that ignores tag filters (the client still drops out-of-cell
+   * events at the feed layer).
+   */
+  cells?: string[];
 }
 
 /** Connection state per relay. */
@@ -233,6 +241,9 @@ export class NostrTransport {
   private readonly silenceTimeoutMs: number;
   private readonly onRelayNotice: NostrTransportOpts['onRelayNotice'];
   private readonly onAuthChallenge: NostrTransportOpts['onAuthChallenge'];
+  private subscribeCells: string[];
+  /** Time of the last main subscribe, for reconnect `since` bounds. */
+  private lastSubscribeAtSec: number | null = null;
   /** Main subscription id per socket, for CLOSED-triggered resubscribe. */
   private mainSubIds = new Map<WebSocketLike, string>();
   /** Last inbound frame time per relay (liveness proof for silence detection). */
@@ -269,6 +280,15 @@ export class NostrTransport {
     this.silenceTimeoutMs = opts.silenceTimeoutMs ?? 90000;
     this.onRelayNotice = opts.onRelayNotice;
     this.onAuthChallenge = opts.onAuthChallenge;
+    this.subscribeCells = [...(opts.cells ?? [])].filter((c) => c.length > 0);
+  }
+
+  /**
+   * Update the in-scope cells for future subscribes. The next reconnect
+   * narrows to these cells; an empty list restores the global filter.
+   */
+  setSubscribeCells(cells: string[]): void {
+    this.subscribeCells = [...cells].filter((c) => c.length > 0);
   }
 
   /** Relay URLs this transport manages. */
@@ -608,7 +628,17 @@ export class NostrTransport {
   private resubscribe(ws: WebSocketLike): void {
     const subId = `sub${++this.subIdCounter}`;
     this.mainSubIds.set(ws, subId);
-    const msg: ClientMsg = ['REQ', subId, { kinds: [AIRPLANE_NOSTR_KIND], since: Math.floor(Date.now() / 1000) - 86400 }];
+    const nowSec = Math.floor(Date.now() / 1000);
+    // First subscribe replays the last 24h. A reconnect replays only
+    // since the previous subscribe (capped at 24h back), never the
+    // whole window again: reconnects must not replay-everything.
+    const since = this.lastSubscribeAtSec === null
+      ? nowSec - 86400
+      : Math.max(this.lastSubscribeAtSec, nowSec - 86400);
+    this.lastSubscribeAtSec = nowSec;
+    const filter: Record<string, unknown> = { kinds: [AIRPLANE_NOSTR_KIND], since, limit: 500 };
+    if (this.subscribeCells.length > 0) filter['#g'] = [...this.subscribeCells];
+    const msg: ClientMsg = ['REQ', subId, filter];
     try {
       ws.send(JSON.stringify(msg));
     } catch {

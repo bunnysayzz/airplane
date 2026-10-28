@@ -473,6 +473,35 @@ describe('NostrTransport reconnect', () => {
     await t.stop();
   });
 
+  test('subscribe filter narrows to cells and reconnect since does not replay 24h', async () => {
+    const sockets: FakeSocket[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://cell.relay'],
+      reconnectMs: 10,
+      cells: ['abcde', 'fghij'],
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+    });
+    await t.start();
+    await tick(20);
+    const firstReq = sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    expect(firstReq[2]['#g']).toEqual(['abcde', 'fghij']);
+    expect(firstReq[2].limit).toBe(500);
+    const firstSince = firstReq[2].since as number;
+    expect(firstSince).toBeLessThan(Math.floor(Date.now() / 1000) - 80000);
+    sockets[0].close(); // reconnect, auto-opens
+    await tick(50);
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    const secondReq = sockets[1].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    expect(secondReq[2]['#g']).toEqual(['abcde', 'fghij']);
+    expect(secondReq[2].since as number).toBeGreaterThan(firstSince + 80000);
+    await t.stop();
+  });
+
   test('stop before start is a safe no-op', async () => {
     const { t } = makeTransport();
     await expect(t.stop()).resolves.toBeUndefined();
