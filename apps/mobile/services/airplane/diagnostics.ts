@@ -170,7 +170,13 @@ const listeners = new Set<() => void>();
 // ------------------------------------------------------------ log sink
 // LOG queue item: the automatic log file. The sink receives only the
 // kind + detail pairs built below. No hook below receives post text,
-// location, cell ids or full pubkeys, so none can reach the file.
+// location, or cell ids, so none can reach the file. Full peer ids
+// DO reach the hooks (callers pass resolved ids), so the log call
+// sites below never log a raw peer id: peerLogLabel truncates a hex
+// id to its first 8 chars plus a truncation marker, and replaces a
+// mac: address with a short stable-per-session alias. The peers map
+// stays keyed by the full id; only the log label is redacted, and the
+// screen reads the snapshot, not the log lines, so no consumer changes.
 // The message hook drops the message id on purpose (see recordMessage).
 // A throwing sink must never break the collector.
 type DiagnosticsLogSink = (kind: string, detail: string) => void;
@@ -187,6 +193,32 @@ function logEvent(kind: string, detail: string): void {
   } catch {
     // logging never breaks diagnostics
   }
+}
+
+/**
+ * Log label for a peer id. Never the full 64-char id and never a
+ * mac: address: hex ids (full or tag:) keep only their first 8 chars
+ * plus a truncation marker, mac: addresses map to a short alias that
+ * is stable for the session so sightings of one peer stay grouped
+ * without revealing the address. Short ids pass through unchanged.
+ */
+const sessionPeerAliases = new Map<string, string>();
+
+function peerLogLabel(peerId: string): string {
+  if (peerId.startsWith('mac:')) {
+    let alias = sessionPeerAliases.get(peerId);
+    if (alias === undefined) {
+      alias = `mac-peer-${sessionPeerAliases.size + 1}`;
+      sessionPeerAliases.set(peerId, alias);
+    }
+    return alias;
+  }
+  const prefix = peerId.startsWith('tag:') ? 'tag:' : '';
+  const hex = prefix ? peerId.slice(prefix.length) : peerId;
+  if (/^[0-9a-fA-F]+$/.test(hex)) {
+    return hex.length > 8 ? `${prefix}${hex.slice(0, 8)}...` : peerId;
+  }
+  return peerId.length > 16 ? `${peerId.slice(0, 16)}...` : peerId;
 }
 
 function notify(): void {
@@ -326,7 +358,7 @@ export function recordPeerResolved(oldKey: string, peerId: string): void {
     old.peerId = peerId;
     peers.set(peerId, old);
   }
-  logEvent('peer', `resolved ${oldKey} -> ${peerId}`);
+  logEvent('peer', `resolved ${peerLogLabel(oldKey)} -> ${peerLogLabel(peerId)}`);
   notifyThrottled();
 }
 
@@ -335,7 +367,7 @@ export function recordPeerConnected(
   mtu: number,
   cccdSubscribed: boolean | null,
 ): void {
-  logEvent('peer', `connected ${peerId} mtu ${mtu} cccd ${cccdSubscribed}`);
+  logEvent('peer', `connected ${peerLogLabel(peerId)} mtu ${mtu} cccd ${cccdSubscribed}`);
   const peer = ensurePeer(peerId);
   peer.gattState = 'connected';
   peer.mtu = mtu;
@@ -347,7 +379,7 @@ export function recordPeerConnected(
 export function recordPeerDisconnected(peerId: string): void {
   const peer = peers.get(peerId);
   if (!peer) return;
-  logEvent('peer', `disconnected ${peerId}`);
+  logEvent('peer', `disconnected ${peerLogLabel(peerId)}`);
   peer.gattState = 'disconnected';
   notifyThrottled();
 }
@@ -356,38 +388,38 @@ export function recordPeerDisconnected(peerId: string): void {
 
 export function recordFragmentsSent(peerId: string, count: number): void {
   if (count <= 0) return;
-  logEvent('frames', `${peerId} fragments-sent ${count}`);
+  logEvent('frames', `${peerLogLabel(peerId)} fragments-sent ${count}`);
   ensurePeer(peerId).frames.fragmentsSent += count;
   notifyThrottled();
 }
 
 export function recordPacketSent(peerId: string): void {
-  logEvent('frames', `${peerId} packet-sent`);
+  logEvent('frames', `${peerLogLabel(peerId)} packet-sent`);
   ensurePeer(peerId).frames.packetsSent += 1;
   notifyThrottled();
 }
 
 export function recordFragmentsReceived(peerId: string, count: number): void {
   if (count <= 0) return;
-  logEvent('frames', `${peerId} fragments-received ${count}`);
+  logEvent('frames', `${peerLogLabel(peerId)} fragments-received ${count}`);
   ensurePeer(peerId).frames.fragmentsReceived += count;
   notifyThrottled();
 }
 
 export function recordIncompleteFragmentSet(peerId: string): void {
-  logEvent('frames', `${peerId} incomplete-fragment-set`);
+  logEvent('frames', `${peerLogLabel(peerId)} incomplete-fragment-set`);
   ensurePeer(peerId).frames.incompleteFragmentSets += 1;
   notifyThrottled();
 }
 
 export function recordPacketReceived(peerId: string): void {
-  logEvent('frames', `${peerId} packet-received`);
+  logEvent('frames', `${peerLogLabel(peerId)} packet-received`);
   ensurePeer(peerId).frames.packetsReceived += 1;
   notifyThrottled();
 }
 
 export function recordDedupDrop(peerId: string | null): void {
-  logEvent('frames', `dedup-drop ${peerId ?? 'unknown-peer'}`);
+  logEvent('frames', `dedup-drop ${peerId === null ? 'unknown-peer' : peerLogLabel(peerId)}`);
   dedupDropTotal += 1;
   if (peerId !== null) {
     const peer = peers.get(peerId);
@@ -479,6 +511,7 @@ export function resetDiagnosticsForTests(): void {
   dedupDropTotal = 0;
   listeners.clear();
   logSink = null;
+  sessionPeerAliases.clear();
   if (notifyTimer !== null) {
     clearTimeout(notifyTimer);
     notifyTimer = null;

@@ -14,7 +14,16 @@ import {
 } from './diagnosticsLog';
 import {
   recordAdvertiseFailure,
+  recordDedupDrop,
+  recordFragmentsReceived,
+  recordFragmentsSent,
+  recordIncompleteFragmentSet,
   recordMessage,
+  recordPacketReceived,
+  recordPacketSent,
+  recordPeerConnected,
+  recordPeerDisconnected,
+  recordPeerResolved,
   recordPeerSeen,
   resetDiagnosticsForTests,
   type DiagnosticsMessage,
@@ -213,5 +222,34 @@ describe('diagnostics log sink wiring and privacy', () => {
     const joined = lines.join('\n');
     expect(joined).not.toContain('deadbeef');
     expect(joined).not.toContain('hello secret post text');
+  });
+
+  test('a peer resolved to a full 64-char id never leaks that id to the log', async () => {
+    const port = memoryPort();
+    const writer = new DiagnosticsLogWriter(port);
+    await writer.load();
+    attachDiagnosticsLogWriter(writer);
+
+    const fullId = 'ab'.repeat(32);
+    recordPeerSeen('tag:0123456789abcdef', -60, '0123456789abcdef');
+    recordPeerResolved('tag:0123456789abcdef', fullId);
+    recordPeerConnected(fullId, 128, true);
+    recordFragmentsSent(fullId, 3);
+    recordFragmentsReceived(fullId, 2);
+    recordPacketSent(fullId);
+    recordPacketReceived(fullId);
+    recordIncompleteFragmentSet(fullId);
+    recordDedupDrop(fullId);
+    recordPeerDisconnected(fullId);
+    await writer.flush();
+
+    const joined = writer.getLines().join('\n');
+    expect(joined).not.toContain(fullId);
+    expect(joined).not.toMatch(/[0-9a-fA-F]{64}/);
+    expect(joined).toContain('connected');
+    expect(joined).toContain('abababab...');
+    // The snapshot still keys the peer by the full id; only the log
+    // label is redacted.
+    expect(joined).not.toContain('disconnected ' + fullId);
   });
 });
