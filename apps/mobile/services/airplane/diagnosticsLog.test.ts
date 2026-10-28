@@ -49,7 +49,11 @@ describe('diagnostics log line format', () => {
     expect(long.length).toBeLessThanOrEqual('1970-01-01T00:00:00.000Z scan '.length + 240);
   });
 
-  test('rotation keeps the newest lines under both caps', () => {
+  test('rotation counts UTF-8 bytes, not UTF-16 code units', () => {
+    // 1.5M e-acute chars are 1.5M code units but 3M UTF-8 bytes, so
+    // the 2MB byte cap drops the line; a code-unit count would keep it.
+    expect(rotateDiagnosticsLogLines(['é'.repeat(1_500_000)])).toEqual([]);
+  });
     const lines = Array.from({ length: MAX_DIAGNOSTICS_LOG_LINES + 10 }, (_, i) => `line-${i}`);
     const kept = rotateDiagnosticsLogLines(lines);
     expect(kept.length).toBe(MAX_DIAGNOSTICS_LOG_LINES);

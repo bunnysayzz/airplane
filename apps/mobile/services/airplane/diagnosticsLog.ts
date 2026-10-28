@@ -44,13 +44,22 @@ export function formatDiagnosticsLogLine(atMs: number, kind: string, detail: str
 /** A complete log line starts with an ISO timestamp and a kind token. */
 const TIMESTAMPED_LINE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \S+/;
 
+/** Byte length of a line in UTF-8, not UTF-16 code units. */
+function utf8ByteLength(line: string): number {
+  const encoder = (
+    globalThis as { TextEncoder?: new () => { encode(input: string): Uint8Array } }
+  ).TextEncoder;
+  if (encoder === undefined) return line.length;
+  return new encoder().encode(line).length;
+}
+
 /** Drop oldest lines until both caps hold. Pure, for tests and the writer. */
 export function rotateDiagnosticsLogLines(lines: string[]): string[] {
   const kept = lines.slice();
   while (kept.length > MAX_DIAGNOSTICS_LOG_LINES) kept.shift();
-  let bytes = kept.reduce((sum, line) => sum + line.length + 1, 0);
+  let bytes = kept.reduce((sum, line) => sum + utf8ByteLength(line) + 1, 0);
   while (kept.length > 0 && bytes > MAX_DIAGNOSTICS_LOG_BYTES) {
-    bytes -= kept[0].length + 1;
+    bytes -= utf8ByteLength(kept[0]) + 1;
     kept.shift();
   }
   return kept;
@@ -156,7 +165,7 @@ export class DiagnosticsLogWriter {
     for (const line of pending) {
       this.pushLine(line);
     }
-    this.byteCount = this.lines.reduce((sum, line) => sum + line.length + 1, 0);
+    this.byteCount = this.lines.reduce((sum, line) => sum + utf8ByteLength(line) + 1, 0);
     // The final flush runs whenever a flush was requested during load
     // (dirty), not only when pending lines exist: without it, a flush
     // requested during the load window would never land.
@@ -197,9 +206,9 @@ export class DiagnosticsLogWriter {
 
   private pushLine(line: string): void {
     this.lines.push(line);
-    this.byteCount += line.length + 1;
+    this.byteCount += utf8ByteLength(line) + 1;
     this.lines = rotateDiagnosticsLogLines(this.lines);
-    this.byteCount = this.lines.reduce((sum, l) => sum + l.length + 1, 0);
+    this.byteCount = this.lines.reduce((sum, l) => sum + utf8ByteLength(l) + 1, 0);
   }
 
   /** Test seam: the current lines, oldest first. */
