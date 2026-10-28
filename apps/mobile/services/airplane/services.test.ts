@@ -17,6 +17,7 @@ import {
   authorLabelFor,
   toPostCardModel,
   listFeedPosts,
+  listFeedPage,
   subscribeFeed,
   notifyFeedListeners,
   __resetFeedListenersForTests,
@@ -234,6 +235,31 @@ describe('listFeedPosts', () => {
     expect(cards[0].views).toBeGreaterThanOrEqual(1);
     expect(cards[1].worldConfirmed).toBe(false);
     expect(cards[0].authorLabel).toMatch(/^[a-z]+ [a-z]+·[0-9a-f]{4}$/);
+  });
+
+  it('pages same-second posts exactly once via the tuple cursor', async () => {
+    const nowSec = Math.floor(Date.now() / 1000) - 60;
+    const store = getStore();
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const post = makePost({ created_at: nowSec });
+      await store.saveEvent(post);
+      ids.push(toHex(post.id));
+    }
+    const page1 = await listFeedPage({ cells: ['tdr1v'], limit: 2 });
+    expect(page1.cards).toHaveLength(2);
+    expect(page1.nextCursor).not.toBeNull();
+    const page2 = await listFeedPage({
+      cells: ['tdr1v'],
+      limit: 2,
+      before: page1.nextCursor!.before,
+      beforeId: page1.nextCursor!.beforeId,
+    });
+    expect(page2.cards).toHaveLength(1);
+    expect(page2.nextCursor).toBeNull();
+    const seen = [...page1.cards, ...page2.cards].map((c) => c.eventId);
+    expect(new Set(seen).size).toBe(3);
+    expect(seen.sort()).toEqual(ids.sort());
   });
 
   it('scopes by cell and applies the before cursor', async () => {

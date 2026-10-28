@@ -4,11 +4,14 @@
 export type { PostCardModel } from './types';
 export {
   listFeedPosts,
+  listFeedPage,
   subscribeFeed,
   notifyFeedListeners,
   authorLabelFor,
   toPostCardModel,
   type FeedQueryOpts,
+  type FeedPageCursor,
+  type FeedPage,
   type FeedListener,
 } from './feed';
 export { publishPost, tagsForPublish, type PublishOpts } from './composer';

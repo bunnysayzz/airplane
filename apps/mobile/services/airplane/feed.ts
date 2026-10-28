@@ -6,7 +6,7 @@
 // PostCardModel the card UI consumes. Relative-time formatting stays in the
 // card; this layer keeps the raw `createdAtMs` timestamp.
 
-import { EVENT_KIND_POST, toHex, type FeedPost } from '@airplane/protocol';
+import { EVENT_KIND_POST, toHex, type FeedPost, type Hex64 } from '@airplane/protocol';
 import { DEFAULT_RETENTION_SEC, rankScore, type ListFeedOpts } from '@airplane/storage';
 import type { PostCardModel } from './types';
 import { ensureStarsHydrated, markStarPostKnown, resolveOwnPubkeyHex, starViewFor } from './stars';
@@ -23,6 +23,32 @@ export interface FeedQueryOpts {
    * (seconds) are returned. Pass the previous page's last post timestamp.
    */
   before?: number;
+  /**
+   * Tie-break cursor for equal `created_at` rows: only rows with
+   * (created_at, id) strictly older than (before, beforeId) are returned.
+   * Requires `before`. Always pair it with `before`; a timestamp-only
+   * cursor re-returns page 1 rows and permanently skips same-second
+   * posts cut off by the page limit.
+   */
+  beforeId?: Hex64;
+}
+
+/**
+ * Opaque pagination cursor for {@link listFeedPage}. It is the store-order
+ * boundary (the last row the store returned, newest-first), NOT the last
+ * ranked card: ranking re-sorts the page, so a cursor taken from ranked
+ * order is not a store boundary at all.
+ */
+export interface FeedPageCursor {
+  before: number;
+  beforeId: Hex64;
+}
+
+/** One page from {@link listFeedPage}: ranked cards plus the next cursor. */
+export interface FeedPage {
+  cards: PostCardModel[];
+  /** Null when the store returned a short page, meaning no more rows. */
+  nextCursor: FeedPageCursor | null;
 }
 
 const DEFAULT_LIMIT = 50;
@@ -82,20 +108,30 @@ export function toPostCardModel(
 }
 
 /**
- * List feed posts for the given cells, ranked highest-score first.
+ * List one feed page for the given cells, ranked highest-score first.
  *
  * The store returns newest-first; the protocol ranking score decides the
  * final order (views win, recency decays). Equal scores keep insertion order
- * (Array.prototype.sort is stable).
+ * (Array.prototype.sort is stable). The next cursor comes from the last
+ * row in store order, before ranking: pass it back as `before`/`beforeId`
+ * for the next page, and every row is returned exactly once even when
+ * several posts share one `created_at` second.
  */
-export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[]> {
+export async function listFeedPage(opts: FeedQueryOpts): Promise<FeedPage> {
+  const limit = opts.limit ?? DEFAULT_LIMIT;
   const storeOpts: ListFeedOpts = {
     cells: opts.cells,
-    limit: opts.limit ?? DEFAULT_LIMIT,
+    limit,
     before: opts.before,
+    beforeId: opts.beforeId,
   };
   const store = getStore();
   const posts = await store.listFeed(storeOpts);
+  const last = posts.length > 0 ? posts[posts.length - 1] : null;
+  const nextCursor =
+    last && posts.length >= limit
+      ? { before: last.event.created_at, beforeId: toHex(last.event.id) as Hex64 }
+      : null;
   const ranked = [...posts].sort((a, b) => b.score - a.score);
   // T17: the store is proven working by the query above, so a hydration
   // failure here propagates (it means the store itself is broken).
@@ -119,7 +155,16 @@ export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[
       }, reshareViewFor(eventId, ownHex ?? undefined));
     }),
   );
-  return cards;
+  return { cards, nextCursor };
+}
+
+/**
+ * List feed posts for the given cells, ranked highest-score first.
+ * Single-page convenience over {@link listFeedPage}: for paged scrolling
+ * use listFeedPage so the tuple cursor is carried between pages.
+ */
+export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[]> {
+  return (await listFeedPage(opts)).cards;
 }
 
 /**

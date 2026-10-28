@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, RefreshControl, Text, View } from 'react-
 import { FlashList, FlashListRef } from '@shopify/flash-list';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { listFeedPosts, subscribeFeed } from '../../services/airplane/feed';
+import { listFeedPage, subscribeFeed, type FeedPageCursor } from '../../services/airplane/feed';
 import { toggleReshare } from '../../services/airplane/reshares';
 import { toggleStar } from '../../services/airplane/stars';
 import { trackViewability } from '../../services/airplane/viewTracker';
@@ -64,17 +64,34 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
     // The pagination cursor reads the latest posts; a ref avoids a stale closure in `load`
     const postsRef = useRef<PostCardModel[]>([]);
     postsRef.current = posts;
+    // Store-order tuple cursor from the last listFeedPage result. Ranked
+    // order is not a store boundary, so the cursor must never be derived
+    // from the last visible card.
+    const nextCursorRef = useRef<FeedPageCursor | null>(null);
 
     const load = useCallback(
-        async (mode: 'initial' | 'refresh' | 'more', before?: number) => {
+        async (mode: 'initial' | 'refresh' | 'more', cursor?: FeedPageCursor | null) => {
             if (mode === 'initial') setLoading(true);
             if (mode === 'refresh') setRefreshing(true);
             if (mode === 'more') setLoadingMore(true);
-            if (mode !== 'more') setLoadError(false);
+            if (mode !== 'more') {
+                setLoadError(false);
+                nextCursorRef.current = null;
+            }
             try {
-                const fresh = await listFeedPosts({ cells, limit: PAGE_LIMIT, before });
-                setHasMore(fresh.length >= PAGE_LIMIT);
-                setPosts(current => (mode === 'more' ? [...current, ...fresh] : fresh));
+                const page = await listFeedPage({
+                    cells,
+                    limit: PAGE_LIMIT,
+                    before: cursor?.before,
+                    beforeId: cursor?.beforeId,
+                });
+                nextCursorRef.current = page.nextCursor;
+                setHasMore(page.nextCursor !== null);
+                setPosts(current =>
+                    mode === 'more'
+                        ? [...current, ...page.cards.filter(c => !current.some(p => p.eventId === c.eventId))]
+                        : page.cards,
+                );
                 if (mode !== 'more') setPendingCount(0);
             } catch (error) {
                 console.error('Failed to load feed:', error);
@@ -150,9 +167,7 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
     const handleLoadMore = () => {
         if (loadingMoreRef.current || loadingMore || !hasMore || loading) return;
         loadingMoreRef.current = true;
-        const current = postsRef.current;
-        const before = current.length > 0 ? Math.floor(current[current.length - 1].createdAtMs / 1000) : undefined;
-        void load('more', before).finally(() => {
+        void load('more', nextCursorRef.current).finally(() => {
             loadingMoreRef.current = false;
         });
     };
