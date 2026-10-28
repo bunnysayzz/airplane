@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Linking, Pressable, ScrollView, Text, View } from 'react-native';
+import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Card, SectionLabel } from '../../components/ui';
 import { useTheme } from '../../src/theme/themeContext';
@@ -62,15 +63,26 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
   useEffect(() => {
     refreshPermissions();
     const unsub = subscribeDiagnostics(() => setSnapshot(getDiagnosticsSnapshot()));
+    // Slower poll, not every second: the throttled subscription drives
+    // snapshot updates, and this poll only needs to catch log status
+    // changes that arrive without a collector event. Share and focus
+    // refresh log status explicitly, so nothing waits on the poll.
     const timer = setInterval(() => {
       setSnapshot(getDiagnosticsSnapshot());
       setLogStatus(getDiagnosticsLogStatus());
-    }, 1000);
+    }, 5000);
     return () => {
       unsub();
       clearInterval(timer);
     };
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      setSnapshot(getDiagnosticsSnapshot());
+      setLogStatus(getDiagnosticsLogStatus());
+    }, []),
+  );
 
   const formatTime = (atMs: number | null): string =>
     atMs === null ? t('settings.diagnosticsNever') : new Date(atMs).toLocaleTimeString();
