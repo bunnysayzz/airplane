@@ -2,11 +2,12 @@
 // DM P1 tests: sealed round-trip, requests routing, block silent-drop,
 // delete-local-only, outbox retry -> Failed after cap, per-conversation FIFO.
 
-import { ed25519 } from '@noble/curves/ed25519.js';
+import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
   DM_MAX_ATTEMPTS,
   chacha20,
   dmConversationKey,
+  dmConversationKeyX,
   dmKeypairFromDeviceSecret,
   dmToHex,
   meshPubkeyToX25519,
@@ -85,6 +86,35 @@ describe('DM crypto', () => {
     raw[40] ^= 0x01;
     expect(nip44Decrypt(raw.toString('base64'), key)).toBeNull();
     expect(nip44Decrypt('not-base64!!', key)).toBeNull();
+  });
+
+  test('F11: unseal rejects oversize content, mistagged rumors, and rumors without a p tag', () => {
+    const alice = ed25519.utils.randomSecretKey();
+    const bob = ed25519.utils.randomSecretKey();
+    const aliceHex = dmToHex(ed25519.getPublicKey(alice));
+    const bobHex = dmToHex(ed25519.getPublicKey(bob));
+    const bobKeys = dmKeypairFromDeviceSecret(bob);
+    // Oversize content: sealed fine, rejected on ingress.
+    const big = sealDm('x'.repeat(5000), aliceHex, bobHex);
+    expect(unsealDm(big, bobKeys)).toBeNull();
+    // Correct p tag passes, wrong expected recipient fails.
+    const ok = sealDm('fine', aliceHex, bobHex);
+    expect(unsealDm(ok, bobKeys, bobHex)?.content).toBe('fine');
+    expect(unsealDm(ok, bobKeys, 'a'.repeat(64))).toBeNull();
+    // A rumor with no p tag at all fails when a recipient is expected.
+    const ephemeralSecret = x25519.utils.randomSecretKey();
+    const ephemeralPubkey = x25519.getPublicKey(ephemeralSecret);
+    const convKey = dmConversationKeyX(ephemeralSecret, meshPubkeyToX25519(ed25519.getPublicKey(bob)));
+    const noTag = {
+      ephemeralPubkeyHex: dmToHex(ephemeralPubkey),
+      recipientHex: bobHex,
+      sealed: nip44Encrypt(
+        JSON.stringify({ kind: 14, pubkey: aliceHex, created_at: 1000, tags: [], content: 'no tag' }),
+        convKey,
+      ),
+      createdAt: 1000,
+    };
+    expect(unsealDm(noTag, bobKeys, bobHex)).toBeNull();
   });
 
   test('sealed round-trip: recipient reads it, relay view and third party get gibberish', () => {

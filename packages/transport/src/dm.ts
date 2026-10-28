@@ -402,8 +402,18 @@ export function sealDm(
  * Unseal an envelope addressed to this device. Returns the rumor, or null
  * when the envelope is not for us, corrupt, or tampered with (relay view and
  * any third party get null — gibberish, never plaintext).
+ * When `expectedRecipientHex` is given, the rumor tags must contain the
+ * matching p tag, or the rumor is rejected. Content over DM_TEXT_MAX_BYTES
+ * is always rejected: the cap was previously sender-side only, so ingress
+ * accepted arbitrarily large messages. Rejection returns null, which the
+ * receive path already treats as ignored. No protocol change: honest
+ * clients already seal within the cap with a correct p tag.
  */
-export function unsealDm(envelope: DmEnvelope, ownDmKeys: DmKeypair): DmRumor | null {
+export function unsealDm(
+  envelope: DmEnvelope,
+  ownDmKeys: DmKeypair,
+  expectedRecipientHex?: string,
+): DmRumor | null {
   try {
     const ephemeral = dmFromHex(envelope.ephemeralPubkeyHex);
     if (!ephemeral || ephemeral.length !== 32) return null;
@@ -413,6 +423,12 @@ export function unsealDm(envelope: DmEnvelope, ownDmKeys: DmKeypair): DmRumor | 
     const rumor = JSON.parse(json) as DmRumor;
     if (rumor.kind !== 14 || typeof rumor.content !== 'string' || typeof rumor.pubkey !== 'string') return null;
     if (!isHex64(rumor.pubkey)) return null;
+    if (new TextEncoder().encode(rumor.content).length > DM_TEXT_MAX_BYTES) return null;
+    if (expectedRecipientHex !== undefined) {
+      if (!Array.isArray(rumor.tags)) return null;
+      const tagged = rumor.tags.some(tag => tag[0] === 'p' && tag[1] === expectedRecipientHex);
+      if (!tagged) return null;
+    }
     return rumor;
   } catch {
     return null;

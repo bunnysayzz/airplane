@@ -431,7 +431,7 @@ export class DmService {
   /** Route one incoming sealed envelope. Returns what happened (for tests/logs). */
   async receiveEnvelope(envelope: DmEnvelope): Promise<'inbox' | 'request' | 'dropped' | 'ignored'> {
     if (envelope.recipientHex !== this.ownMeshHex()) return 'ignored';
-    const rumor = unsealDm(envelope, this.ownKeys());
+    const rumor = unsealDm(envelope, this.ownKeys(), this.ownMeshHex());
     if (!rumor) return 'ignored'; // not for us / corrupt: never surface, never crash
     const senderHex = rumor.pubkey;
     if (senderHex === this.ownMeshHex()) return 'ignored';
@@ -681,7 +681,7 @@ export class DmService {
     // payload, and the envelope header arrives with it at receive time.
     const envelope = this.incomingEnvelopes.get(m.id);
     if (!envelope) return null;
-    const rumor: DmRumor | null = unsealDm(envelope, this.ownKeys());
+    const rumor: DmRumor | null = unsealDm(envelope, this.ownKeys(), this.ownMeshHex());
     return rumor ? rumor.content : null;
   }
 
