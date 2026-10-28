@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // @airplane/storage - public surface.
 
-export type { StorePort, KvPort, DatabasePort, ListFeedOpts } from './ports';
-export { MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005 } from './schema';
+export type { StorePort, KvPort, DatabasePort, ListFeedOpts, PostState } from './ports';
+export { MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006 } from './schema';
 export {
   MemoryEventStore,
   MemoryKv,

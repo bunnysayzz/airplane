@@ -33,6 +33,8 @@ import { OpSqliteStore, type DatabasePort } from '@airplane/storage';
 /** Minimal structural subset of the op-sqlite v18 DB surface used here. */
 export interface OpSqliteDbLike {
   execute(query: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
+  /** Close the connection, when the driver exposes it (op-sqlite v18 does). */
+  close?: () => Promise<void> | void;
 }
 
 /** Executor interface the adapter runs against; fakes implement this in tests. */
@@ -83,6 +85,20 @@ export class OpSqliteDatabasePort implements DatabasePort {
     const { rows } = await this.executor.execute(sql, params ?? []);
     return rows.map((row) => normalizeRow(row) as T);
   }
+
+  /** Checkpoint the WAL back into the database file, then close. Never throws. */
+  async close(): Promise<void> {
+    try {
+      await this.executor.execute('PRAGMA wal_checkpoint(TRUNCATE)');
+    } catch {
+      // Checkpoint is housekeeping; a failed one must not block teardown.
+    }
+    try {
+      await this.executor.close?.();
+    } catch {
+      // Closing twice or on a dead connection is not a teardown failure.
+    }
+  }
 }
 
 /**
@@ -92,10 +108,21 @@ export class OpSqliteDatabasePort implements DatabasePort {
  * so it cannot deadlock on the gate) and every exec/query awaits it.
  * A failed migration fails every later operation with the same error —
  * never a silent fall back to in-memory storage, which would lose posts.
+ *
+ * Connection housekeeping runs on every open, not only on fresh
+ * installs: WAL mode, a busy timeout, and journal size limits are
+ * applied after migration succeeds, so a legacy database that skipped
+ * MIGRATION_001's WAL pragma gets them too. close() checkpoints and
+ * closes for teardown paths (see store.closeStore).
  */
 export function createSqliteDatabasePort(executor?: OpSqliteExecutor): DatabasePort {
   const raw = new OpSqliteDatabasePort(executor ?? loadRealExecutor());
-  const ready = OpSqliteStore.migrate(raw);
+  const ready = OpSqliteStore.migrate(raw).then(async () => {
+    await raw.exec('PRAGMA journal_mode = WAL');
+    await raw.exec('PRAGMA busy_timeout = 5000');
+    await raw.exec('PRAGMA synchronous = NORMAL');
+    await raw.exec('PRAGMA journal_size_limit = 1048576');
+  });
   // Mark the rejection handled so an unused port never surfaces an
   // unhandled rejection; awaiters of `ready` below still see the error.
   ready.catch(() => {
@@ -109,6 +136,14 @@ export function createSqliteDatabasePort(executor?: OpSqliteExecutor): DatabaseP
     query: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
       await ready;
       return raw.query<T>(sql, params);
+    },
+    close: async (): Promise<void> => {
+      try {
+        await ready;
+      } catch {
+        // A failed open still gets a teardown attempt below.
+      }
+      await raw.close();
     },
   };
 }

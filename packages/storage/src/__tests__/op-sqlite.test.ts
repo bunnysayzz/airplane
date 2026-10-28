@@ -60,7 +60,7 @@ function seedBytes(seed: number, len = 32): Uint8Array {
 
 interface FixtureOpts {
   seed: number;
-  kind?: 1 | 2 | 3;
+  kind?: 1 | 2 | 3 | 4 | 5;
   geohash?: string;
   createdAt?: number;
   tags?: string[][];
@@ -126,14 +126,14 @@ async function schemaVersion(port: DatabasePort): Promise<number[]> {
 }
 
 describe('migrate', () => {
-  test('idempotent: running twice is a no-op, MAX(version) = 5', async () => {
+  test('idempotent: running twice is a no-op, MAX(version) = 6', async () => {
     const { port } = await migratedDb();
     await OpSqliteStore.migrate(port);
     await OpSqliteStore.migrate(port);
-    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
     const max = await port.query<{ v: number }>(`SELECT MAX(version) AS v FROM schema_version`);
-    expect(max[0].v).toBe(5);
-    // Tables from all five migrations exist.
+    expect(max[0].v).toBe(6);
+    // Tables from all six migrations exist.
     for (const t of ['events', 'world_confirmed', 'tombstones', 'star_events', 'star_known_posts', 'reshare_events', 'schema_version']) {
       const rows = await port.query<{ name: string }>(
         `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
@@ -143,7 +143,7 @@ describe('migrate', () => {
     }
   });
 
-  test('upgrade path: legacy 001-only DB keeps its data, reaches version 5', async () => {
+  test('upgrade path: legacy 001-only DB keeps its data, reaches version 6', async () => {
     const db = new DatabaseSync(':memory:');
     openDbs.push(db);
     const port = makePort(db, false);
@@ -157,7 +157,7 @@ describe('migrate', () => {
 
     await OpSqliteStore.migrate(port);
 
-    expect(await schemaVersion(port)).toEqual([2, 3, 4, 5]); // 001 was legacy, not re-recorded
+    expect(await schemaVersion(port)).toEqual([2, 3, 4, 5, 6]); // 001 was legacy, not re-recorded
     const got = await store.getEvent(bytesToHex(e.id));
     expect(got).not.toBeNull();
     expect(got!.content).toBe('legacy post'); // no data wipe
@@ -192,43 +192,134 @@ describe('migrate', () => {
 
     await expect(OpSqliteStore.migrate(port)).resolves.toBeUndefined();
 
-    expect(await schemaVersion(port)).toEqual([3, 4, 5]);
+    expect(await schemaVersion(port)).toEqual([3, 4, 5, 6]);
     const got = await store.getEvent(bytesToHex(e.id));
     expect(got!.content).toBe('era-002 post');
     expect(await store.isWorldConfirmed(bytesToHex(e.id))).toBe(true);
   });
 
-  test('failed migration rolls back and records no version row', async () => {
+  test('missing version row resumes gracefully: tables exist, migrate re-records', async () => {
     const db = new DatabaseSync(':memory:');
     openDbs.push(db);
     const port = makePort(db, false);
-    await OpSqliteStore.migrate(port); // v5, healthy
-    // Force a re-migration of 004 by deleting its version row (and the
-    // later 005 row, so MAX(version) drops back to 3 and the runner
-    // re-enters the upgrade path instead of returning early): the
-    // CREATE TABLE must fail and roll back.
+    await OpSqliteStore.migrate(port); // v6, healthy
+    // Simulate a kill after the 004 DDL committed but before its version
+    // row landed: drop the 004, 005, and 006 rows so MAX(version) drops
+    // to 3. Re-running migrate must succeed (IF NOT EXISTS) and re-record.
     await port.exec(`DELETE FROM schema_version WHERE version = 4`);
     await port.exec(`DELETE FROM schema_version WHERE version = 5`);
-    await expect(OpSqliteStore.migrate(port)).rejects.toThrow(/already exists/i);
-    expect(await schemaVersion(port)).toEqual([1, 2, 3]); // 004 not recorded
-    // Earlier migrations' data still intact.
+    await port.exec(`DELETE FROM schema_version WHERE version = 6`);
+    await expect(OpSqliteStore.migrate(port)).resolves.toBeUndefined();
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
     const store = new OpSqliteStore(port);
     const e = makeEvent({ seed: 103 });
     await expect(store.getEvent(bytesToHex(e.id))).resolves.toBeNull();
+  });
+
+  test('kill between 002 DDL and version row resumes without losing data', async () => {
+    const db = new DatabaseSync(':memory:');
+    openDbs.push(db);
+    const port = makePort(db, false);
+    // v1 install: 001 applied, version row 1 recorded, 002 DDL applied
+    // but its version row never landed, with a confirmed id already stored.
+    for (const stmt of splitStatements(MIGRATION_001)) {
+      await port.exec(stmt);
+    }
+    await port.exec(
+      `CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`,
+    );
+    await port.exec(`INSERT INTO schema_version (version, applied_at) VALUES (1, ?)`, [NOW]);
+    for (const stmt of splitStatements(MIGRATION_002)) {
+      await port.exec(stmt);
+    }
+    const e = makeEvent({ seed: 104 });
+    await port.exec(`INSERT INTO world_confirmed (event_id, confirmed_at) VALUES (?, ?)`, [
+      e.id,
+      NOW,
+    ]);
+    await expect(OpSqliteStore.migrate(port)).resolves.toBeUndefined();
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+    const store = new OpSqliteStore(port);
+    expect(await store.isWorldConfirmed(bytesToHex(e.id))).toBe(true);
+  });
+
+  test('MIGRATION_006 creates the feed index matching the real sort', async () => {
+    const { port } = await migratedDb();
+    const rows = await port.query<{ name: string; sql: string }>(
+      `SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_feed_v2'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sql).toContain('created_at DESC');
+    expect(rows[0].sql).toContain('id DESC');
+    // The old index is kept alongside it.
+    const old = await port.query<{ name: string }>(
+      `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_feed'`,
+    );
+    expect(old).toHaveLength(1);
+  });
+
+  test('splitStatements respects semicolons inside strings and comments', async () => {
+    const stmts = splitStatements(
+      `CREATE TABLE t(a TEXT DEFAULT 'x;y'); -- a ; comment\n` +
+        `CREATE TABLE u(b TEXT DEFAULT 'it''s; fine'); /* block ; comment */ ` +
+        `CREATE TABLE v(c INT);`,
+    );
+    expect(stmts).toHaveLength(3);
+    expect(stmts[0]).toContain(`'x;y'`);
+    expect(stmts[1]).toContain(`'it''s; fine'`);
+    expect(stmts[2]).toContain('CREATE TABLE v');
+  });
+
+  test('concurrent migrate calls on one port share a single run', async () => {
+    const db = new DatabaseSync(':memory:');
+    openDbs.push(db);
+    const port = makePort(db, false);
+    await Promise.all([OpSqliteStore.migrate(port), OpSqliteStore.migrate(port)]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+    // A later migrate after the shared run settles still works.
+    await OpSqliteStore.migrate(port);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  test('a database from a newer build fails fast with a clear error', async () => {
+    const { port } = await migratedDb();
+    await port.exec(`INSERT INTO schema_version (version, applied_at) VALUES (7, ?)`, [NOW]);
+    await expect(OpSqliteStore.migrate(port)).rejects.toThrow(
+      /database version 7 is newer than this app supports \(max 6\)/,
+    );
+  });
+
+  test('MIGRATION_006 drops the unused indexes but keeps the reserved tables', async () => {
+    const { port } = await migratedDb();
+    for (const idx of ['idx_peers_seen', 'idx_seen_at', 'idx_logs_ts', 'idx_world_confirmed_at']) {
+      const rows = await port.query<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`,
+        [idx],
+      );
+      expect(rows).toHaveLength(0);
+    }
+    for (const t of ['peers', 'sync_state', 'seen', 'frag_buf', 'logs']) {
+      const rows = await port.query<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+        [t],
+      );
+      expect(rows).toHaveLength(1);
+    }
   });
 
   test('failed 003 migration rolls back and records no version row', async () => {
     const db = new DatabaseSync(':memory:');
     openDbs.push(db);
     const port = makePort(db, false);
-    await OpSqliteStore.migrate(port); // v5, healthy
+    await OpSqliteStore.migrate(port); // v6, healthy
     // Force a re-migration of 003 by deleting its version row (and the
-    // later 004 and 005 rows, so the runner re-enters the upgrade path
-    // instead of returning early): the CREATE TABLE must fail and roll
-    // back, since the tombstones table already exists.
+    // later 004, 005, and 006 rows, so the runner re-enters the upgrade
+    // path instead of returning early): the CREATE TABLE must fail and
+    // roll back, since the tombstones table already exists.
     await port.exec(`DELETE FROM schema_version WHERE version = 3`);
     await port.exec(`DELETE FROM schema_version WHERE version = 4`);
     await port.exec(`DELETE FROM schema_version WHERE version = 5`);
+    await port.exec(`DELETE FROM schema_version WHERE version = 6`);
     await expect(OpSqliteStore.migrate(port)).rejects.toThrow(/already exists/i);
     expect(await schemaVersion(port)).toEqual([1, 2]); // 003 not recorded
     // Earlier migrations' data still intact.
@@ -239,6 +330,26 @@ describe('migrate', () => {
 });
 
 describe('saveEvent / getEvent', () => {
+  test('getEvent returns null (never throws) for malformed hex', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    await expect(store.getEvent('xyz')).resolves.toBeNull();
+    await expect(store.getEvent('a'.repeat(63))).resolves.toBeNull();
+    await expect(store.getEvent('g'.repeat(64))).resolves.toBeNull();
+    await expect(store.getEvent('')).resolves.toBeNull();
+  });
+
+  test('misrouted kind 4/5 events fail with a routing error, not a CHECK error', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    await expect(store.saveEvent(makeEvent({ seed: 95, kind: 4 }))).rejects.toThrow(
+      /saveStarEvent for kind 4/,
+    );
+    await expect(store.saveEvent(makeEvent({ seed: 96, kind: 5 }))).rejects.toThrow(
+      /saveReshareEvent for kind 5/,
+    );
+  });
+
   test('round-trip and upsert idempotence (first write wins)', async () => {
     const { port } = await migratedDb();
     const store = new OpSqliteStore(port);
@@ -264,6 +375,20 @@ describe('saveEvent / getEvent', () => {
       await store.saveEvent(e);
       expect(await store.getEvent(bytesToHex(e.id))).not.toBeNull();
     }
+  });
+
+  test('concurrent saveEvent calls serialize: a relay burst loses nothing', async () => {
+    // Emulated transactions only: this is the path that used to fail the
+    // second BEGIN while the first transaction was still open.
+    const { port } = await migratedDb(false);
+    const store = new OpSqliteStore(port);
+    const events = Array.from({ length: 20 }, (_, i) => makeEvent({ seed: 300 + i }));
+    await Promise.all(events.map((e) => store.saveEvent(e)));
+    for (const e of events) {
+      expect(await store.getEvent(bytesToHex(e.id))).not.toBeNull();
+    }
+    const feed = await store.listFeed({ cells: ['tdr1v'], limit: 50, nowSec: NOW });
+    expect(feed).toHaveLength(20);
   });
 });
 
@@ -386,6 +511,24 @@ describe('saveReceipt', () => {
     expect(await store.countViews(postId)).toBe(2);
   });
 
+  test('concurrent receipts for one bucket: exactly one counts, rest report duplicate', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    const post = makeEvent({ seed: 6 });
+    const postId = bytesToHex(post.id);
+    await store.saveEvent(post);
+    const day = NOW - (NOW % 86400);
+    const base = makeReceipt(7, postId, day + 100);
+    const attempts = Array.from({ length: 5 }, (_, i) => {
+      const r = makeReceipt(20 + i, postId, day + 100);
+      r.pubkey = base.pubkey.slice();
+      return r;
+    });
+    const results = await Promise.all(attempts.map((r) => store.saveReceipt(r)));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await store.countViews(postId)).toBe(1);
+  });
+
   test('rejects non-receipt kinds and tagless receipts', async () => {
     const { port } = await migratedDb();
     const store = new OpSqliteStore(port);
@@ -448,6 +591,40 @@ describe('listFeed', () => {
     ).rejects.toThrow(/beforeId requires before/);
   });
 
+  test('one corrupt tags blob does not fail the whole feed page', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    const good = makeEvent({ seed: 71 });
+    await store.saveEvent(good);
+    const bad = makeEvent({ seed: 72 });
+    await port.exec(
+      `INSERT INTO events
+         (id, pubkey, kind, created_at, geohash, tags, content, sig,
+          received_at, expires_at, deleted)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      [
+        bad.id, bad.pubkey, bad.kind, bad.created_at, bad.geohash,
+        new TextEncoder().encode('not-json{{'),
+        bad.content, bad.sig, NOW, bad.created_at + 24 * 3600,
+      ],
+    );
+    const feed = await store.listFeed({ cells: ['tdr1v'], limit: 10, nowSec: NOW });
+    expect(feed).toHaveLength(1);
+    expect(bytesToHex(feed[0].event.id)).toBe(bytesToHex(good.id));
+    expect(await store.getEvent(bytesToHex(bad.id))).toBeNull();
+    // Corrupt star rows are skipped the same way, not page-failing.
+    await port.exec(
+      `INSERT INTO star_events
+         (event_id, pubkey, target_id, created_at, geohash, tags, content, sig)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        seedBytes(73), seedBytes(1073), good.id, NOW, 'tdr1v',
+        new TextEncoder().encode('not-json{{'), '', seedBytes(2073, 64),
+      ],
+    );
+    expect(await store.listStarEvents()).toHaveLength(0);
+  });
+
   test('expired posts are invisible to the feed even before pruning', async () => {
     const { port } = await migratedDb();
     const store = new OpSqliteStore(port, 60);
@@ -478,6 +655,50 @@ describe('pruneExpired', () => {
     expect(await store.countViews(oldId)).toBe(0);
     expect(await store.countViews(freshId)).toBe(1);
     expect(await store.listFeed({ cells: ['tdr1v'], limit: 10 })).toHaveLength(1);
+  });
+
+  test('prunes star, reshare, confirmation, tombstone, and known-post rows for expired posts only', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port, 3600);
+    const oldPost = makeEvent({ seed: 25, createdAt: NOW - 7200 });
+    const oldId = bytesToHex(oldPost.id);
+    const freshPost = makeEvent({ seed: 26, createdAt: NOW - 100 });
+    const freshId = bytesToHex(freshPost.id);
+    await store.saveEvent(oldPost);
+    await store.saveEvent(freshPost);
+    // Star/reshare events need a valid target tag; build them directly.
+    const starFor = (seed: number, postId: string): SignedEvent => ({
+      id: seedBytes(seed), pubkey: seedBytes(seed + 1000), created_at: NOW - 100,
+      kind: 4, geohash: 'tdr1v', tags: [['e', postId]], content: 'star',
+      sig: seedBytes(seed + 2000, 64),
+    });
+    const reshareFor = (seed: number, postId: string): SignedEvent => ({
+      id: seedBytes(seed), pubkey: seedBytes(seed + 1000), created_at: NOW - 100,
+      kind: 5, geohash: 'tdr1v', tags: [['e', postId]], content: '',
+      sig: seedBytes(seed + 2000, 64),
+    });
+    await store.saveStarEvent(starFor(27, oldId));
+    await store.saveStarEvent(starFor(28, freshId));
+    await store.saveReshareEvent(reshareFor(29, oldId));
+    await store.saveReshareEvent(reshareFor(30, freshId));
+    await store.markWorldConfirmed(oldId);
+    await store.markWorldConfirmed(freshId);
+    await store.saveStarKnownPost(oldId);
+    await store.saveStarKnownPost(freshId);
+    await store.markDeleted(oldId);
+    // A tombstone armed before its post arrives must survive prune.
+    const pendingId = 'c'.repeat(64);
+    await store.markDeleted(pendingId);
+
+    await store.pruneExpired(NOW);
+    expect(await store.getEvent(oldId)).toBeNull();
+    expect(await store.listStarEvents()).toHaveLength(1);
+    expect(await store.listReshareEvents()).toHaveLength(1);
+    expect(await store.isWorldConfirmed(oldId)).toBe(false);
+    expect(await store.isWorldConfirmed(freshId)).toBe(true);
+    expect(await store.listStarKnownPosts()).toEqual([freshId]);
+    const tombs = await port.query<{ target_id: Uint8Array }>(`SELECT target_id FROM tombstones`);
+    expect(tombs.map((t) => bytesToHex(t.target_id)).sort()).toEqual([pendingId]);
   });
 });
 
@@ -519,6 +740,22 @@ describe('world confirmation', () => {
     unconfirmed = await store.getUnconfirmed();
     expect(unconfirmed).toEqual([bytesToHex(p2.id)]);
   });
+
+  test('listWorldConfirmed returns the confirmed subset in one call', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    const p1 = makeEvent({ seed: 61 });
+    const p2 = makeEvent({ seed: 62 });
+    await store.saveEvent(p1);
+    await store.saveEvent(p2);
+    await store.markWorldConfirmed(bytesToHex(p1.id));
+    const confirmed = await store.listWorldConfirmed([
+      bytesToHex(p1.id),
+      bytesToHex(p2.id),
+    ]);
+    expect([...confirmed]).toEqual([bytesToHex(p1.id)]);
+    expect(await store.listWorldConfirmed([])).toEqual(new Set());
+  });
 });
 
 describe('upsertPeer', () => {
@@ -549,14 +786,15 @@ describe('upsertPeer', () => {
 });
 
 describe('stars (MIGRATION_004)', () => {
-  test('upgrade path: versioned v3 DB reaches version 5', async () => {
+  test('upgrade path: versioned v3 DB reaches version 6', async () => {
     const { port } = await migratedDb();
     await port.exec(`DROP TABLE star_events`);
     await port.exec(`DROP TABLE star_known_posts`);
     await port.exec(`DELETE FROM schema_version WHERE version = 4`);
     await port.exec(`DELETE FROM schema_version WHERE version = 5`);
+    await port.exec(`DELETE FROM schema_version WHERE version = 6`);
     await OpSqliteStore.migrate(port);
-    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
     for (const t of ['star_events', 'star_known_posts']) {
       const rows = await port.query<{ name: string }>(
         `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
@@ -624,6 +862,30 @@ describe('stars (MIGRATION_004)', () => {
     }
   });
 
+  test('uppercase e tags normalize to lowercase instead of dropping or throwing', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    const postId = 'B'.repeat(64);
+    const star = makeEvent({ seed: 91, kind: 4, tags: [['e', postId]], content: 'star' });
+    await store.saveStarEvent(star);
+    expect(await store.listStarEvents()).toHaveLength(1);
+    const reshare = makeEvent({ seed: 92, kind: 5, tags: [['e', postId]] });
+    await expect(store.saveReshareEvent(reshare)).resolves.toBeUndefined();
+    expect(await store.listReshareEvents()).toHaveLength(1);
+    // The extracted target id (used for rehydration joins) is normalized.
+    const rows = await port.query<{ target_id: Uint8Array }>(`SELECT target_id FROM reshare_events`);
+    expect(bytesToHex(rows[0].target_id)).toBe(postId.toLowerCase());
+  });
+
+  test('saveStarEvent rejects non-kind-4 events and stars without an e tag', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    await expect(store.saveStarEvent(makeEvent({ seed: 81, kind: 1 }))).rejects.toThrow(/kind 4/);
+    await expect(
+      store.saveStarEvent(makeEvent({ seed: 82, kind: 4, tags: [] })),
+    ).rejects.toThrow(/no \["e", postId\] tag/);
+  });
+
   test('pending star for an unknown post stays pending until the post is known', async () => {
     const { port } = await migratedDb();
     const store = new OpSqliteStore(port);
@@ -662,12 +924,13 @@ describe('reshare_events (kind 5, T19, MIGRATION_005)', () => {
     };
   }
 
-  test('upgrade path: versioned v4 DB reaches version 5', async () => {
+  test('upgrade path: versioned v4 DB reaches version 6', async () => {
     const { port } = await migratedDb();
     await port.exec(`DROP TABLE reshare_events`);
     await port.exec(`DELETE FROM schema_version WHERE version = 5`);
+    await port.exec(`DELETE FROM schema_version WHERE version = 6`);
     await OpSqliteStore.migrate(port);
-    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
     const rows = await port.query<{ name: string }>(
       `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reshare_events'`,
     );

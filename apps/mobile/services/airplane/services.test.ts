@@ -17,6 +17,7 @@ import {
   authorLabelFor,
   toPostCardModel,
   listFeedPosts,
+  listFeedPage,
   subscribeFeed,
   notifyFeedListeners,
   __resetFeedListenersForTests,
@@ -236,6 +237,68 @@ describe('listFeedPosts', () => {
     expect(cards[0].authorLabel).toMatch(/^[a-z]+ [a-z]+·[0-9a-f]{4}$/);
   });
 
+  it('pages same-second posts exactly once via the tuple cursor', async () => {
+    const nowSec = Math.floor(Date.now() / 1000) - 60;
+    const store = getStore();
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const post = makePost({ created_at: nowSec });
+      await store.saveEvent(post);
+      ids.push(toHex(post.id));
+    }
+    const page1 = await listFeedPage({ cells: ['tdr1v'], limit: 2 });
+    expect(page1.cards).toHaveLength(2);
+    expect(page1.nextCursor).not.toBeNull();
+    const page2 = await listFeedPage({
+      cells: ['tdr1v'],
+      limit: 2,
+      cursor: page1.nextCursor,
+    });
+    expect(page2.cards).toHaveLength(1);
+    expect(page2.nextCursor).toBeNull();
+    const seen = [...page1.cards, ...page2.cards].map((c) => c.eventId);
+    expect(new Set(seen).size).toBe(3);
+    expect(seen.sort()).toEqual(ids.sort());
+  });
+
+  it('ranks over the full set: an older high-view post surfaces on page 1', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const store = getStore();
+    const oldPopular = makePost({ created_at: nowSec - 3600 });
+    const newerQuiet1 = makePost({ created_at: nowSec - 60 });
+    const newerQuiet2 = makePost({ created_at: nowSec - 30 });
+    await store.saveEvent(oldPopular);
+    await store.saveEvent(newerQuiet1);
+    await store.saveEvent(newerQuiet2);
+    // Five distinct viewers receipt the older post, so it must outrank
+    // both newer posts even though it is third by recency.
+    for (let i = 0; i < 5; i++) {
+      const receipt = makePost({
+        kind: 2 as EventKind,
+        tags: [['e', toHex(oldPopular.id)]],
+        content: '',
+        created_at: nowSec,
+      });
+      await store.saveReceipt(receipt);
+    }
+    const page1 = await listFeedPage({ cells: ['tdr1v'], limit: 2 });
+    expect(page1.cards.map((c) => c.eventId)).toContain(toHex(oldPopular.id));
+    expect(page1.cards[0].eventId).toBe(toHex(oldPopular.id));
+    const page2 = await listFeedPage({ cells: ['tdr1v'], limit: 2, cursor: page1.nextCursor });
+    const seen = [...page1.cards, ...page2.cards].map((c) => c.eventId);
+    expect(new Set(seen).size).toBe(3);
+    expect(page2.nextCursor).toBeNull();
+  });
+
+  it('marks confirmed cards via the batched lookup', async () => {
+    const post = await publishPost('confirmed post', { geohash5: 'tdr1v' });
+    const store = getStore();
+    await store.markWorldConfirmed(post);
+    const cards = await listFeedPosts({ cells: ['tdr1v'] });
+    expect(cards).toHaveLength(1);
+    expect(cards[0].worldConfirmed).toBe(true);
+  });
+
   it('scopes by cell and applies the before cursor', async () => {
     await publishPost('here', { geohash5: 'tdr1v' });
     await publishPost('there', { geohash5: 'abcde' });
@@ -301,5 +364,12 @@ describe('emitViewReceipt', () => {
 
   it('returns false for unknown posts', async () => {
     expect(await emitViewReceipt('e'.repeat(64))).toBe(false);
+  });
+
+  it('returns false for deleted posts and counts no view', async () => {
+    const id = await publishPost('deleted post', { geohash5: 'tdr1v' });
+    await getStore().markDeleted(id);
+    expect(await emitViewReceipt(id)).toBe(false);
+    expect(await getStore().countViews(id)).toBe(0);
   });
 });

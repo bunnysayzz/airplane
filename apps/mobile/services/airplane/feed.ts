@@ -6,8 +6,8 @@
 // PostCardModel the card UI consumes. Relative-time formatting stays in the
 // card; this layer keeps the raw `createdAtMs` timestamp.
 
-import { EVENT_KIND_POST, toHex, type FeedPost } from '@airplane/protocol';
-import { DEFAULT_RETENTION_SEC, rankScore, type ListFeedOpts } from '@airplane/storage';
+import { EVENT_KIND_POST, toHex, type FeedPost, type Hex64 } from '@airplane/protocol';
+import { rankScore } from '@airplane/storage';
 import type { PostCardModel } from './types';
 import { ensureStarsHydrated, markStarPostKnown, resolveOwnPubkeyHex, starViewFor } from './stars';
 import { markResharePostKnown, reshareViewFor } from './reshares';
@@ -23,6 +23,33 @@ export interface FeedQueryOpts {
    * (seconds) are returned. Pass the previous page's last post timestamp.
    */
   before?: number;
+  /**
+   * Tie-break cursor for equal `created_at` rows: only rows with
+   * (created_at, id) strictly older than (before, beforeId) are returned.
+   * Requires `before`. Always pair it with `before`; a timestamp-only
+   * cursor re-returns page 1 rows and permanently skips same-second
+   * posts cut off by the page limit.
+   */
+  beforeId?: Hex64;
+}
+
+/**
+ * Opaque pagination cursor for {@link listFeedPage}: an offset into the
+ * globally ranked set. Ranking is computed over the full matching set
+ * (see listFeedPage), so a store-order tuple cursor cannot address a
+ * ranked page: the ranked order has no store-order boundary to resume
+ * from. The offset is only valid for the same cells and limit, and a
+ * refresh (which re-fetches and re-ranks) always restarts from offset 0.
+ */
+export interface FeedPageCursor {
+  offset: number;
+}
+
+/** One page from {@link listFeedPage}: ranked cards plus the next cursor. */
+export interface FeedPage {
+  cards: PostCardModel[];
+  /** Null when the store returned a short page, meaning no more rows. */
+  nextCursor: FeedPageCursor | null;
 }
 
 const DEFAULT_LIMIT = 50;
@@ -81,22 +108,67 @@ export function toPostCardModel(
   };
 }
 
+/** Options for {@link listFeedPage}: a feed query plus an offset cursor. */
+export interface FeedPageOpts extends FeedQueryOpts {
+  cursor?: FeedPageCursor | null;
+}
+
 /**
- * List feed posts for the given cells, ranked highest-score first.
+ * List one feed page for the given cells, ranked highest-score first
+ * over the FULL matching set, not just the newest page.
  *
- * The store returns newest-first; the protocol ranking score decides the
- * final order (views win, recency decays). Equal scores keep insertion order
- * (Array.prototype.sort is stable).
+ * The old shape ranked only the store's newest page (LIMIT applied in
+ * newest-first order before the score sort), so a high-view older post
+ * past the first page could never surface. This function instead walks
+ * the store in tuple-cursor pages, ranks everything it finds, and then
+ * slices one page out of that ranked order. Cost: one full matching-set
+ * fetch per page load, bounded by the 24 h retention window and the
+ * cell scope; that is the price of a globally ranked feed, and it is
+ * stated here rather than hidden behind a LIMIT.
+ *
+ * Equal scores keep insertion order (Array.prototype.sort is stable).
+ * Pass the returned `nextCursor` back as `cursor` for the next page;
+ * a refresh restarts from offset 0 with a fresh fetch and rank.
  */
-export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[]> {
-  const storeOpts: ListFeedOpts = {
-    cells: opts.cells,
-    limit: opts.limit ?? DEFAULT_LIMIT,
-    before: opts.before,
-  };
+export async function listFeedPage(opts: FeedPageOpts): Promise<FeedPage> {
+  const limit = opts.limit ?? DEFAULT_LIMIT;
+  const offset = opts.cursor?.offset ?? 0;
   const store = getStore();
-  const posts = await store.listFeed(storeOpts);
+  const posts: FeedPost[] = [];
+  if (limit > 0) {
+    let before: number | undefined;
+    let beforeId: Hex64 | undefined;
+    for (;;) {
+      const page: FeedPost[] = await store.listFeed({
+        cells: opts.cells,
+        limit,
+        before,
+        beforeId,
+      });
+      posts.push(...page);
+      if (page.length < limit) break;
+      const lastPageRow = page[page.length - 1];
+      before = lastPageRow.event.created_at;
+      beforeId = toHex(lastPageRow.event.id) as Hex64;
+    }
+  }
   const ranked = [...posts].sort((a, b) => b.score - a.score);
+  const cards = await mapPostsToCards(store, ranked);
+  const pageCards = cards.slice(offset, offset + limit);
+  return {
+    cards: pageCards,
+    nextCursor: offset + limit < cards.length ? { offset: offset + limit } : null,
+  };
+}
+
+/**
+ * Map ranked store rows to cards (star/reshare views, World confirmation).
+ * Shared by the single-page and globally ranked paths.
+ */
+async function mapPostsToCards(
+  store: ReturnType<typeof getStore>,
+  ranked: FeedPost[],
+): Promise<PostCardModel[]> {
   // T17: the store is proven working by the query above, so a hydration
   // failure here propagates (it means the store itself is broken).
   await ensureStarsHydrated();
@@ -104,13 +176,15 @@ export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[
   // --- RESHARE: every listed post is marked known, so pending reshares for
   // it apply; the cluster is then read onto its (single, original) card.
   const ownHex = await resolveOwnPubkeyHex();
-  // Look up World confirmation status for each post (client-side tracking).
-  const cards = await Promise.all(
+  // One batched World-confirmation lookup for the whole page, not one
+  // query per card.
+  const confirmed = await store.listWorldConfirmed(ranked.map((p) => toHex(p.event.id) as Hex64));
+  return Promise.all(
     ranked.map(async (p) => {
       const eventId = toHex(p.event.id);
       markStarPostKnown(eventId);
       markResharePostKnown(eventId);
-      const worldConfirmed = await store.isWorldConfirmed(eventId);
+      const worldConfirmed = confirmed.has(eventId as Hex64);
       const star = starViewFor(eventId, ownHex);
       return toPostCardModel(p, worldConfirmed, {
         stars: star.count,
@@ -119,7 +193,25 @@ export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[
       }, reshareViewFor(eventId, ownHex ?? undefined));
     }),
   );
-  return cards;
+}
+
+/**
+ * List one store page of feed posts, ranked highest-score first within
+ * that page. This keeps the legacy before/beforeId single-page contract
+ * (used by tests and by callers that want exactly one store page). For
+ * paged scrolling in the Timeline, use {@link listFeedPage}, which ranks
+ * over the full matching set instead of one page.
+ */
+export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[]> {
+  const store = getStore();
+  const posts = await store.listFeed({
+    cells: opts.cells,
+    limit: opts.limit ?? DEFAULT_LIMIT,
+    before: opts.before,
+    beforeId: opts.beforeId,
+  });
+  const ranked = [...posts].sort((a, b) => b.score - a.score);
+  return mapPostsToCards(store, ranked);
 }
 
 /**
@@ -133,12 +225,10 @@ export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[
  * irrelevant here; looking it up directly also keeps tap-to-read working
  * when location permission/GPS flakes at tap time.
  *
- * Returns null for a malformed id, an unknown id, a non-post event, or an
- * expired post (same retention window the stores apply). Tombstone caveat:
- * getEvent does not surface the store's deleted flag, so a post whose
- * tombstone arrived after it left the feed can still resolve here once;
- * the feed itself hides it on next load. That staleness window is accepted
- * over the previous behaviour (no tap ever resolving).
+ * Returns null for a malformed id, an unknown id, a non-post event, an
+ * expired post, or a deleted (tombstoned) post: the detail route respects
+ * tombstones via getPostState, so a deleted post no longer resolves here
+ * after it leaves the feed.
  */
 export async function getPostCardById(eventId: string): Promise<PostCardModel | null> {
   if (!/^[0-9a-fA-F]{64}$/.test(eventId)) return null;
@@ -147,7 +237,8 @@ export async function getPostCardById(eventId: string): Promise<PostCardModel | 
   const event = await store.getEvent(id);
   if (!event || event.kind !== EVENT_KIND_POST) return null;
   const nowSec = Math.floor(Date.now() / 1000);
-  if (event.created_at + DEFAULT_RETENTION_SEC <= nowSec) return null;
+  const state = await store.getPostState(id);
+  if (!state || state.deleted || state.expiresAt <= nowSec) return null;
   const views = await store.countViews(id);
   const ageHours = Math.max(0, (nowSec - event.created_at) / 3600);
   const worldConfirmed = await store.isWorldConfirmed(id);

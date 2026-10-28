@@ -4,11 +4,15 @@
 export type { PostCardModel } from './types';
 export {
   listFeedPosts,
+  listFeedPage,
   subscribeFeed,
   notifyFeedListeners,
   authorLabelFor,
   toPostCardModel,
   type FeedQueryOpts,
+  type FeedPageOpts,
+  type FeedPageCursor,
+  type FeedPage,
   type FeedListener,
 } from './feed';
 export { publishPost, tagsForPublish, type PublishOpts } from './composer';
@@ -30,7 +34,7 @@ export {
   type DeviceKeypair,
   type RotationResult,
 } from './identity';
-export { getStore } from './store';
+export { getStore, closeStore } from './store';
 // --- RESHARE (delimited) ---
 export {
   recordReshareEvent,
@@ -43,4 +47,4 @@ export {
   reshareViewFor,
 } from './reshares';
 export { getKv } from './kv';
-export { startTransport, stopTransport, publishViaTransport } from './transport';
+export { startTransport, stopTransport, publishViaTransport, pruneExpiredStore } from './transport';

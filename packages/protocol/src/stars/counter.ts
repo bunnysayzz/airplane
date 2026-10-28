@@ -67,6 +67,13 @@ export class StarCounter {
     string,
     { event: SignedEvent; state: 'star' | 'unstar'; history: SignedEvent[] }
   >();
+  /**
+   * Per-post index into `states`: targetHex -> state keys for that post.
+   * view() reads only this post's entries instead of scanning every
+   * (pubkey, post) state on every card, so a feed page costs page size
+   * lookups, not page size times total history.
+   */
+  private readonly statesByPost = new Map<Hex64, Set<string>>();
   /** Target id hex -> verified events held until the post arrives. */
   private readonly pending = new Map<Hex64, SignedEvent[]>();
   /** Post id hex -> distinct verified events applied (provenance). */
@@ -156,6 +163,12 @@ export class StarCounter {
       return 'applied';
     }
     this.states.set(key, { event, state, history: [event] });
+    let keys = this.statesByPost.get(target);
+    if (!keys) {
+      keys = new Set();
+      this.statesByPost.set(target, keys);
+    }
+    keys.add(key);
     return 'applied';
   }
 
@@ -164,8 +177,9 @@ export class StarCounter {
     const target = postIdHex.toLowerCase();
     let count = 0;
     let starredByMe = false;
-    for (const [key, entry] of this.states) {
-      if (!key.endsWith(`:${target}`) || entry.state !== 'star') continue;
+    for (const key of this.statesByPost.get(target) ?? []) {
+      const entry = this.states.get(key);
+      if (!entry || entry.state !== 'star') continue;
       count += 1;
       if (ownPubkeyHex !== null && key.startsWith(`${ownPubkeyHex.toLowerCase()}:`)) {
         starredByMe = true;

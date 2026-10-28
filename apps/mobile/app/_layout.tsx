@@ -6,7 +6,7 @@ import { ThemeProvider, useTheme } from '../src/theme/themeContext';
 import { I18nProvider, useI18n } from '../src/i18n/i18nContext';
 import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
-import { startTransport, stopTransport } from '../services/airplane';
+import { startTransport, stopTransport, pruneExpiredStore } from '../services/airplane';
 import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
 import {
   recordDiagnosticsLogAppState,
@@ -67,6 +67,9 @@ export default function RootLayout() {
         void startDiagnosticsLogFile().catch(() => {});
         const appStateSub = AppState.addEventListener('change', (state) => {
           recordDiagnosticsLogAppState(state);
+          // Foreground retention cleanup (best-effort, shared in-flight
+          // guard with the startup and sync prunes).
+          if (state === 'active') void pruneExpiredStore();
         });
         // Start hybrid transport (BLE always, Nostr when online) AFTER first
         // paint so nothing blocks the UI thread during launch. Failures are

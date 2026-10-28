@@ -48,6 +48,9 @@ export interface StorePort {
   /** Fetch one event by id hex, or null. */
   getEvent(id: Hex64): Promise<SignedEvent | null>;
 
+  /** Deleted/expired state for one post row, or null when unknown. */
+  getPostState(id: Hex64): Promise<PostState | null>;
+
   /**
    * Reshare events (kind 5) live apart from the kind-1/2/3 events table:
    * that table's CHECK forbids kind 5, and reshare rows must never leak
@@ -111,6 +114,12 @@ export interface StorePort {
   isWorldConfirmed(eventId: Hex64): Promise<boolean>;
 
   /**
+   * Batch form of isWorldConfirmed: the confirmed subset of `ids` in one
+   * query. Feed pages must use this (one query per page, not per card).
+   */
+  listWorldConfirmed(ids: Hex64[]): Promise<Set<Hex64>>;
+
+  /**
    * Event IDs of kind-1 posts known locally but not yet World-confirmed.
    * Used by the sync engine to decide what to push / query.
    */
@@ -138,6 +147,14 @@ export interface StorePort {
   listStarKnownPosts(): Promise<Hex64[]>;
 }
 
+/** Deleted/expired state for one stored post row. */
+export interface PostState {
+  /** True when a tombstone (or markDeleted) flagged this row deleted. */
+  deleted: boolean;
+  /** Seconds after which the row is expired (created_at + retention). */
+  expiresAt: number;
+}
+
 /** Tiny string key/value store (STORE-5). Backed by MMKV on device. */
 export interface KvPort {
   get(key: string): Promise<string | null>;
@@ -159,4 +176,10 @@ export interface DatabasePort {
    * emulate with BEGIN IMMEDIATE / COMMIT / ROLLBACK via exec.
    */
   transaction?<T>(fn: () => Promise<T>): Promise<T>;
+  /**
+   * Checkpoint and close the underlying connection, when the driver
+   * supports it. Teardown only; never required for correctness of
+   * committed rows (SQLite atomic commit already covers a kill).
+   */
+  close?(): Promise<void>;
 }

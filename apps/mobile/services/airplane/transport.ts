@@ -127,6 +127,34 @@ export type BleRadioState = 'starting' | 'on' | 'permission-blocked' | 'unavaila
 let bleRadioState: BleRadioState = 'starting';
 
 const SYNC_INTERVAL_MS = 60_000; // re-check World status every minute when online
+const PRUNE_INTERVAL_MS = 3600_000; // retention cleanup at most hourly via sync ticks
+
+let pruneInFlight: Promise<void> | null = null;
+let lastSyncPruneMs = 0;
+
+/**
+ * Best-effort retention cleanup: delete rows past the 24 h window (see
+ * StorePort.pruneExpired). Never throws, and overlapping calls share one
+ * run. Called at startup, on foreground (see _layout), and at most hourly
+ * from runSync. Note: the first prune after a long install deletes old
+ * data by the designed 24 h window; that is the retention rule working,
+ * not data loss.
+ */
+export async function pruneExpiredStore(): Promise<void> {
+  if (pruneInFlight) return pruneInFlight;
+  pruneInFlight = (async () => {
+    try {
+      await getStore().pruneExpired(Math.floor(Date.now() / 1000));
+    } catch {
+      // Retention cleanup must never break launch, sync, or foreground.
+    }
+  })();
+  try {
+    await pruneInFlight;
+  } finally {
+    pruneInFlight = null;
+  }
+}
 
 function startSyncTimer(): void {
   if (!syncTimer) {
@@ -238,6 +266,12 @@ export function __resetPulledPostsForTests(): void {
 
 async function runSync(): Promise<void> {
   if (!sync || !hybrid?.nostr.online) return;
+  // Periodic retention cleanup, throttled to hourly so a 60 s sync tick
+  // does not re-prune every minute.
+  if (Date.now() - lastSyncPruneMs >= PRUNE_INTERVAL_MS) {
+    lastSyncPruneMs = Date.now();
+    void pruneExpiredStore();
+  }
   try {
     const report = await sync.sync();
     if (report.confirmed.length > 0) {
@@ -300,7 +334,12 @@ export async function startTransport(): Promise<void> {
   // flow through the same store path as before.
   hybrid.onPost(
     sync.confirmListener((event, source) => {
-      void handleIncoming(event, source);
+      // Never drop a storage failure silently: a rejected handleIncoming
+      // used to vanish (relay ingress is fire-and-forget), so a lost post
+      // left no trace. Log it; the next relay pass can re-deliver it.
+      void handleIncoming(event, source).catch((e) => {
+        console.error('handleIncoming failed:', e);
+      });
     }),
   );
 
@@ -360,6 +399,11 @@ export async function startTransport(): Promise<void> {
     netUnsub?.();
     netUnsub = null;
   }
+
+  // Startup retention cleanup (best-effort, never fails launch). This is
+  // the first prune a long-lived install has ever run, so it deletes
+  // rows past the designed 24 h window on first launch after this change.
+  await pruneExpiredStore();
 }
 
 /** Advertise our identity and scan for mesh peers. Throws on radio failure. */

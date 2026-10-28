@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Frozen SQLite schema (blueprint Appendix D). Applied by OpSqliteStore.migrate().
 // Do not edit in place: schema changes require a new numbered migration.
+//
+// Reserved, currently unused tables (verified: no store method reads or
+// writes them, and upsertPeer has no app caller): peers, sync_state,
+// seen, frag_buf, logs. They are kept for existing installs (dropping
+// tables is not worth the migration risk for zero runtime cost beyond
+// write overhead), but their indexes are dropped in MIGRATION_006 and
+// no new code should read them. upsertPeer always writes NULL for
+// mtu/platform because PeerInfo carries neither field; fixing that
+// needs a PeerInfo type change and is deferred until peers are wired up.
 
 export const MIGRATION_001 = `PRAGMA journal_mode = WAL;
 CREATE TABLE events(
@@ -77,11 +86,11 @@ CREATE INDEX idx_logs_ts ON logs(ts);
  * Confirmation is sticky - there is no un-confirm path by design.
  */
 export const MIGRATION_002 = `
-CREATE TABLE world_confirmed(
+CREATE TABLE IF NOT EXISTS world_confirmed(
   event_id     BLOB PRIMARY KEY,
   confirmed_at INTEGER NOT NULL
 );
-CREATE INDEX idx_world_confirmed_at ON world_confirmed(confirmed_at);
+CREATE INDEX IF NOT EXISTS idx_world_confirmed_at ON world_confirmed(confirmed_at);
 `;
 
 /**
@@ -96,7 +105,6 @@ CREATE INDEX idx_world_confirmed_at ON world_confirmed(confirmed_at);
  * author's pubkey and are honored only when it matches the post's author.
  */
 export const MIGRATION_003 = `
-CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
 CREATE TABLE tombstones(target_id BLOB NOT NULL, author BLOB NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(target_id, author));
 CREATE INDEX idx_tombstones_target ON tombstones(target_id);
 `;
@@ -117,7 +125,7 @@ CREATE INDEX idx_tombstones_target ON tombstones(target_id);
  * Stars are display-only; no ranking input lives here.
  */
 export const MIGRATION_004 = `
-CREATE TABLE star_events(
+CREATE TABLE IF NOT EXISTS star_events(
   event_id   BLOB PRIMARY KEY,
   pubkey     BLOB NOT NULL,
   target_id  BLOB NOT NULL,
@@ -127,8 +135,8 @@ CREATE TABLE star_events(
   content    TEXT NOT NULL,
   sig        BLOB NOT NULL
 );
-CREATE INDEX idx_star_events_target ON star_events(target_id, created_at);
-CREATE TABLE star_known_posts(
+CREATE INDEX IF NOT EXISTS idx_star_events_target ON star_events(target_id, created_at);
+CREATE TABLE IF NOT EXISTS star_known_posts(
   post_id BLOB PRIMARY KEY
 );
 `;
@@ -159,4 +167,26 @@ CREATE TABLE IF NOT EXISTS reshare_events(
   received_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reshare_events_target ON reshare_events(target_id);
+`;
+
+/**
+ * MIGRATION_006 - Feed query index matching the real filter and sort.
+ *
+ * The feed query filters kind = 1, deleted = 0, expires_at > now,
+ * geohash IN (cells), and sorts by created_at DESC, id DESC, but the
+ * only feed index was (kind, geohash, created_at DESC): no id tiebreak
+ * and no deleted/expiry coverage. This additive index matches the sort
+ * exactly. Honest limit, kept in the comment on purpose: with a
+ * multi-value IN list SQLite still cannot walk one index in global
+ * created_at order across cells, so a cross-cell sort before LIMIT may
+ * remain; the index removes the per-cell sort and the tiebreak gap.
+ * The old index is kept: dropping it waits on EXPLAIN proof on a
+ * realistic database that the new one is used.
+ */
+export const MIGRATION_006 = `
+CREATE INDEX IF NOT EXISTS idx_events_feed_v2 ON events(kind, geohash, created_at DESC, id DESC);
+DROP INDEX IF EXISTS idx_peers_seen;
+DROP INDEX IF EXISTS idx_seen_at;
+DROP INDEX IF EXISTS idx_logs_ts;
+DROP INDEX IF EXISTS idx_world_confirmed_at;
 `;

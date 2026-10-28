@@ -22,7 +22,7 @@ import type {
 } from '@airplane/protocol';
 import { EVENT_KIND_STAR } from '@airplane/protocol';
 import type { StorePort, DatabasePort, ListFeedOpts } from './ports';
-import { MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005 } from './schema';
+import { MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006 } from './schema';
 import {
   DEFAULT_RETENTION_SEC,
   RECEIPT_DAY_BUCKET_SEC,
@@ -31,20 +31,122 @@ import {
   rankScore,
 } from './memory';
 
-/** Split a multi-statement SQL script on `;` boundaries (DDL has no `;` in strings). */
+/**
+ * Split a multi-statement SQL script on `;` boundaries, respecting
+ * single-quoted strings (with '' escapes), double-quoted and backtick
+ * identifiers, line comments, and block comments. The old naive split
+ * broke any future migration whose string literal or default value
+ * contained a semicolon; this one only splits on a `;` outside all of
+ * those, so existing scripts split exactly as before.
+ */
 export function splitStatements(script: string): string[] {
-  return script
-    .split(';')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const out: string[] = [];
+  let cur = '';
+  let i = 0;
+  let quote: string | null = null;
+  let lineComment = false;
+  let blockComment = false;
+  while (i < script.length) {
+    const ch = script[i];
+    const next = script[i + 1];
+    if (lineComment) {
+      cur += ch;
+      if (ch === '\n') lineComment = false;
+      i++;
+      continue;
+    }
+    if (blockComment) {
+      cur += ch;
+      if (ch === '*' && next === '/') {
+        cur += next;
+        i += 2;
+        blockComment = false;
+      } else {
+        i++;
+      }
+      continue;
+    }
+    if (quote) {
+      cur += ch;
+      if (ch === quote) {
+        if (next === quote) {
+          cur += next;
+          i += 2;
+        } else {
+          quote = null;
+          i++;
+        }
+      } else {
+        i++;
+      }
+      continue;
+    }
+    if (ch === '-' && next === '-') {
+      lineComment = true;
+      cur += ch;
+      i++;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      blockComment = true;
+      cur += ch;
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      cur += ch;
+      i++;
+      continue;
+    }
+    if (ch === ';') {
+      const stmt = cur.trim();
+      if (stmt.length > 0) out.push(stmt);
+      cur = '';
+      i++;
+      continue;
+    }
+    cur += ch;
+    i++;
+  }
+  const tail = cur.trim();
+  if (tail.length > 0) out.push(tail);
+  return out;
+}
+
+/**
+ * Per-connection transaction queue: emulated BEGIN IMMEDIATE transactions
+ * must never overlap on one connection, or the second BEGIN fails and the
+ * post or receipt it carried is lost. Each transaction chains onto the
+ * previous transaction's settled promise for the same port, so concurrent
+ * saveEvent/saveReceipt calls serialize instead of nesting BEGINs. A
+ * failure in one transaction never blocks the next (the stored chain
+ * promise always settles).
+ */
+const txQueues = new WeakMap<DatabasePort, Promise<void>>();
+const migrateInFlight = new WeakMap<DatabasePort, Promise<void>>();
+
+async function runTransaction<T>(db: DatabasePort, fn: () => Promise<T>): Promise<T> {
+  const prev = txQueues.get(db) ?? Promise.resolve();
+  const run = prev.then(() => runTransactionInner(db, fn));
+  txQueues.set(
+    db,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return run;
 }
 
 /**
  * Run fn atomically. Uses the port's native transaction when present;
  * otherwise emulates with BEGIN IMMEDIATE / COMMIT / ROLLBACK via exec.
- * On throw, rolls back and rethrows.
+ * On throw, rolls back and rethrows. A BEGIN failure propagates to the
+ * caller (it is never swallowed here); callers that fire-and-forget must
+ * log it instead of dropping it.
  */
-async function runTransaction<T>(db: DatabasePort, fn: () => Promise<T>): Promise<T> {
+async function runTransactionInner<T>(db: DatabasePort, fn: () => Promise<T>): Promise<T> {
   if (db.transaction) return db.transaction(fn);
   await db.exec('BEGIN IMMEDIATE');
   try {
@@ -65,7 +167,9 @@ async function runTransaction<T>(db: DatabasePort, fn: () => Promise<T>): Promis
 interface EventRowShape {
   id: Uint8Array;
   pubkey: Uint8Array;
-  kind: 1 | 2 | 3;
+  // The events table only holds 1-3; tryRowToEvent is also reused for
+  // star (4) and reshare (5) rows, which carry their kind in code.
+  kind: 1 | 2 | 3 | 4 | 5;
   created_at: number;
   geohash: string;
   tags: Uint8Array;
@@ -117,10 +221,30 @@ function rowToEvent(row: EventRowShape): SignedEvent {
   };
 }
 
+/**
+ * Per-row decode guard: one corrupt tags blob must never fail a whole
+ * page. Returns null for a row whose tags do not decode to an array of
+ * tag arrays; page mappings skip it and keep the good rows.
+ */
+function tryRowToEvent(row: EventRowShape): SignedEvent | null {
+  try {
+    const event = rowToEvent(row);
+    if (!Array.isArray(event.tags) || event.tags.some((t) => !Array.isArray(t))) {
+      return null;
+    }
+    return event;
+  } catch {
+    return null;
+  }
+}
+
 function taggedPostId(e: SignedEvent): Hex64 | null {
   for (const tag of e.tags) {
-    if (tag.length >= 2 && tag[0] === 'e' && /^[0-9a-f]{64}$/.test(tag[1])) {
-      return tag[1];
+    // The rest of the store lowercases ids before use; an uppercase e tag
+    // must normalize the same way instead of being silently dropped (stars)
+    // or throwing (reshares/receipts) for the same input shape.
+    if (tag.length >= 2 && tag[0] === 'e' && /^[0-9a-fA-F]{64}$/.test(tag[1])) {
+      return tag[1].toLowerCase();
     }
   }
   return null;
@@ -141,21 +265,44 @@ export class OpSqliteStore implements StorePort {
    *
    * - `schema_version` is bootstrapped with CREATE TABLE IF NOT EXISTS (not
    *   a numbered migration) and MAX(version) is read as the current level.
-   * - v >= 5: no-op (re-running migrate on an up-to-date DB is safe).
-   * - v == 4: apply 005 (reshare events table).
+   * - v == 6: no-op (re-running migrate on an up-to-date DB is safe).
+   * - v > 6: throws a clear "database is newer than this app" error
+   *   instead of silently accepting a schema this build does not know.
+   * - v == 5: apply 006 (feed index). v == 4: apply 005, 006.
    * - v == 0: legacy pre-versioning DBs are detected via sqlite_master:
-   *   no `events` table -> fresh install (apply 001, 002, 003, 004, 005);
+   *   no `events` table -> fresh install (apply 001, 002, 003, 004, 005, 006);
    *   `events` without `world_confirmed` -> 001-only install (apply 002,
-   *   003, 004, 005); both present -> 002-era install (apply 003, 004,
-   *   005 only; re-running 002's plain CREATE TABLE would throw).
-   * - v == 1: apply 002, 003, 004, 005. v == 2: apply 003, 004, 005.
-   *   v == 3: apply 004, 005.
+   *   003, 004, 005, 006); both present -> 002-era install (apply 003, 004,
+   *   005, 006 only).
+   * - v == 1: apply 002, 003, 004, 005, 006. v == 2: apply 003, 004, 005, 006.
+   *   v == 3: apply 004, 005, 006.
    * - Each numbered migration runs inside a transaction (BEGIN IMMEDIATE;
-   *   COMMIT; ROLLBACK + rethrow on error); the version row is recorded
-   *   only after the migration commits, so a failed upgrade never wipes
-   *   user data and can be retried.
+   *   COMMIT; ROLLBACK + rethrow on error) together with its version row,
+   *   so a kill between the DDL commit and the version insert cannot
+   *   brick the store: re-running a migration whose tables already exist
+   *   is safe (IF NOT EXISTS) and records the missing version row.
+   *   A failed upgrade records no version row and can be retried.
+   */
+  /**
+   * In-flight migrate runs per port: two DatabasePort callers migrating
+   * the same file concurrently used to collide on the version-row primary
+   * key. Concurrent callers now share one run instead of racing it.
+   * (The production singleton already avoids this; the guard is for the
+   * port API, which allows a second instance.)
    */
   static async migrate(db: DatabasePort): Promise<void> {
+    const existing = migrateInFlight.get(db);
+    if (existing) return existing;
+    const run = OpSqliteStore.runMigrate(db);
+    migrateInFlight.set(db, run);
+    try {
+      await run;
+    } finally {
+      if (migrateInFlight.get(db) === run) migrateInFlight.delete(db);
+    }
+  }
+
+  private static async runMigrate(db: DatabasePort): Promise<void> {
     await db.exec(
       `CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`,
     );
@@ -171,20 +318,35 @@ export class OpSqliteStore implements StorePort {
       for (const s of stmts.filter((stmt) => /^pragma\b/i.test(stmt))) {
         await db.exec(s);
       }
+      // The version row lives inside the same transaction as the DDL, so
+      // a kill mid-migration leaves either neither or both on disk. A
+      // later migrate then resumes instead of re-applying DDL over
+      // tables that already exist (002/004 are IF NOT EXISTS as well).
       await runTransaction(db, async () => {
         for (const s of stmts.filter((stmt) => !/^pragma\b/i.test(stmt))) {
           await db.exec(s);
         }
+        await db.exec(
+          `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
+          [version, Math.floor(Date.now() / 1000)],
+        );
       });
-      await db.exec(
-        `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
-        [version, Math.floor(Date.now() / 1000)],
-      );
     };
 
-    if (v >= 5) return;
+    if (v > 6) {
+      throw new Error(
+        `database version ${v} is newer than this app supports (max 6): ` +
+          `the database was created by a newer app version; update the app instead of opening it here`,
+      );
+    }
+    if (v === 6) return;
+    if (v === 5) {
+      await applyMigration(6, MIGRATION_006);
+      return;
+    }
     if (v === 4) {
       await applyMigration(5, MIGRATION_005);
+      await applyMigration(6, MIGRATION_006);
       return;
     }
     if (v === 0) {
@@ -202,6 +364,7 @@ export class OpSqliteStore implements StorePort {
       await applyMigration(3, MIGRATION_003);
       await applyMigration(4, MIGRATION_004);
       await applyMigration(5, MIGRATION_005);
+      await applyMigration(6, MIGRATION_006);
       return;
     }
     if (v === 1) {
@@ -209,20 +372,32 @@ export class OpSqliteStore implements StorePort {
       await applyMigration(3, MIGRATION_003);
       await applyMigration(4, MIGRATION_004);
       await applyMigration(5, MIGRATION_005);
+      await applyMigration(6, MIGRATION_006);
       return;
     }
     if (v === 2) {
       await applyMigration(3, MIGRATION_003);
       await applyMigration(4, MIGRATION_004);
       await applyMigration(5, MIGRATION_005);
+      await applyMigration(6, MIGRATION_006);
       return;
     }
-    // v === 3 falls through: only 004 and 005 remain.
+    // v === 3 falls through: only 004, 005, and 006 remain.
     await applyMigration(4, MIGRATION_004);
     await applyMigration(5, MIGRATION_005);
+    await applyMigration(6, MIGRATION_006);
   }
 
   async saveEvent(e: SignedEvent): Promise<void> {
+    // Early routing check: without it a misrouted kind-4/5 event surfaces
+    // as a raw SQLite CHECK error, which reads like a database problem
+    // instead of a caller routing bug.
+    if (e.kind !== 1 && e.kind !== 2 && e.kind !== 3) {
+      throw new Error(
+        `saveEvent: kind ${e.kind} does not belong in the events table; ` +
+          `use saveStarEvent for kind 4 or saveReshareEvent for kind 5`,
+      );
+    }
     const authorHex = bytesToHex(e.pubkey);
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = e.created_at + this.retentionSec;
@@ -313,25 +488,34 @@ export class OpSqliteStore implements StorePort {
       `SELECT id, pubkey, created_at, geohash, tags, content, sig
        FROM reshare_events ORDER BY created_at ASC, id ASC`,
     );
-    return rows.map((row) => ({
-      id: row.id,
-      pubkey: row.pubkey,
-      created_at: row.created_at,
-      kind: 5 as const,
-      geohash: row.geohash,
-      tags: decodeTags(row.tags),
-      content: row.content,
-      sig: row.sig,
-    }));
+    const out: SignedEvent[] = [];
+    for (const row of rows) {
+      const event = tryRowToEvent({ ...row, kind: 5 as const });
+      if (event) out.push(event);
+    }
+    return out;
   }
 
   async getEvent(id: Hex64): Promise<SignedEvent | null> {
+    // A lookup returns null for a malformed id; it must not throw out of
+    // hexToBytes and turn every unchecked caller into a crash path.
+    if (!/^[0-9a-fA-F]{64}$/.test(id)) return null;
     const rows = await this.db.query<EventRowShape>(
       `SELECT id, pubkey, kind, created_at, geohash, tags, content, sig
        FROM events WHERE id = ?`,
       [hexToBytes(id.toLowerCase())],
     );
-    return rows.length > 0 ? rowToEvent(rows[0]) : null;
+    return rows.length > 0 ? tryRowToEvent(rows[0]) : null;
+  }
+
+  async getPostState(id: Hex64): Promise<{ deleted: boolean; expiresAt: number } | null> {
+    if (!/^[0-9a-fA-F]{64}$/.test(id)) return null;
+    const rows = await this.db.query<{ deleted: number; expires_at: number }>(
+      `SELECT deleted, expires_at FROM events WHERE id = ?`,
+      [hexToBytes(id.toLowerCase())],
+    );
+    if (rows.length === 0) return null;
+    return { deleted: rows[0].deleted === 1, expiresAt: rows[0].expires_at };
   }
 
   async listFeed(opts: ListFeedOpts): Promise<FeedPost[]> {
@@ -367,16 +551,19 @@ export class OpSqliteStore implements StorePort {
        LIMIT ?`,
       params,
     );
-    return rows.map((row) => {
-      const event = rowToEvent(row);
+    const out: FeedPost[] = [];
+    for (const row of rows) {
+      const event = tryRowToEvent(row);
+      if (!event) continue; // corrupt row skipped, rest of page loads
       const ageHours = Math.max(0, (now - event.created_at) / 3600);
-      return {
+      out.push({
         event,
         views: row.views,
         score: rankScore(row.views, ageHours),
         ageHours,
-      } satisfies FeedPost;
-    });
+      });
+    }
+    return out;
   }
 
   async markDeleted(postId: Hex64): Promise<void> {
@@ -442,10 +629,19 @@ export class OpSqliteStore implements StorePort {
         return true;
       });
     } catch (e) {
-      // TOCTOU guard: a concurrent saveReceipt won the (pubkey, post, day)
-      // race between our dedup SELECT and INSERT. The transaction rolled
-      // back; the receipt is a duplicate, so report false, never throw.
-      if (e instanceof Error && /UNIQUE|PRIMARY/i.test(e.message)) return false;
+      // Duplicate classification without matching driver error-message
+      // text (unverified on device, and it conflated any unique
+      // violation with a duplicate receipt). Transactions are serialized
+      // per port, so a concurrent saveReceipt has committed by now: a
+      // fresh explicit dedup check settles it. Any other failure (a
+      // BEGIN error, for example) re-checks as not-a-duplicate and is
+      // rethrown instead of being misreported as one.
+      const dup = await this.db.query<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM receipts
+         WHERE pubkey = ? AND post_id = ? AND day_bucket = ?`,
+        [r.pubkey, hexToBytes(postId), dayBucket],
+      );
+      if (dup.length > 0 && dup[0].n > 0) return false;
       throw e;
     }
   }
@@ -477,23 +673,55 @@ export class OpSqliteStore implements StorePort {
   }
 
   async pruneExpired(nowSec: UnixSec): Promise<number> {
-    const count = await this.db.query<{ n: number }>(
-      `SELECT COUNT(*) AS n FROM events WHERE expires_at < ?`,
-      [nowSec],
-    );
-    await this.db.exec(
-      `DELETE FROM receipts
-       WHERE post_id IN (SELECT id FROM events WHERE expires_at < ?)`,
-      [nowSec],
-    );
-    await this.db.exec(`DELETE FROM events WHERE expires_at < ?`, [nowSec]);
-    // Drop view_counts orphaned by pruned posts.
-    await this.db.exec(
-      `DELETE FROM view_counts
-       WHERE post_id NOT IN (SELECT id FROM events)`,
-      [],
-    );
-    return count.length > 0 ? count[0].n : 0;
+    // One transaction covering every table, so a kill mid-prune cannot
+    // leave receipts deleted but events present (or orphaned view
+    // counts). The count is measured inside the same transaction, so
+    // concurrent inserts cannot skew it. Star, reshare, receipt,
+    // confirmation, tombstone, and known-post rows are removed only
+    // when their target post expired: rows for still-live posts are
+    // never wiped by age alone, and a tombstone armed before its post
+    // arrives (no events row yet) must survive prune, or the deleted
+    // post would resurrect on arrival. View counts are the exception:
+    // they are dropped when no events row remains, since a count for a
+    // post with no row can never be displayed.
+    return runTransaction(this.db, async () => {
+      const count = await this.db.query<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM events WHERE expires_at < ?`,
+        [nowSec],
+      );
+      const expired = `SELECT id FROM events WHERE expires_at < ?`;
+      await this.db.exec(
+        `DELETE FROM star_events WHERE target_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(
+        `DELETE FROM reshare_events WHERE target_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(
+        `DELETE FROM receipts WHERE post_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(
+        `DELETE FROM world_confirmed WHERE event_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(
+        `DELETE FROM tombstones WHERE target_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(
+        `DELETE FROM star_known_posts WHERE post_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(`DELETE FROM events WHERE expires_at < ?`, [nowSec]);
+      await this.db.exec(
+        `DELETE FROM view_counts
+         WHERE post_id NOT IN (SELECT id FROM events)`,
+        [],
+      );
+      return count.length > 0 ? count[0].n : 0;
+    });
   }
 
   async markWorldConfirmed(eventId: Hex64): Promise<void> {
@@ -512,6 +740,16 @@ export class OpSqliteStore implements StorePort {
       [hexToBytes(eventId)],
     );
     return rows.length > 0 && rows[0].n > 0;
+  }
+
+  async listWorldConfirmed(ids: Hex64[]): Promise<Set<Hex64>> {
+    if (ids.length === 0) return new Set();
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = await this.db.query<{ event_id: Uint8Array }>(
+      `SELECT event_id FROM world_confirmed WHERE event_id IN (${placeholders})`,
+      ids.map((id) => hexToBytes(id.toLowerCase())),
+    );
+    return new Set(rows.map((r) => bytesToHex(r.event_id)));
   }
 
   async getUnconfirmed(): Promise<Hex64[]> {
@@ -534,8 +772,13 @@ export class OpSqliteStore implements StorePort {
   // ------------------------------------------------------------------
 
   async saveStarEvent(e: SignedEvent): Promise<void> {
+    if (e.kind !== 4) {
+      throw new Error(`saveStarEvent: expected kind 4, got kind ${e.kind}`);
+    }
     const target = taggedPostId(e);
-    if (target === null) return;
+    if (target === null) {
+      throw new Error('saveStarEvent: star has no ["e", postId] tag');
+    }
     await this.db.exec(
       `INSERT INTO star_events
          (event_id, pubkey, target_id, created_at, geohash, tags, content, sig)
@@ -561,16 +804,21 @@ export class OpSqliteStore implements StorePort {
       `SELECT event_id, pubkey, created_at, geohash, tags, content, sig
        FROM star_events ORDER BY created_at ASC, event_id ASC`,
     );
-    return rows.map((row) => ({
-      id: row.event_id,
-      pubkey: row.pubkey,
-      created_at: row.created_at,
-      kind: EVENT_KIND_STAR,
-      geohash: row.geohash,
-      tags: decodeTags(row.tags),
-      content: row.content,
-      sig: row.sig,
-    }));
+    const out: SignedEvent[] = [];
+    for (const row of rows) {
+      const event = tryRowToEvent({
+        id: row.event_id,
+        pubkey: row.pubkey,
+        created_at: row.created_at,
+        kind: EVENT_KIND_STAR,
+        geohash: row.geohash,
+        tags: row.tags,
+        content: row.content,
+        sig: row.sig,
+      });
+      if (event) out.push(event);
+    }
+    return out;
   }
 
   async listStarKnownPosts(): Promise<Hex64[]> {

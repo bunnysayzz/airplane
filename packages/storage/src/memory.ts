@@ -66,8 +66,8 @@ function cloneEvent(e: SignedEvent): SignedEvent {
 /** Extract the referenced post id hex from a receipt/tombstone `["e", id]` tag. */
 function taggedPostId(e: SignedEvent): Hex64 | null {
   for (const tag of e.tags) {
-    if (tag.length >= 2 && tag[0] === 'e' && /^[0-9a-f]{64}$/.test(tag[1])) {
-      return tag[1];
+    if (tag.length >= 2 && tag[0] === 'e' && /^[0-9a-fA-F]{64}$/.test(tag[1])) {
+      return tag[1].toLowerCase();
     }
   }
   return null;
@@ -124,6 +124,12 @@ export class MemoryEventStore implements StorePort {
   }
 
   async saveEvent(e: SignedEvent): Promise<void> {
+    if (e.kind !== 1 && e.kind !== 2 && e.kind !== 3) {
+      throw new Error(
+        `saveEvent: kind ${e.kind} does not belong in the events table; ` +
+          `use saveStarEvent for kind 4 or saveReshareEvent for kind 5`,
+      );
+    }
     const idHex = bytesToHex(e.id);
     const existing = this.events.get(idHex);
     if (existing) {
@@ -181,8 +187,14 @@ export class MemoryEventStore implements StorePort {
   }
 
   async getEvent(id: Hex64): Promise<SignedEvent | null> {
+    if (!/^[0-9a-fA-F]{64}$/.test(id)) return null;
     const row = this.events.get(id.toLowerCase());
     return row ? cloneEvent(row.event) : null;
+  }
+
+  async getPostState(id: Hex64): Promise<{ deleted: boolean; expiresAt: number } | null> {
+    const row = this.events.get(id.toLowerCase());
+    return row ? { deleted: row.deleted, expiresAt: row.expiresAt } : null;
   }
 
   async listFeed(opts: ListFeedOpts): Promise<FeedPost[]> {
@@ -331,6 +343,17 @@ export class MemoryEventStore implements StorePort {
       for (const key of this.receiptKeys) {
         if (key.includes(`:${postHex}:`)) this.receiptKeys.delete(key);
       }
+      // Same all-tables coverage as the SQLite prune, keyed on the
+      // expired post set only: star/reshare rows for live posts, and
+      // pending tombstones for posts that never arrived, survive.
+      this.worldConfirmed.delete(postHex);
+      this.starKnownPosts.delete(postHex);
+      for (const [idHex, event] of this.starEvents) {
+        if (taggedPostId(event) === postHex) this.starEvents.delete(idHex);
+      }
+      for (const [idHex, event] of this.reshareEvents) {
+        if (taggedPostId(event) === postHex) this.reshareEvents.delete(idHex);
+      }
     }
     return removed;
   }
@@ -344,6 +367,15 @@ export class MemoryEventStore implements StorePort {
 
   async isWorldConfirmed(eventId: Hex64): Promise<boolean> {
     return this.worldConfirmed.has(eventId.toLowerCase());
+  }
+
+  async listWorldConfirmed(ids: Hex64[]): Promise<Set<Hex64>> {
+    const out = new Set<Hex64>();
+    for (const id of ids) {
+      const key = id.toLowerCase();
+      if (this.worldConfirmed.has(key)) out.add(key);
+    }
+    return out;
   }
 
   async getUnconfirmed(): Promise<Hex64[]> {
@@ -362,6 +394,12 @@ export class MemoryEventStore implements StorePort {
   // Stars (T17): same semantics as the SQLite star tables.
 
   async saveStarEvent(e: SignedEvent): Promise<void> {
+    if (e.kind !== 4) {
+      throw new Error(`saveStarEvent: expected kind 4, got kind ${e.kind}`);
+    }
+    if (!taggedPostId(e)) {
+      throw new Error('saveStarEvent: star has no ["e", postId] tag');
+    }
     const idHex = bytesToHex(e.id);
     if (!this.starEvents.has(idHex)) {
       this.starEvents.set(idHex, cloneEvent(e));

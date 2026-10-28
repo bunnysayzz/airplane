@@ -108,6 +108,31 @@ describe('sqlite adapter over real SQL', () => {
     db2.close();
   });
 
+  test('open applies WAL + busy-timeout pragmas, and close checkpoints without throwing', async () => {
+    const file = tempDbPath();
+    const post = makePost(7);
+
+    const db1 = new DatabaseSync(file);
+    const port1 = createSqliteDatabasePort(makeExecutor(db1));
+    const store1 = new OpSqliteStore(port1);
+    await store1.saveEvent(post);
+    const mode = await port1.query<{ journal_mode: string }>('PRAGMA journal_mode');
+    expect(mode[0].journal_mode).toBe('wal');
+    const timeout = await port1.query<Record<string, unknown>>('PRAGMA busy_timeout');
+    expect(Object.values(timeout[0])).toContain(5000);
+    await expect(port1.close?.()).resolves.toBeUndefined();
+    db1.close();
+
+    // Existing install re-opens: pragmas are applied again, data survives.
+    const db2 = new DatabaseSync(file);
+    const port2 = createSqliteDatabasePort(makeExecutor(db2));
+    const store2 = new OpSqliteStore(port2);
+    expect(await store2.getEvent(bytesToHex(post.id))).not.toBeNull();
+    const mode2 = await port2.query<{ journal_mode: string }>('PRAGMA journal_mode');
+    expect(mode2[0].journal_mode).toBe('wal');
+    db2.close();
+  });
+
   test('a failed migration fails later operations (no silent memory fallback)', async () => {
     const failing: OpSqliteExecutor = {
       execute: async () => {

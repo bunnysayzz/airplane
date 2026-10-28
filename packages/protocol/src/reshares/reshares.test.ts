@@ -325,3 +325,37 @@ describe('latestFor (toggle monotonicity seam)', () => {
     expect(counter.latestFor(toHex(postId), toHex(resharer.publicKey))?.content).toBe('undo');
   });
 });
+
+describe('ReshareCounter per-post index', () => {
+  test('cluster for one post ignores reshares on many other posts', () => {
+    const counter = new ReshareCounter();
+    const author = keypair();
+    const resharer = keypair();
+    const target = bytes32(7);
+    counter.markPostKnown(toHex(target));
+    const first = createReshare({
+      crypto,
+      secretKey: resharer.secretKey,
+      pubkey: resharer.publicKey,
+      geohash5: GEOHASH,
+      originalPostId: target,
+      originalAuthorPubkey: author.publicKey,
+    });
+    expect(counter.add(first, verify)).toBe('counted');
+    for (let i = 0; i < 50; i++) {
+      const other = bytes32(100 + i);
+      counter.markPostKnown(toHex(other));
+      const ev = createReshare({
+        crypto,
+        secretKey: resharer.secretKey,
+        pubkey: resharer.publicKey,
+        geohash5: GEOHASH,
+        originalPostId: other,
+        originalAuthorPubkey: author.publicKey,
+      });
+      expect(counter.add(ev, verify)).toBe('counted');
+    }
+    expect(counter.cluster(toHex(target)).count).toBe(1);
+    expect(counter.cluster(toHex(target)).latestResharer).toBe(toHex(resharer.publicKey));
+  });
+});

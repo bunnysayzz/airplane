@@ -80,6 +80,12 @@ export class ReshareCounter {
   private readonly events = new Map<Hex64, SignedEvent>();
   /** Latest state per (pubkey, post). Key: `${pubkeyHex}:${postIdHex}`. */
   private readonly latest = new Map<string, PerAuthorState>();
+  /**
+   * Per-post index into `latest`: postHex -> state keys for that post.
+   * cluster() reads only this post's entries instead of scanning every
+   * (pubkey, post) state on every card.
+   */
+  private readonly latestByPost = new Map<Hex64, Set<string>>();
   /** Post ids this node holds (originals). Reshares for others stay pending. */
   private readonly knownPosts = new Set<Hex64>();
   /** Pending reshare event ids per unknown post id. */
@@ -138,6 +144,14 @@ export class ReshareCounter {
     const key = ReshareCounter.stateKey(pubkeyHex, target);
     const prev = this.latest.get(key);
     if (prev && !newerThan(event.created_at, idHex, prev)) return 'superseded';
+    if (!prev) {
+      let keys = this.latestByPost.get(target);
+      if (!keys) {
+        keys = new Set();
+        this.latestByPost.set(target, keys);
+      }
+      keys.add(key);
+    }
     this.latest.set(key, {
       latestCreatedAt: event.created_at,
       latestIdHex: idHex,
@@ -161,12 +175,11 @@ export class ReshareCounter {
     const id = postIdHex.toLowerCase();
     if (!this.knownPosts.has(id)) return [];
     const rows: { pubkeyHex: Hex64; createdAt: number; idHex: Hex64 }[] = [];
-    for (const [key, state] of this.latest) {
-      if (!state.active) continue;
+    for (const key of this.latestByPost.get(id) ?? []) {
+      const state = this.latest.get(key);
+      if (!state || !state.active) continue;
       const sep = key.indexOf(':');
       const pubkeyHex = key.slice(0, sep);
-      const postHex = key.slice(sep + 1);
-      if (postHex !== id) continue;
       rows.push({ pubkeyHex, createdAt: state.latestCreatedAt, idHex: state.latestIdHex });
     }
     rows.sort((a, b) => b.createdAt - a.createdAt || (b.idHex > a.idHex ? 1 : -1));
