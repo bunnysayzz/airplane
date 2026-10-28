@@ -161,3 +161,28 @@ describe('formatStarCount', () => {
     expect(formatStarCount(42)).toBe('42+');
   });
 });
+
+describe('StarCounter per-post index', () => {
+  test('view for one post ignores stars on many other posts', () => {
+    const c = new StarCounter();
+    c.markPostKnown(POST);
+    const kp = keypair();
+    c.apply(star(kp, NOW), (ev) => verifyEvent(crypto, ev), NOW);
+    for (let i = 0; i < 50; i++) {
+      const other = (i + 1).toString(16).padStart(64, '0');
+      c.markPostKnown(other);
+      const ev = createStarEvent({
+        crypto,
+        secretKey: kp.secretKey,
+        pubkey: kp.publicKey,
+        geohash5: 'tdr1v',
+        postId: fromHex(other),
+        createdAt: NOW,
+      });
+      c.apply(ev, (e) => verifyEvent(crypto, e), NOW);
+    }
+    expect(c.view(POST).count).toBe(1);
+    expect(c.view(POST).starredByMe).toBe(false);
+    expect(c.view(POST, toHex(kp.publicKey)).starredByMe).toBe(true);
+  });
+});
