@@ -541,6 +541,9 @@ export const en = {
     burnCancel: 'Keep it',
     burnDone: 'New identity created.',
     burnFailed: 'Burn failed. Your old identity is untouched. Try again.',
+    copyCode: 'Copy code',
+    copied: 'Copied',
+    copyFailed: 'Copy failed. Long-press the code to copy it.',
   },
   appearance: {
     title: 'Appearance',

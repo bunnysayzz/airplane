@@ -23,6 +23,7 @@
     "buffer": "^6.0.3",
     "expo": "53.0.27",
     "expo-blur": "~14.1.5",
+    "expo-clipboard": "~7.1.5",
     "expo-constants": "~17.1.8",
     "expo-file-system": "~18.1.11",
     "expo-font": "~13.3.2",

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import * as Clipboard from 'expo-clipboard';
 import { fromHex, toHex } from '@airplane/protocol';
 import { Card, SectionLabel } from '../../components/ui';
 import { useTheme } from '../../src/theme/themeContext';
@@ -37,6 +38,8 @@ const Identity: React.FC<IdentityProps> = ({ onBack }) => {
   const [loadError, setLoadError] = useState(false);
   const [burning, setBurning] = useState(false);
   const [burnError, setBurnError] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const refresh = useCallback(() => {
     getDevicePublicKey()
@@ -52,6 +55,21 @@ const Identity: React.FC<IdentityProps> = ({ onBack }) => {
   }, [refresh]);
 
   const label = pubkeyHex ? authorLabelFor(fromHex(pubkeyHex)) : null;
+
+  // DM code copy: one tap copies the FULL pubkey hex (the DM address the
+  // Messages tab pastes from). expo-clipboard is autolinked like
+  // expo-secure-store (no manual android/ entries, no prebuild); the CI
+  // native-module guard fails the build if the module drops from
+  // autolinking resolve. The hex stays selectable as a fallback so a
+  // long-press copy still works even if the module call ever fails.
+  const handleCopy = () => {
+    if (pubkeyHex === null) return;
+    setCopied(false);
+    setCopyFailed(false);
+    Clipboard.setStringAsync(pubkeyHex)
+      .then(() => setCopied(true))
+      .catch(() => setCopyFailed(true));
+  };
 
   const handleBurn = () => {
     dialog.alert(t('identity.burnConfirmTitle'), t('identity.burnConfirmMessage'), [
@@ -107,7 +125,19 @@ const Identity: React.FC<IdentityProps> = ({ onBack }) => {
               <Ionicons name="key-outline" size={20} color={colors.accentText} />
               <View style={{ flex: 1 }}>
                 <Text style={[type.name, styles.rowText]}>{label}</Text>
-                <Text style={[type.meta, styles.restartNote]}>{pubkeyHex}</Text>
+                <Text style={[type.meta, styles.restartNote]} selectable>{pubkeyHex}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                  <Pressable
+                    style={styles.addButton}
+                    onPress={handleCopy}
+                    accessibilityRole="button"
+                    accessibilityLabel={t('identity.copyCode')}
+                  >
+                    <Text style={[type.name, styles.addButtonText]}>{t('identity.copyCode')}</Text>
+                  </Pressable>
+                  {copied && <Text style={[type.meta, styles.restartNote]}>{t('identity.copied')}</Text>}
+                </View>
+                {copyFailed && <Text style={[type.meta, styles.restartNote]}>{t('identity.copyFailed')}</Text>}
               </View>
             </View>
           )}
