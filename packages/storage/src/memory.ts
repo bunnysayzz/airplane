@@ -66,8 +66,8 @@ function cloneEvent(e: SignedEvent): SignedEvent {
 /** Extract the referenced post id hex from a receipt/tombstone `["e", id]` tag. */
 function taggedPostId(e: SignedEvent): Hex64 | null {
   for (const tag of e.tags) {
-    if (tag.length >= 2 && tag[0] === 'e' && /^[0-9a-f]{64}$/.test(tag[1])) {
-      return tag[1];
+    if (tag.length >= 2 && tag[0] === 'e' && /^[0-9a-fA-F]{64}$/.test(tag[1])) {
+      return tag[1].toLowerCase();
     }
   }
   return null;

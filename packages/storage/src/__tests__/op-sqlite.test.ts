@@ -819,6 +819,21 @@ describe('stars (MIGRATION_004)', () => {
     }
   });
 
+  test('uppercase e tags normalize to lowercase instead of dropping or throwing', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    const postId = 'B'.repeat(64);
+    const star = makeEvent({ seed: 91, kind: 4, tags: [['e', postId]], content: 'star' });
+    await store.saveStarEvent(star);
+    expect(await store.listStarEvents()).toHaveLength(1);
+    const reshare = makeEvent({ seed: 92, kind: 5, tags: [['e', postId]] });
+    await expect(store.saveReshareEvent(reshare)).resolves.toBeUndefined();
+    expect(await store.listReshareEvents()).toHaveLength(1);
+    // The extracted target id (used for rehydration joins) is normalized.
+    const rows = await port.query<{ target_id: Uint8Array }>(`SELECT target_id FROM reshare_events`);
+    expect(bytesToHex(rows[0].target_id)).toBe(postId.toLowerCase());
+  });
+
   test('saveStarEvent rejects non-kind-4 events and stars without an e tag', async () => {
     const { port } = await migratedDb();
     const store = new OpSqliteStore(port);

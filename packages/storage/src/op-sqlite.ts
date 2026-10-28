@@ -164,8 +164,11 @@ function tryRowToEvent(row: EventRowShape): SignedEvent | null {
 
 function taggedPostId(e: SignedEvent): Hex64 | null {
   for (const tag of e.tags) {
-    if (tag.length >= 2 && tag[0] === 'e' && /^[0-9a-f]{64}$/.test(tag[1])) {
-      return tag[1];
+    // The rest of the store lowercases ids before use; an uppercase e tag
+    // must normalize the same way instead of being silently dropped (stars)
+    // or throwing (reshares/receipts) for the same input shape.
+    if (tag.length >= 2 && tag[0] === 'e' && /^[0-9a-fA-F]{64}$/.test(tag[1])) {
+      return tag[1].toLowerCase();
     }
   }
   return null;
