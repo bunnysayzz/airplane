@@ -141,6 +141,20 @@ describe('captureError', () => {
     expect(JSON.stringify(event)).not.toContain('publickey123');
   });
 
+  test('scrubs a 64-char hex string and a coordinate pair from the event', () => {
+    initSentry(TEST_DSN);
+    const fullId = 'cd'.repeat(32);
+    addBreadcrumb('keystore-fallback', { reason: 'ok', leaked: fullId });
+    captureError(new Error(`publish failed for ${fullId} at 12.345678, 77.123456`));
+    const event = sentEvent();
+    const body = JSON.stringify(event);
+    expect(body).not.toContain(fullId);
+    expect(body).not.toContain('12.345678, 77.123456');
+    const crumbs = breadcrumbValues(event);
+    expect(crumbs).toHaveLength(1);
+    expect(crumbs[0]['data']).toEqual({ reason: 'ok' });
+  });
+
   test('attaches breadcrumbs to the event', () => {
     initSentry(TEST_DSN);
     addBreadcrumb('keystore-fallback', { reason: 'Error' });

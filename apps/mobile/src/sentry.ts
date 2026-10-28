@@ -21,7 +21,11 @@
  *
  * PRIVACY: an event carries ONLY the error name/message/stack, the publish
  * stage tag, and breadcrumbs. Post text, location, pubkeys, and secrets are
- * never passed to this module and never appear in a payload.
+ * never passed to this module and never appear in a payload. As a second
+ * layer, captureError scrubs runs of 32 or more hex chars and
+ * latitude/longitude-like number pairs from the message, and drops any
+ * breadcrumb data value failing the same check, so a future call site
+ * that embeds such data cannot leak it through this egress point.
  *
  * SAFETY: every public function is wrapped so it can never throw — a
  * logging failure must never break launch or posting. When the DSN env var
@@ -46,6 +50,25 @@ export interface SentryBreadcrumb {
 const MAX_BREADCRUMBS = 20;
 const MAX_MESSAGE_LENGTH = 1000;
 const MAX_FRAMES = 50;
+
+/**
+ * Egress scrubbing (P2-5): a run of 32 or more hex chars is long enough
+ * to be a pubkey fragment, an id, or a key, and a pair of long decimals
+ * separated by a comma looks like latitude/longitude. Neither belongs
+ * in a telemetry event, whatever the call site embedded.
+ */
+function containsSensitiveValue(value: string): boolean {
+  return (
+    /[0-9a-fA-F]{32,}/.test(value) ||
+    /-?\d{1,3}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,}/.test(value)
+  );
+}
+
+function scrubMessage(message: string): string {
+  return message
+    .replace(/[0-9a-fA-F]{32,}/g, '[redacted]')
+    .replace(/-?\d{1,3}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,}/g, '[redacted]');
+}
 
 /** Parse a Sentry DSN. Returns null for anything malformed. */
 export function parseDsn(dsn: string): SentryDsnParts | null {
@@ -159,10 +182,24 @@ export function captureError(error: unknown): void {
 
     const name = error instanceof Error ? error.name : 'UnknownError';
     const rawMessage = error instanceof Error ? error.message : String(error);
-    const message = rawMessage.slice(0, MAX_MESSAGE_LENGTH);
+    const message = scrubMessage(rawMessage).slice(0, MAX_MESSAGE_LENGTH);
     const stack = error instanceof Error ? error.stack : undefined;
     const stage = (error as { stage?: unknown } | null)?.stage ?? undefined;
     const eventId = randomEventId();
+    const scrubbedBreadcrumbs: SentryBreadcrumb[] = breadcrumbs.map((crumb) => {
+      const scrubbed: SentryBreadcrumb = {
+        timestamp: crumb.timestamp,
+        message: scrubMessage(crumb.message),
+      };
+      if (crumb.data) {
+        const data: Record<string, string> = {};
+        for (const [key, value] of Object.entries(crumb.data)) {
+          if (!containsSensitiveValue(value)) data[key] = value;
+        }
+        scrubbed.data = data;
+      }
+      return scrubbed;
+    });
 
     const event: Record<string, unknown> = {
       event_id: eventId,
@@ -180,7 +217,7 @@ export function captureError(error: unknown): void {
         ],
       },
       tags: typeof stage === 'string' && stage.length > 0 ? { publish_stage: stage } : {},
-      breadcrumbs: { values: breadcrumbs },
+      breadcrumbs: { values: scrubbedBreadcrumbs },
     };
 
     const envelope =
