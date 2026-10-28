@@ -39,6 +39,7 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
   const [snapshot, setSnapshot] = useState<DiagnosticsSnapshot>(() => getDiagnosticsSnapshot());
   const [logStatus, setLogStatus] = useState(() => getDiagnosticsLogStatus());
   const [shareFailed, setShareFailed] = useState<boolean>(false);
+  const [shareError, setShareError] = useState<string | null>(null);
 
   const refreshPermissions = () => {
     checkBlePermissionStates()
@@ -196,9 +197,22 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
             style={styles.button}
             onPress={() => {
               setShareFailed(false);
+              setShareError(null);
               void shareDiagnosticsLogFile()
                 .then(() => setLogStatus(getDiagnosticsLogStatus()))
-                .catch(() => setShareFailed(true));
+                .catch((error: unknown) => {
+                  setShareFailed(true);
+                  // Local, owner-visible only: at most a file path, which
+                  // the screen already displays. Keeping the message
+                  // distinguishes sharing-unavailable from flush
+                  // failure from a missing file.
+                  setShareError(
+                    String(error instanceof Error ? error.message : error)
+                      .replace(/[\r\n]+/g, ' ')
+                      .trim()
+                      .slice(0, 120),
+                  );
+                });
             }}
             accessibilityRole="button"
             accessibilityLabel={t('settings.diagnosticsShareLog')}
@@ -258,7 +272,10 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
             : t('settings.diagnosticsSentryDisabled')}
         </Text>
         {shareFailed && (
-          <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsShareUnavailable')}</Text>
+          <Text style={[type.meta, styles.note]}>
+            {t('settings.diagnosticsShareUnavailable')}
+            {shareError !== null ? `: ${shareError}` : ''}
+          </Text>
         )}
 
         <SectionLabel style={styles.sectionLabel}>{t('settings.diagnosticsRadio')}</SectionLabel>
