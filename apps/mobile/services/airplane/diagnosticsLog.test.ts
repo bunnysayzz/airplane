@@ -54,6 +54,8 @@ describe('diagnostics log line format', () => {
     // the 2MB byte cap drops the line; a code-unit count would keep it.
     expect(rotateDiagnosticsLogLines(['é'.repeat(1_500_000)])).toEqual([]);
   });
+
+  test('rotation keeps the newest lines under both caps', () => {
     const lines = Array.from({ length: MAX_DIAGNOSTICS_LOG_LINES + 10 }, (_, i) => `line-${i}`);
     const kept = rotateDiagnosticsLogLines(lines);
     expect(kept.length).toBe(MAX_DIAGNOSTICS_LOG_LINES);
