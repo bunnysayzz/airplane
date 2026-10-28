@@ -179,6 +179,11 @@ function isProvisionalKey(key: string): boolean {
 /** Single auto-connect retry delay (ms). One retry only, never a loop. */
 export const AUTO_CONNECT_RETRY_MS = 2000;
 
+/** Discovered peers older than this are stale (pruned on discover and before connect). */
+export const DISCOVERED_STALE_MS = 60_000;
+/** Discovered peer map cap: past this, the stalest entry is evicted. */
+export const DISCOVERED_MAX = 100;
+
 export const BLE_TIMEOUT_MS = {
   ready: 10_000,
   start: 10_000,
@@ -222,7 +227,7 @@ export class GattBlePort implements TransportPort {
   private ownTag: Uint8Array | null = null;
   private readonly conns = new Map<string, PeerConn>();
   private readonly bleIndex = new Map<string, string>(); // bleId -> conn key
-  private readonly discovered = new Map<string, { bleId: string; tag: Uint8Array; rssi: number }>();
+  private readonly discovered = new Map<string, { bleId: string; tag: Uint8Array; rssi: number; lastSeenMs: number }>();
   private readonly receivers = new Set<(peerId: string, bytes: Uint8Array) => void>();
   private readonly scanSubs = new Set<(peer: PeerInfo) => void>();
   private scanUnsub: (() => void) | null = null;
@@ -454,7 +459,21 @@ export class GattBlePort implements TransportPort {
     if (this.ownTag && toHex(tag) === toHex(this.ownTag)) return; // self
     const key = provisionalTagKey(tag);
     const known = this.discovered.get(key);
-    this.discovered.set(key, { bleId: id, tag, rssi });
+    this.pruneDiscovered();
+    this.discovered.set(key, { bleId: id, tag, rssi, lastSeenMs: Date.now() });
+    while (this.discovered.size > DISCOVERED_MAX) {
+      // Evict the stalest entry (never the one just seen).
+      let stalest: string | null = null;
+      let stalestAt = Number.POSITIVE_INFINITY;
+      for (const [k, v] of this.discovered) {
+        if (k !== key && v.lastSeenMs < stalestAt) {
+          stalestAt = v.lastSeenMs;
+          stalest = k;
+        }
+      }
+      if (stalest === null) break;
+      this.discovered.delete(stalest);
+    }
     recordPeerSeen(key, rssi, toHex(tag));
     if (!known) {
       for (const cb of this.scanSubs) {
@@ -510,12 +529,20 @@ export class GattBlePort implements TransportPort {
 
   // ------------------------------------------------------------------ connect
 
+  /** Drop discovered entries not seen within the stale window. */
+  private pruneDiscovered(nowMs: number = Date.now()): void {
+    for (const [key, entry] of this.discovered) {
+      if (nowMs - entry.lastSeenMs > DISCOVERED_STALE_MS) this.discovered.delete(key);
+    }
+  }
+
   /** Connect to a discovered peer (provisional `tag:<hex>` id or full peerId). */
   async connect(peerId: string): Promise<void> {
     if (this.conns.has(peerId)) return;
     for (const conn of this.conns.values()) {
       if (conn.peerId === peerId) return;
     }
+    this.pruneDiscovered();
     const disc = this.discovered.get(peerId);
     if (!disc) throw new Error(`ble: unknown peer ${peerId}`);
     if (!this.deps.central) throw new Error('ble: central role unavailable');

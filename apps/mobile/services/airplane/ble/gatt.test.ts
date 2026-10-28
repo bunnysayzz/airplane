@@ -884,3 +884,50 @@ describe('ensureCentral permission check (audit P1-18)', () => {
     await port.close();
   });
 });
+
+describe('discovered peer pruning and cap (audit F-P2-1)', () => {
+  test('stale entries are pruned before connect, so a long-gone peer is not dialled', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    const nowSpy = jest.spyOn(Date, 'now');
+    nowSpy.mockReturnValue(1_000_000);
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    // 61s later a new sighting triggers the prune of the stale entry.
+    nowSpy.mockReturnValue(1_000_000 + 61_000);
+    const otherPub = new Uint8Array(32).fill(0x0c);
+    central.discoverCb!({ id: 'ble-2', rssi: -60, tag: peerTagOf(otherPub) });
+    await tick(50);
+    // Still at the second sighting's time: the first entry was pruned on
+    // discover, the second is fresh, so only the first is unknown.
+    await expect(port.connect(`tag:${toHex(PEER_TAG)}`)).rejects.toThrow(/unknown peer/);
+    nowSpy.mockRestore();
+    await port.close();
+  });
+
+  test('the map caps at 100 entries, evicting the stalest first', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    // 101 distinct tags that sort below our own tag, so none auto-connect.
+    for (let i = 0; i < 101; i++) {
+      const pub = new Uint8Array(32);
+      pub[0] = 0x01;
+      pub[1] = i & 0xff;
+      central.discoverCb!({ id: `ble-${i}`, rssi: -60, tag: peerTagOf(pub) });
+    }
+    const firstPub = new Uint8Array(32);
+    firstPub[0] = 0x01;
+    firstPub[1] = 0;
+    await expect(port.connect(`tag:${toHex(peerTagOf(firstPub))}`)).rejects.toThrow(/unknown peer/);
+    const lastPub = new Uint8Array(32);
+    lastPub[0] = 0x01;
+    lastPub[1] = 100;
+    // The newest entry survives: connect attempts it, so the error is
+    // the IDENT mismatch (default fake IDENT), not unknown-peer.
+    await expect(port.connect(`tag:${toHex(peerTagOf(lastPub))}`)).rejects.not.toThrow(/unknown peer/);
+    await port.close();
+  });
+});
