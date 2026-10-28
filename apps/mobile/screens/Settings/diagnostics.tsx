@@ -187,6 +187,7 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
             onPress={() => {
               refreshPermissions();
               setSnapshot(getDiagnosticsSnapshot());
+              setLogStatus(getDiagnosticsLogStatus());
             }}
             accessibilityRole="button"
             accessibilityLabel={t('settings.diagnosticsRefresh')}
