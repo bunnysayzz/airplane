@@ -589,7 +589,7 @@ describe('defaultBleDeps adapter delegation', () => {
     await deps.central!.start();
     expect(mgr.start).toHaveBeenCalledWith({ showAlert: false });
     await deps.central!.scan();
-    expect(mgr.scan).toHaveBeenCalledWith([], 0, false, { scanMode: 2 });
+    expect(mgr.scan).toHaveBeenCalledWith({ serviceUUIDs: [], seconds: 0, allowDuplicates: false, scanMode: 2 });
     const mtu = await deps.central!.requestMtu('dev', 512);
     expect(mtu).toBe(256);
     expect(mgr.requestMTU).toHaveBeenCalledWith('dev', 512);
