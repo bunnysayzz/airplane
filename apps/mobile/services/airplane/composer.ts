@@ -16,6 +16,7 @@ import {
 import { getDevicePublicKey, signDeviceEvent } from './identity';
 import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
+import { recordMessage } from './diagnostics';
 import { getLocationCell as resolveLocationCell } from './location';
 
 export { LocationError, type LocationFailureCode } from './location';
@@ -105,9 +106,29 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
     throw new PublishError('save', err);
   }
   // Fan out via hybrid transport (BLE + Nostr when online). Non-blocking;
-  // the post is already in the local feed.
+  // the post is already in the local feed. publishViaTransport itself
+  // records the RouteResult in Diagnostics (relayed, sent over BLE, or
+  // not delivered), so a queued result is already surfaced there and is
+  // not re-recorded here. What used to be swallowed entirely was a
+  // transport-start failure (the empty catch): that is now recorded.
   const { publishViaTransport } = await import('./transport');
-  publishViaTransport(event).catch(() => {});
+  void publishViaTransport(event).catch((err: unknown) => {
+    recordMessage({
+      id: toHex(event.id),
+      sequence: null,
+      sizeBytes: 0,
+      direction: 'outbound',
+      attempts: [
+        {
+          transport: 'relay',
+          atMs: Date.now(),
+          outcome: 'failed',
+          detail: err instanceof Error ? err.message : 'transport failed to start',
+        },
+      ],
+      finalStatus: 'fan-out failed',
+    });
+  });
   try {
     notifyFeedListeners();
   } catch (err) {
