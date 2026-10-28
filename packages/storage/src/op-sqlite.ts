@@ -497,6 +497,9 @@ export class OpSqliteStore implements StorePort {
   }
 
   async getEvent(id: Hex64): Promise<SignedEvent | null> {
+    // A lookup returns null for a malformed id; it must not throw out of
+    // hexToBytes and turn every unchecked caller into a crash path.
+    if (!/^[0-9a-fA-F]{64}$/.test(id)) return null;
     const rows = await this.db.query<EventRowShape>(
       `SELECT id, pubkey, kind, created_at, geohash, tags, content, sig
        FROM events WHERE id = ?`,

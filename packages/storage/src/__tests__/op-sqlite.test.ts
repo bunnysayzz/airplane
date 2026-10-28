@@ -330,6 +330,15 @@ describe('migrate', () => {
 });
 
 describe('saveEvent / getEvent', () => {
+  test('getEvent returns null (never throws) for malformed hex', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    await expect(store.getEvent('xyz')).resolves.toBeNull();
+    await expect(store.getEvent('a'.repeat(63))).resolves.toBeNull();
+    await expect(store.getEvent('g'.repeat(64))).resolves.toBeNull();
+    await expect(store.getEvent('')).resolves.toBeNull();
+  });
+
   test('misrouted kind 4/5 events fail with a routing error, not a CHECK error', async () => {
     const { port } = await migratedDb();
     const store = new OpSqliteStore(port);

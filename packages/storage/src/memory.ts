@@ -187,6 +187,7 @@ export class MemoryEventStore implements StorePort {
   }
 
   async getEvent(id: Hex64): Promise<SignedEvent | null> {
+    if (!/^[0-9a-fA-F]{64}$/.test(id)) return null;
     const row = this.events.get(id.toLowerCase());
     return row ? cloneEvent(row.event) : null;
   }
