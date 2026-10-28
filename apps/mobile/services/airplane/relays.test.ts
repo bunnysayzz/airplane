@@ -84,6 +84,14 @@ describe('relay URL validation', () => {
       sanitizeRelayList(['wss://a.relay', 'ws://bad.relay', 'wss://a.relay/', 'wss://b.relay']),
     ).toEqual(['wss://a.relay', 'wss://b.relay']);
   });
+
+  it('caps URL length and list count', () => {
+    expect(normalizeRelayUrl(`wss://${'x'.repeat(300)}.relay`)).toBeNull();
+    const many = Array.from({ length: 15 }, (_, i) => `wss://r${i}.relay`);
+    expect(sanitizeRelayList(many)).toHaveLength(10);
+    expect(sanitizeRelayList(many)[0]).toBe('wss://r0.relay');
+    expect(sanitizeRelayList(many)[9]).toBe('wss://r9.relay');
+  });
 });
 
 describe('add/remove behaviour', () => {
@@ -94,6 +102,8 @@ describe('add/remove behaviour', () => {
     expect(addRelayUrl(base, 'wss://a.relay/')).toBeNull();
     expect(addRelayUrl(base, 'http://nope.relay')).toBeNull();
     expect(base).toEqual(['wss://a.relay']); // pure: input untouched
+    const full = Array.from({ length: 10 }, (_, i) => `wss://r${i}.relay`);
+    expect(addRelayUrl(full, 'wss://one-more.relay')).toBeNull();
   });
 
   it('removes a relay and no-ops on an absent one', () => {

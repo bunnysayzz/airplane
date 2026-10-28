@@ -36,17 +36,24 @@ export const DEFAULT_RELAYS: string[] = [
  * relay address. Only secure WebSockets are accepted: a ws:// relay would
  * send wrapped (still signed) posts in the clear over the local network path.
  * Trailing slashes are stripped so the same relay entered two ways dedupes.
+ * Length-capped (audit F40): an unbounded URL must not reach the socket
+ * layer or the stored list.
  */
+export const MAX_RELAY_URL_CHARS = 256;
+/** Max relays in one list (audit F40): each entry opens a socket. */
+export const MAX_RELAYS = 10;
+
 export function normalizeRelayUrl(input: string): string | null {
   const url = input.trim().replace(/\/+$/, '');
   if (!url.startsWith('wss://')) return null;
   if (url.length <= 'wss://'.length) return null;
+  if (url.length > MAX_RELAY_URL_CHARS) return null;
   // Reject anything with whitespace or a second scheme-looking fragment.
   if (/\s/.test(url)) return null;
   return url;
 }
 
-/** Dedupe (preserving first-seen order) and drop invalid entries. */
+/** Dedupe (preserving first-seen order) and drop invalid entries. Capped at MAX_RELAYS. */
 export function sanitizeRelayList(urls: readonly string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -55,6 +62,7 @@ export function sanitizeRelayList(urls: readonly string[]): string[] {
     if (url !== null && !seen.has(url)) {
       seen.add(url);
       out.push(url);
+      if (out.length >= MAX_RELAYS) break;
     }
   }
   return out;
@@ -121,6 +129,7 @@ export async function resetRelayUrls(): Promise<void> {
 export function addRelayUrl(current: readonly string[], input: string): string[] | null {
   const url = normalizeRelayUrl(input);
   if (url === null || current.includes(url)) return null;
+  if (current.length >= MAX_RELAYS) return null;
   return [...current, url];
 }
 
