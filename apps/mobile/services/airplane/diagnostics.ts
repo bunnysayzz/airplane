@@ -199,6 +199,22 @@ function notify(): void {
   }
 }
 
+// Snapshot storm guard: collector record calls arrive in bursts (about 100
+// dedup drops in about 2 seconds on foreground transitions). Notifying every
+// listener per record re-renders the Diagnostics screen dozens of times per
+// second. Trailing-edge throttle: the first record in a window schedules one
+// fire 250 ms out; later records in the window ride along, because the
+// snapshot is rebuilt from current state on fire, so no event data is lost.
+const DIAGNOSTICS_NOTIFY_THROTTLE_MS = 250;
+let notifyTimer: ReturnType<typeof setTimeout> | null = null;
+function notifyThrottled(): void {
+  if (notifyTimer !== null) return;
+  notifyTimer = setTimeout(() => {
+    notifyTimer = null;
+    notify();
+  }, DIAGNOSTICS_NOTIFY_THROTTLE_MS);
+}
+
 function ensurePeer(peerId: string): DiagnosticsPeer {
   let peer = peers.get(peerId);
   if (!peer) {
@@ -230,7 +246,7 @@ function pruneScanStarts(nowMs: number): void {
 export function setDiagnosticsAdapterState(state: DiagnosticsAdapterState): void {
   adapterState = state;
   logEvent('adapter', state);
-  notify();
+  notifyThrottled();
 }
 
 // ------------------------------------------------------------ advertising
@@ -241,20 +257,20 @@ export function recordAdvertiseSuccess(advertisementLengthBytes: number): void {
   advertisingLastFailure = null;
   advertisingLengthBytes = advertisementLengthBytes;
   logEvent('advertise', `started ${advertisementLengthBytes}B`);
-  notify();
+  notifyThrottled();
 }
 
 export function recordAdvertiseFailure(code: string): void {
   advertisingState = 'stopped';
   advertisingLastFailure = code;
   logEvent('advertise', `failed ${code}`);
-  notify();
+  notifyThrottled();
 }
 
 export function recordAdvertiseStopped(): void {
   advertisingState = 'stopped';
   logEvent('advertise', 'stopped');
-  notify();
+  notifyThrottled();
 }
 
 // ---------------------------------------------------------------- scanning
@@ -264,19 +280,19 @@ export function recordScanStarted(): void {
   logEvent('scan', 'started');
   scanStarts.push(Date.now());
   pruneScanStarts(Date.now());
-  notify();
+  notifyThrottled();
 }
 
 export function recordScanStopped(): void {
   scanningState = 'stopped';
   logEvent('scan', 'stopped');
-  notify();
+  notifyThrottled();
 }
 
 export function recordScanFailure(code: string): void {
   scanningLastFailure = code;
   logEvent('scan', `failed ${code}`);
-  notify();
+  notifyThrottled();
 }
 
 // ------------------------------------------------------------------- peers
@@ -288,7 +304,7 @@ export function recordPeerSeen(peerId: string, rssi: number, advertisementHex: s
   peer.advertisementHex = advertisementHex;
   if (peer.gattState !== 'connected') peer.gattState = 'seen';
   logEvent('peer', `seen ${peerId} rssi ${rssi} ad ${advertisementHex}`);
-  notify();
+  notifyThrottled();
 }
 
 /** A provisional id (tag:/mac:) resolved to a full peer id. Merges the old entry. */
@@ -311,7 +327,7 @@ export function recordPeerResolved(oldKey: string, peerId: string): void {
     peers.set(peerId, old);
   }
   logEvent('peer', `resolved ${oldKey} -> ${peerId}`);
-  notify();
+  notifyThrottled();
 }
 
 export function recordPeerConnected(
@@ -325,7 +341,7 @@ export function recordPeerConnected(
   peer.mtu = mtu;
   peer.cccdSubscribed = cccdSubscribed;
   peer.lastSeenAtMs = Date.now();
-  notify();
+  notifyThrottled();
 }
 
 export function recordPeerDisconnected(peerId: string): void {
@@ -333,7 +349,7 @@ export function recordPeerDisconnected(peerId: string): void {
   if (!peer) return;
   logEvent('peer', `disconnected ${peerId}`);
   peer.gattState = 'disconnected';
-  notify();
+  notifyThrottled();
 }
 
 // ------------------------------------------------------------------ frames
@@ -342,32 +358,32 @@ export function recordFragmentsSent(peerId: string, count: number): void {
   if (count <= 0) return;
   logEvent('frames', `${peerId} fragments-sent ${count}`);
   ensurePeer(peerId).frames.fragmentsSent += count;
-  notify();
+  notifyThrottled();
 }
 
 export function recordPacketSent(peerId: string): void {
   logEvent('frames', `${peerId} packet-sent`);
   ensurePeer(peerId).frames.packetsSent += 1;
-  notify();
+  notifyThrottled();
 }
 
 export function recordFragmentsReceived(peerId: string, count: number): void {
   if (count <= 0) return;
   logEvent('frames', `${peerId} fragments-received ${count}`);
   ensurePeer(peerId).frames.fragmentsReceived += count;
-  notify();
+  notifyThrottled();
 }
 
 export function recordIncompleteFragmentSet(peerId: string): void {
   logEvent('frames', `${peerId} incomplete-fragment-set`);
   ensurePeer(peerId).frames.incompleteFragmentSets += 1;
-  notify();
+  notifyThrottled();
 }
 
 export function recordPacketReceived(peerId: string): void {
   logEvent('frames', `${peerId} packet-received`);
   ensurePeer(peerId).frames.packetsReceived += 1;
-  notify();
+  notifyThrottled();
 }
 
 export function recordDedupDrop(peerId: string | null): void {
@@ -377,7 +393,7 @@ export function recordDedupDrop(peerId: string | null): void {
     const peer = peers.get(peerId);
     if (peer) peer.frames.dedupDrops += 1;
   }
-  notify();
+  notifyThrottled();
 }
 
 // ---------------------------------------------------------------- messages
@@ -392,7 +408,7 @@ export function recordMessage(message: DiagnosticsMessage): void {
   logEvent('message', `${message.direction} ${message.sizeBytes}B ${message.finalStatus} ${attempts}`);
   messages.push(message);
   while (messages.length > MAX_MESSAGES) messages.shift();
-  notify();
+  notifyThrottled();
 }
 
 // ------------------------------------------------------------- permissions
@@ -403,7 +419,7 @@ export function setDiagnosticsPermissions(report: DiagnosticsPermissionReport): 
     `scan=${report.scan} advertise=${report.advertise} connect=${report.connect} location=${report.location}`,
   );
   permissionReport = report;
-  notify();
+  notifyThrottled();
 }
 
 // -------------------------------------------------------------- snapshot
@@ -463,4 +479,8 @@ export function resetDiagnosticsForTests(): void {
   dedupDropTotal = 0;
   listeners.clear();
   logSink = null;
+  if (notifyTimer !== null) {
+    clearTimeout(notifyTimer);
+    notifyTimer = null;
+  }
 }

@@ -194,12 +194,13 @@ const makeStyles = (colors: ThemeColors, variant: PostVariant, size: PostSize) =
     tagText: { color: colors.accentText, fontWeight: '600' },
     footer: {
       flexDirection: 'row',
+      flexWrap: 'wrap',
       alignItems: 'center',
       gap: compact ? 24 : 20,
       padding: compact ? 14 : space.lg,
       paddingTop: 0,
     },
-    stat: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+    stat: { flexDirection: 'row', flexShrink: 1, alignItems: 'center', gap: 6 },
     statLabel: {
       color: colors.textSecondary,
       fontSize: small ? 12 : 13,
