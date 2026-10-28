@@ -176,13 +176,42 @@ describe('diagnostics collector', () => {
   });
 
   test('subscribers fire on record and stop after unsubscribe', () => {
-    const cb = jest.fn();
-    const unsub = subscribeDiagnostics(cb);
-    recordAdvertiseSuccess(12);
-    expect(cb).toHaveBeenCalledTimes(1);
-    unsub();
-    recordAdvertiseSuccess(12);
-    expect(cb).toHaveBeenCalledTimes(1);
+    jest.useFakeTimers();
+    try {
+      const cb = jest.fn();
+      const unsub = subscribeDiagnostics(cb);
+      recordAdvertiseSuccess(12);
+      expect(cb).not.toHaveBeenCalled();
+      jest.advanceTimersByTime(250);
+      expect(cb).toHaveBeenCalledTimes(1);
+      unsub();
+      recordAdvertiseSuccess(12);
+      jest.advanceTimersByTime(250);
+      expect(cb).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('bursts coalesce into a single trailing notification', () => {
+    jest.useFakeTimers();
+    try {
+      const cb = jest.fn();
+      const unsub = subscribeDiagnostics(cb);
+      recordAdvertiseSuccess(12);
+      recordAdvertiseSuccess(12);
+      recordAdvertiseSuccess(12);
+      jest.advanceTimersByTime(249);
+      expect(cb).not.toHaveBeenCalled();
+      jest.advanceTimersByTime(1);
+      expect(cb).toHaveBeenCalledTimes(1);
+      recordAdvertiseSuccess(12);
+      jest.advanceTimersByTime(250);
+      expect(cb).toHaveBeenCalledTimes(2);
+      unsub();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('permission report is stored and returned in the snapshot', () => {
