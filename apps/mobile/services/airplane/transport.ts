@@ -35,6 +35,7 @@ import { ensureBlePermissions, checkBlePermissions, requestBlePermissions } from
 import {
   recordDedupDrop,
   recordMessage,
+  recordTransportFailure,
   setDiagnosticsAdapterState,
   type DiagnosticsMessageAttempt,
 } from './diagnostics';
@@ -118,6 +119,18 @@ let syncTimer: ReturnType<typeof setInterval> | null = null;
 let lastOnline: boolean | null = null;
 let blePort: { port: TransportPort; close: () => Promise<void> } | null = null;
 let bleScanUnsub: (() => void) | null = null;
+/**
+ * True once startTransport() has failed and not since succeeded. The
+ * launch caller swallows the throw (launch must never die on transport),
+ * but the failure must still be visible: the mesh pill reports offline,
+ * never mesh, while this is set, and a Diagnostics line is recorded.
+ */
+let transportStartFailed = false;
+
+/** Whether the last transport start failed (cleared by a later success). */
+export function getTransportStartFailed(): boolean {
+  return transportStartFailed;
+}
 /**
  * BLE radio state. 'permission-blocked' means the OS grants are missing and
  * the priming UI (BlePrime) owns the request; 'unavailable' means the radio
@@ -339,6 +352,10 @@ export async function startTransport(): Promise<void> {
   } catch {
     // Never leave a half-started transport behind: reset module state so a
     // later startTransport() can retry cleanly. The app runs offline-only.
+    // The failure is surfaced, not swallowed: a Diagnostics line plus the
+    // failed flag the mesh pill reads (offline, never mesh).
+    transportStartFailed = true;
+    recordTransportFailure('start');
     await blePort?.close();
     blePort = null;
     hybrid = null;
@@ -390,6 +407,7 @@ export async function startTransport(): Promise<void> {
     netUnsub?.();
     netUnsub = null;
   }
+  transportStartFailed = false;
 }
 
 /** Advertise our identity and scan for mesh peers. Throws on radio failure. */
@@ -444,9 +462,16 @@ export interface MeshStatusSnapshot {
  * 'mesh' so the pill keeps its boot appearance until a real state is known;
  * a permission-blocked/unavailable radio with Nostr online shows 'online'
  * (truthful: syncing over the internet, NOT the mesh) instead of the old
- * hardcoded 'mesh only' lie.
+ * hardcoded 'mesh only' lie. A failed transport start maps to 'offline'
+ * even while the radio state still reads 'starting': claiming mesh with
+ * no transport at all was the swallowed-failure lie.
  */
-export function resolveRelayState(nostrOnline: boolean, bleState: BleRadioState): MeshStatusSnapshot['relayState'] {
+export function resolveRelayState(
+  nostrOnline: boolean,
+  bleState: BleRadioState,
+  transportFailed = false,
+): MeshStatusSnapshot['relayState'] {
+  if (transportFailed) return 'offline';
   if (nostrOnline) return 'online';
   if (bleState === 'on' || bleState === 'starting') return 'mesh';
   return 'offline';
@@ -461,7 +486,7 @@ let meshSnapshot: MeshStatusSnapshot = { peersNearby: 0, relayState: 'mesh' };
 export function getMeshStatus(): MeshStatusSnapshot {
   const next: MeshStatusSnapshot = {
     peersNearby: blePeerIdsForPublish(blePort?.port).length,
-    relayState: resolveRelayState(!!hybrid?.nostr.online, bleRadioState),
+    relayState: resolveRelayState(!!hybrid?.nostr.online, bleRadioState, transportStartFailed),
   };
   if (next.peersNearby !== meshSnapshot.peersNearby || next.relayState !== meshSnapshot.relayState) {
     meshSnapshot = next;
@@ -599,6 +624,7 @@ export async function stopTransport(): Promise<void> {
   blePort = null;
   hybrid = null;
   sync = null;
+  transportStartFailed = false;
   bleRadioState = 'unavailable';
   syncDiagnosticsAdapterState();
 }

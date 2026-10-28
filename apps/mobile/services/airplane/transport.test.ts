@@ -497,6 +497,10 @@ describe('BLE publish targets + mesh status', () => {
     expect(resolveRelayState(false, 'starting')).toBe('mesh');
     expect(resolveRelayState(false, 'permission-blocked')).toBe('offline');
     expect(resolveRelayState(false, 'unavailable')).toBe('offline');
+    // A failed start never reports mesh, even with a starting radio.
+    expect(resolveRelayState(false, 'starting', true)).toBe('offline');
+    expect(resolveRelayState(false, 'on', true)).toBe('offline');
+    expect(resolveRelayState(true, 'on', true)).toBe('offline');
   });
 
   test('getMeshStatus after stopTransport reports 0 peers and offline', () => {

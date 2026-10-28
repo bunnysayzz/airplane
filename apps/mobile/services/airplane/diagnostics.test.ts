@@ -20,8 +20,10 @@ import {
   recordPeerSeen,
   recordScanStarted,
   recordScanStopped,
+  recordTransportFailure,
   resetDiagnosticsForTests,
   setDiagnosticsAdapterState,
+  setDiagnosticsLogSink,
   setDiagnosticsPermissions,
   subscribeDiagnostics,
   type DiagnosticsMessage,
@@ -56,6 +58,16 @@ describe('diagnostics collector', () => {
     expect(snap.permissions).toBeNull();
     expect(snap.ttlDrops).toBeNull();
     expect(snap.relayForwards).toBeNull();
+  });
+
+  test('transport start failure writes one Diagnostics line', () => {
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => {
+      lines.push(`${kind} ${detail}`);
+    });
+    recordTransportFailure('start');
+    expect(lines).toEqual(['transport start failed start']);
+    setDiagnosticsLogSink(null);
   });
 
   test('adapter state and advertise transitions are recorded', () => {
