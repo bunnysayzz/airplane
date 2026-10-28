@@ -518,7 +518,17 @@ export class DmService {
         lastDirection: null,
       });
     }
+    // Rows queued to this peer must not sit in Sending forever: flush
+    // skips blocked conversations and retry only acts on Failed rows, so
+    // mark them Failed now. After unblock, tap-to-retry sends them again.
+    const messages = await this.store.listMessages(peerHex);
+    for (const m of messages) {
+      if (m.direction === 'out' && m.status === 'Sending') {
+        await this.store.updateMessage({ ...m, status: 'Failed' });
+      }
+    }
     this.emit();
+    void this.scheduleFlush();
   }
 
   async unblockPeer(peerHex: string): Promise<void> {

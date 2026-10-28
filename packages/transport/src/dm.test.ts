@@ -326,6 +326,24 @@ describe('DmService routing + outbox', () => {
     expect(thread.map(t => t.text)).toEqual(['sent earlier', 'sent later']);
   });
 
+  test('F7: blocking fails queued Sending rows so they can be retried after unblock', async () => {
+    const relay = new FailingDmRelay();
+    const nowRef = { now: 90_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const peer = 'f'.repeat(64);
+    await alice.service.sendMessage(peer, 'queued when blocked');
+    let rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Sending');
+    await alice.service.blockPeer(peer);
+    rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Failed');
+    // Unblock, then tap-to-retry re-queues the row.
+    await alice.service.unblockPeer(peer);
+    await alice.service.retryMessage(peer, rows[0].id);
+    rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Sending');
+  });
+
   test('P1-09: the flush scheduler re-arms on the backoff and drains without user action', async () => {
     jest.useFakeTimers();
     try {
