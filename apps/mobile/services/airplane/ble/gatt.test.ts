@@ -1015,3 +1015,21 @@ describe('writeWithoutResponse for frame chunks (audit F-P2-9)', () => {
     await port.close();
   });
 });
+
+describe('close cleanup (audit F-P3-1)', () => {
+  test('close records scan stopped only when scanning was active', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    const { deps } = makeDeps();
+    const neverScanned = new GattBlePort(deps);
+    await neverScanned.close();
+    expect(lines.some((l) => l === 'scan stopped')).toBe(false);
+    const scanned = new GattBlePort(deps);
+    await scanned.advertise(OWN_HEX);
+    await scanned.scan(() => {});
+    await scanned.close();
+    expect(lines.some((l) => l === 'scan stopped')).toBe(true);
+    resetDiagnosticsForTests();
+  });
+});

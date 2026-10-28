@@ -904,7 +904,13 @@ export class GattBlePort implements TransportPort {
     const unsub = this.scanUnsub;
     this.scanUnsub = null;
     this.scanSubs.clear();
-    recordScanStopped();
+    // Clear receive subscribers too: previously a reused port object kept
+    // firing stale receive callbacks into a dead transport after close.
+    this.receivers.clear();
+    // Record scan stopped only when scanning was actually active:
+    // previously close logged a scan stop even for a port that never
+    // scanned, polluting the scan lifecycle trail.
+    if (unsub !== null || this.centralStarted) recordScanStopped();
     uSafe(unsub);
     await this.deps.central?.stopScan().catch(() => {});
     for (const u of this.centralUnsubs.splice(0)) uSafe(u);
