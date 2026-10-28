@@ -64,8 +64,28 @@ describe('ExpoLocationProvider', () => {
     expect(Location.getCurrentPositionAsync).toHaveBeenCalledTimes(1);
   });
 
-  it('serves a fresh cached fix without hitting GPS again', async () => {
-    let now = 1_000_000;
+  it('concurrent resolutions share one in-flight GPS fix', async () => {
+    grantPermission();
+    enableServices();
+    let resolveFix!: (value: { coords: typeof BLR }) => void;
+    Location.getCurrentPositionAsync.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveFix = resolve;
+      }),
+    );
+    const provider = new ExpoLocationProvider({ now: () => 1_000_000 });
+    const a = provider.getCurrentCell();
+    const b = provider.getCurrentCell();
+    // Both callers are waiting on the same fix; only one GPS call ran.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(Location.getCurrentPositionAsync).toHaveBeenCalledTimes(1);
+    resolveFix({ coords: BLR });
+    await expect(a).resolves.toBe(BLR_CELL);
+    await expect(b).resolves.toBe(BLR_CELL);
+    expect(Location.getCurrentPositionAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('serves a fresh cached fix without hitting GPS again', async () => {    let now = 1_000_000;
     grantPermission();
     enableServices();
     fixAt();

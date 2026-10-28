@@ -85,6 +85,8 @@ export class ExpoLocationProvider implements LocationProvider {
   private readonly maxAgeMs: number;
   private readonly now: () => number;
   private cached: { cell: string; atMs: number } | null = null;
+  /** In-flight fresh fix, shared by concurrent callers (audit F39). */
+  private inflight: Promise<string> | null = null;
 
   constructor(opts: ExpoProviderOpts = {}) {
     this.timeoutMs = opts.timeoutMs ?? FIX_TIMEOUT_MS;
@@ -197,17 +199,30 @@ export class ExpoLocationProvider implements LocationProvider {
       return cached.cell;
     }
 
-    let coords: { latitude: number; longitude: number };
+    // Dedupe concurrent resolutions: the cache above covers sequential
+    // calls, but concurrent callers previously each ran a fresh GPS fix.
+    // Permission and services probes still run per call above; only the
+    // fix itself is shared, and the shared promise clears on settle so a
+    // later failure can retry instead of reusing a rejection.
+    if (this.inflight) return this.inflight;
+    const run = (async (): Promise<string> => {
+      let coords: { latitude: number; longitude: number };
+      try {
+        coords = await this.freshFix(Location);
+      } catch (error) {
+        if (error instanceof LocationError) throw error;
+        throw mapExpoError(error);
+      }
+      const cell = encodeGeohash(coords.latitude, coords.longitude, 5);
+      this.cached = { cell, atMs: this.now() };
+      return cell;
+    })();
+    this.inflight = run;
     try {
-      coords = await this.freshFix(Location);
-    } catch (error) {
-      if (error instanceof LocationError) throw error;
-      throw mapExpoError(error);
+      return await run;
+    } finally {
+      if (this.inflight === run) this.inflight = null;
     }
-
-    const cell = encodeGeohash(coords.latitude, coords.longitude, 5);
-    this.cached = { cell, atMs: this.now() };
-    return cell;
   }
 }
 
