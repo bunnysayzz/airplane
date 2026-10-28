@@ -88,11 +88,19 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
         [cellsKey]
     );
 
-    // Fresh query when the feed or its cells change
+    // Fresh query when the feed or its cells change. The first load shows the
+    // full spinner (posts are empty); later scope changes keep the previous
+    // posts on screen and reload in place with the pull-to-refresh indicator,
+    // instead of blanking to a spinner on every cell boundary crossing.
+    const firstLoadRef = useRef(true);
     useEffect(() => {
-        setPosts([]);
         setHasMore(true);
-        load('initial');
+        if (firstLoadRef.current) {
+            firstLoadRef.current = false;
+            load('initial');
+        } else {
+            load('refresh');
+        }
     }, [cellsKey, load]);
 
     // The store has no change events of its own: composer and viewTracker notify,
