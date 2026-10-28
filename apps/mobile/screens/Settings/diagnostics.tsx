@@ -239,7 +239,8 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
         {anyDenied && (
           <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsOpenSettingsNote')}</Text>
         )}
-        <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogFile', { count: logStatus.lineCount })}</Text>
+        <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogMemory', { count: logStatus.lineCount })}</Text>
+        <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogOnDisk', { count: logStatus.flushedLineCount })}</Text>
         <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogLoaded', { count: logStatus.loadedFromFile })}</Text>
         <Text style={[type.body, styles.kvValue]}>{formatLogWriteStatus()}</Text>
         {logStatus.loadOk === false && (

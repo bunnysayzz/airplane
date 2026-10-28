@@ -454,6 +454,8 @@ export const en = {
     diagnosticsLogWriteError: 'Write error',
     diagnosticsLogLoadFailed: 'File could not be read at launch, so the count starts from this launch only.',
     diagnosticsLogPath: 'File: {{path}}',
+    diagnosticsLogMemory: 'Lines in memory: {{count}}',
+    diagnosticsLogOnDisk: 'Lines on disk: {{count}}',
     diagnosticsSentryEnabled: 'Sentry: enabled',
     diagnosticsSentryDisabled: 'Sentry: disabled',
     diagnosticsShareUnavailable: 'Sharing is not available on this device, so the log file cannot be shared from here.',

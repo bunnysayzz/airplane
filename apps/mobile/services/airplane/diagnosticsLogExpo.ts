@@ -104,6 +104,8 @@ export interface DiagnosticsLogFileStatus {
   lastWriteOk: boolean | null;
   lastWriteAtMs: number | null;
   lastWriteError: string | null;
+  /** Lines confirmed on disk by the last successful flush. */
+  flushedLineCount: number;
   /** Sentry client state at status time: false means disabled, never throwing. */
   sentryEnabled: boolean;
   fileName: string;
@@ -116,6 +118,7 @@ export function getDiagnosticsLogStatus(): DiagnosticsLogFileStatus {
     lineCount: writer?.getLineCount() ?? 0,
     byteCount: writer?.getByteCount() ?? 0,
     loadedFromFile: writer?.getLoadedFromFileCount() ?? 0,
+    flushedLineCount: writer?.getFlushedLineCount() ?? 0,
     loadOk: writer?.getLoadOk() ?? null,
     lastWriteOk: lastWrite.ok,
     lastWriteAtMs: lastWrite.atMs,

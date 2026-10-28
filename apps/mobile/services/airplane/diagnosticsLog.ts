@@ -102,6 +102,13 @@ export class DiagnosticsLogWriter {
   private loadOk: boolean | null = null;
   private lastWrite: DiagnosticsLogWriteStatus = { ok: null, atMs: null, error: null };
   /**
+   * Lines confirmed on disk. Updated only when a flush write succeeds,
+   * never on append: after a failed write the in-memory count keeps
+   * growing while this one stays at the last good write, so the screen
+   * can show memory vs on-disk honestly instead of one blended count.
+   */
+  private flushedLineCount = 0;
+  /**
    * Sink coalescing queue (P1-21). Fragment entries aggregate by peer
    * label and direction; plain entries pass through in order.
    */
@@ -173,6 +180,11 @@ export class DiagnosticsLogWriter {
    */
   getLoadedFromFileCount(): number {
     return this.loadedFromFile;
+  }
+
+  /** Lines confirmed on disk by the last successful flush. */
+  getFlushedLineCount(): number {
+    return this.flushedLineCount;
   }
 
   getLoadOk(): boolean | null {
@@ -284,6 +296,7 @@ export class DiagnosticsLogWriter {
         this.dirty = false;
         const content = this.lines.length > 0 ? `${this.lines.join('\n')}\n` : '';
         await this.port.write(content);
+        this.flushedLineCount = this.lines.length;
         this.lastWrite = { ok: true, atMs: Date.now(), error: null };
       } while (this.dirty);
     } catch (error) {

@@ -104,6 +104,30 @@ describe('diagnostics log writer', () => {
     expect(port.content).toContain('scan started');
   });
 
+  test('flushed line count only moves on a successful flush', async () => {
+    let failWrites = false;
+    const port: DiagnosticsLogFilePort & { content: string } = {
+      content: '2026-10-27T00:00:00.000Z app started\n',
+      read: async () => (port.content.length > 0 ? port.content : null),
+      write: async (content: string) => {
+        if (failWrites) throw new Error('no storage');
+        port.content = content;
+      },
+    };
+    const writer = new DiagnosticsLogWriter(port);
+    await writer.load();
+    expect(writer.getFlushedLineCount()).toBe(0);
+    writer.append('2026-10-27T00:00:01.000Z scan started');
+    await writer.flush();
+    expect(writer.getFlushedLineCount()).toBe(2);
+    failWrites = true;
+    writer.append('2026-10-27T00:00:02.000Z adapter on');
+    await writer.flush();
+    expect(writer.getLineCount()).toBe(3);
+    expect(writer.getFlushedLineCount()).toBe(2);
+    expect(writer.getLastWriteStatus().ok).toBe(false);
+  });
+
   test('a failing port never throws to the app', async () => {
     const port: DiagnosticsLogFilePort = {
       read: async () => {
