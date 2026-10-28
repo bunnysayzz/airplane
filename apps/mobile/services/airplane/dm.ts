@@ -50,7 +50,7 @@ export async function getDmService(): Promise<DmService> {
       store: new MemoryDmStore(),
       // Same configured list as the post path: DMs must not silently
       // keep using package defaults the user removed in Settings.
-      relay: new WsDmRelay({ relays: await loadRelayUrls() }),
+      relay: new WsDmRelay({ relays: await loadRelayUrls(), allowPrivateRelays: true }),
       ownKeys: () => dmKeypairFromDeviceSecret(kp.secretKey),
       ownMeshHex: () => ownHex,
     });

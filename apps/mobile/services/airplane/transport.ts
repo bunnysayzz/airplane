@@ -312,6 +312,10 @@ export async function startTransport(): Promise<void> {
     ble,
     {
       relays: await loadRelayUrls(),
+      // This list is the user's explicit Settings list, so a private
+      // relay the user added on purpose is allowed through here; the
+      // package default (no flag) still drops private targets.
+      allowPrivateRelays: true,
       // Relay frames that used to vanish: NOTICEs/CLOSEDs land in the
       // diagnostics breadcrumb trail, and an AUTH challenge is surfaced
       // there too (the client does not answer NIP-42 challenges yet).

@@ -28,6 +28,7 @@ import {
   type Hex64,
   type SignedEvent,
 } from '@airplane/protocol';
+import { sanitizeRelayList } from './relayUrls';
 
 // Lazily-created noble backend for inner signature verification.
 let nobleCrypto: NobleCrypto | null = null;
@@ -199,6 +200,12 @@ export interface NostrTransportOpts {
    * events at the feed layer).
    */
   cells?: string[];
+  /**
+   * Allow private-network relay targets. Default false: a non-app caller
+   * passing a private target gets it dropped. The app passes true for
+   * its Settings list, which the user added explicitly.
+   */
+  allowPrivateRelays?: boolean;
 }
 
 /** Connection state per relay. */
@@ -267,7 +274,13 @@ export class NostrTransport {
   private pendingQueries = new Map<string, { filter: object; timer: ReturnType<typeof setTimeout> }>();
 
   constructor(opts: NostrTransportOpts = {}) {
-    this.relays = opts.relays ?? DEFAULT_RELAYS;
+    // Package-level validation: any caller inherits the scheme, host,
+    // credential, port, and private-target rules (invalid entries are
+    // dropped, case and port variants dedupe). Defaults are already valid.
+    this.relays =
+      opts.relays === undefined
+        ? [...DEFAULT_RELAYS]
+        : sanitizeRelayList(opts.relays, { allowPrivateRelays: opts.allowPrivateRelays });
     this.wsFactory =
       opts.wsFactory ??
       ((url: string) => {
