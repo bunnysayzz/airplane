@@ -10,6 +10,7 @@ export {
   authorLabelFor,
   toPostCardModel,
   type FeedQueryOpts,
+  type FeedPageOpts,
   type FeedPageCursor,
   type FeedPage,
   type FeedListener,

@@ -64,9 +64,10 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
     // The pagination cursor reads the latest posts; a ref avoids a stale closure in `load`
     const postsRef = useRef<PostCardModel[]>([]);
     postsRef.current = posts;
-    // Store-order tuple cursor from the last listFeedPage result. Ranked
-    // order is not a store boundary, so the cursor must never be derived
-    // from the last visible card.
+    // Opaque offset cursor from the last listFeedPage result (an offset
+    // into the globally ranked set). Ranked order has no store-order
+    // boundary, so the cursor must never be derived from the last
+    // visible card.
     const nextCursorRef = useRef<FeedPageCursor | null>(null);
 
     const load = useCallback(
@@ -82,8 +83,7 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
                 const page = await listFeedPage({
                     cells,
                     limit: PAGE_LIMIT,
-                    before: cursor?.before,
-                    beforeId: cursor?.beforeId,
+                    cursor: cursor ?? null,
                 });
                 nextCursorRef.current = page.nextCursor;
                 setHasMore(page.nextCursor !== null);

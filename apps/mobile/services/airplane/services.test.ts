@@ -252,14 +252,42 @@ describe('listFeedPosts', () => {
     const page2 = await listFeedPage({
       cells: ['tdr1v'],
       limit: 2,
-      before: page1.nextCursor!.before,
-      beforeId: page1.nextCursor!.beforeId,
+      cursor: page1.nextCursor,
     });
     expect(page2.cards).toHaveLength(1);
     expect(page2.nextCursor).toBeNull();
     const seen = [...page1.cards, ...page2.cards].map((c) => c.eventId);
     expect(new Set(seen).size).toBe(3);
     expect(seen.sort()).toEqual(ids.sort());
+  });
+
+  it('ranks over the full set: an older high-view post surfaces on page 1', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const store = getStore();
+    const oldPopular = makePost({ created_at: nowSec - 3600 });
+    const newerQuiet1 = makePost({ created_at: nowSec - 60 });
+    const newerQuiet2 = makePost({ created_at: nowSec - 30 });
+    await store.saveEvent(oldPopular);
+    await store.saveEvent(newerQuiet1);
+    await store.saveEvent(newerQuiet2);
+    // Five distinct viewers receipt the older post, so it must outrank
+    // both newer posts even though it is third by recency.
+    for (let i = 0; i < 5; i++) {
+      const receipt = makePost({
+        kind: 2 as EventKind,
+        tags: [['e', toHex(oldPopular.id)]],
+        content: '',
+        created_at: nowSec,
+      });
+      await store.saveReceipt(receipt);
+    }
+    const page1 = await listFeedPage({ cells: ['tdr1v'], limit: 2 });
+    expect(page1.cards.map((c) => c.eventId)).toContain(toHex(oldPopular.id));
+    expect(page1.cards[0].eventId).toBe(toHex(oldPopular.id));
+    const page2 = await listFeedPage({ cells: ['tdr1v'], limit: 2, cursor: page1.nextCursor });
+    const seen = [...page1.cards, ...page2.cards].map((c) => c.eventId);
+    expect(new Set(seen).size).toBe(3);
+    expect(page2.nextCursor).toBeNull();
   });
 
   it('scopes by cell and applies the before cursor', async () => {

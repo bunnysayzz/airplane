@@ -34,14 +34,15 @@ export interface FeedQueryOpts {
 }
 
 /**
- * Opaque pagination cursor for {@link listFeedPage}. It is the store-order
- * boundary (the last row the store returned, newest-first), NOT the last
- * ranked card: ranking re-sorts the page, so a cursor taken from ranked
- * order is not a store boundary at all.
+ * Opaque pagination cursor for {@link listFeedPage}: an offset into the
+ * globally ranked set. Ranking is computed over the full matching set
+ * (see listFeedPage), so a store-order tuple cursor cannot address a
+ * ranked page: the ranked order has no store-order boundary to resume
+ * from. The offset is only valid for the same cells and limit, and a
+ * refresh (which re-fetches and re-ranks) always restarts from offset 0.
  */
 export interface FeedPageCursor {
-  before: number;
-  beforeId: Hex64;
+  offset: number;
 }
 
 /** One page from {@link listFeedPage}: ranked cards plus the next cursor. */
@@ -107,32 +108,67 @@ export function toPostCardModel(
   };
 }
 
+/** Options for {@link listFeedPage}: a feed query plus an offset cursor. */
+export interface FeedPageOpts extends FeedQueryOpts {
+  cursor?: FeedPageCursor | null;
+}
+
 /**
- * List one feed page for the given cells, ranked highest-score first.
+ * List one feed page for the given cells, ranked highest-score first
+ * over the FULL matching set, not just the newest page.
  *
- * The store returns newest-first; the protocol ranking score decides the
- * final order (views win, recency decays). Equal scores keep insertion order
- * (Array.prototype.sort is stable). The next cursor comes from the last
- * row in store order, before ranking: pass it back as `before`/`beforeId`
- * for the next page, and every row is returned exactly once even when
- * several posts share one `created_at` second.
+ * The old shape ranked only the store's newest page (LIMIT applied in
+ * newest-first order before the score sort), so a high-view older post
+ * past the first page could never surface. This function instead walks
+ * the store in tuple-cursor pages, ranks everything it finds, and then
+ * slices one page out of that ranked order. Cost: one full matching-set
+ * fetch per page load, bounded by the 24 h retention window and the
+ * cell scope; that is the price of a globally ranked feed, and it is
+ * stated here rather than hidden behind a LIMIT.
+ *
+ * Equal scores keep insertion order (Array.prototype.sort is stable).
+ * Pass the returned `nextCursor` back as `cursor` for the next page;
+ * a refresh restarts from offset 0 with a fresh fetch and rank.
  */
-export async function listFeedPage(opts: FeedQueryOpts): Promise<FeedPage> {
+export async function listFeedPage(opts: FeedPageOpts): Promise<FeedPage> {
   const limit = opts.limit ?? DEFAULT_LIMIT;
-  const storeOpts: ListFeedOpts = {
-    cells: opts.cells,
-    limit,
-    before: opts.before,
-    beforeId: opts.beforeId,
-  };
+  const offset = opts.cursor?.offset ?? 0;
   const store = getStore();
-  const posts = await store.listFeed(storeOpts);
-  const last = posts.length > 0 ? posts[posts.length - 1] : null;
-  const nextCursor =
-    last && posts.length >= limit
-      ? { before: last.event.created_at, beforeId: toHex(last.event.id) as Hex64 }
-      : null;
+  const posts: FeedPost[] = [];
+  if (limit > 0) {
+    let before: number | undefined;
+    let beforeId: Hex64 | undefined;
+    for (;;) {
+      const page: FeedPost[] = await store.listFeed({
+        cells: opts.cells,
+        limit,
+        before,
+        beforeId,
+      });
+      posts.push(...page);
+      if (page.length < limit) break;
+      const lastPageRow = page[page.length - 1];
+      before = lastPageRow.event.created_at;
+      beforeId = toHex(lastPageRow.event.id) as Hex64;
+    }
+  }
   const ranked = [...posts].sort((a, b) => b.score - a.score);
+  const cards = await mapPostsToCards(store, ranked);
+  const pageCards = cards.slice(offset, offset + limit);
+  return {
+    cards: pageCards,
+    nextCursor: offset + limit < cards.length ? { offset: offset + limit } : null,
+  };
+}
+
+/**
+ * Map ranked store rows to cards (star/reshare views, World confirmation).
+ * Shared by the single-page and globally ranked paths.
+ */
+async function mapPostsToCards(
+  store: ReturnType<typeof getStore>,
+  ranked: FeedPost[],
+): Promise<PostCardModel[]> {
   // T17: the store is proven working by the query above, so a hydration
   // failure here propagates (it means the store itself is broken).
   await ensureStarsHydrated();
@@ -141,7 +177,7 @@ export async function listFeedPage(opts: FeedQueryOpts): Promise<FeedPage> {
   // it apply; the cluster is then read onto its (single, original) card.
   const ownHex = await resolveOwnPubkeyHex();
   // Look up World confirmation status for each post (client-side tracking).
-  const cards = await Promise.all(
+  return Promise.all(
     ranked.map(async (p) => {
       const eventId = toHex(p.event.id);
       markStarPostKnown(eventId);
@@ -155,16 +191,25 @@ export async function listFeedPage(opts: FeedQueryOpts): Promise<FeedPage> {
       }, reshareViewFor(eventId, ownHex ?? undefined));
     }),
   );
-  return { cards, nextCursor };
 }
 
 /**
- * List feed posts for the given cells, ranked highest-score first.
- * Single-page convenience over {@link listFeedPage}: for paged scrolling
- * use listFeedPage so the tuple cursor is carried between pages.
+ * List one store page of feed posts, ranked highest-score first within
+ * that page. This keeps the legacy before/beforeId single-page contract
+ * (used by tests and by callers that want exactly one store page). For
+ * paged scrolling in the Timeline, use {@link listFeedPage}, which ranks
+ * over the full matching set instead of one page.
  */
 export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[]> {
-  return (await listFeedPage(opts)).cards;
+  const store = getStore();
+  const posts = await store.listFeed({
+    cells: opts.cells,
+    limit: opts.limit ?? DEFAULT_LIMIT,
+    before: opts.before,
+    beforeId: opts.beforeId,
+  });
+  const ranked = [...posts].sort((a, b) => b.score - a.score);
+  return mapPostsToCards(store, ranked);
 }
 
 /**
