@@ -32,6 +32,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 import NetInfo from '@react-native-community/netinfo';
 import { startTransport, stopTransport, publishViaTransport, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus } from './transport';
 import { getStore, __resetStoreForTests } from './store';
+import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
 import {
   __resetResharesForTests,
@@ -211,6 +212,29 @@ describe('transport manager', () => {
     });
     await publishViaTransport(event);
     expect(await getStore().isWorldConfirmed(toHex(event.id))).toBe(true);
+  });
+
+  test('an inbound burst coalesces to a single feed notify', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    let count = 0;
+    const unsub = subscribeFeed(() => {
+      count++;
+    });
+    for (let i = 0; i < 3; i++) {
+      const event = makeSignedEvent();
+      event.id = new Uint8Array(32).fill(10 + i);
+      hybrid!.ingress(event, 'nostr');
+    }
+    // Let the async handleIncoming runs reach the coalescing timer.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(count).toBe(0);
+    jest.advanceTimersByTime(250);
+    expect(count).toBe(1);
+    unsub();
   });
 
   test('online event schedules the periodic sync timer exactly once', async () => {

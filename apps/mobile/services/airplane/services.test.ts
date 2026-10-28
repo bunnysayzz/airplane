@@ -259,6 +259,18 @@ describe('subscribeFeed / notifyFeedListeners', () => {
     notifyFeedListeners();
     expect(calls).toEqual([1]);
   });
+
+  it('a throwing listener does not break later listeners', () => {
+    const calls: string[] = [];
+    const unsub1 = subscribeFeed(() => {
+      throw new Error('listener boom');
+    });
+    const unsub2 = subscribeFeed(() => calls.push('second'));
+    expect(() => notifyFeedListeners()).not.toThrow();
+    expect(calls).toEqual(['second']);
+    unsub1();
+    unsub2();
+  });
 });
 
 // --- view tracker ------------------------------------------------------------

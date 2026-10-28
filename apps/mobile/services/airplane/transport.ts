@@ -154,12 +154,29 @@ function syncDiagnosticsAdapterState(): void {
   );
 }
 
+/**
+ * Trailing feed-notify coalescing for inbound bursts: a cold-cache relay
+ * replay delivers many events in seconds, and one notify per event
+ * re-rendered the timeline per event while scrolled down. One timer per
+ * burst notifies once, 250ms after the last event in the burst (the same
+ * window the timeline already uses at top).
+ */
+let feedNotifyTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleFeedNotify(): void {
+  if (feedNotifyTimer) return;
+  feedNotifyTimer = setTimeout(() => {
+    feedNotifyTimer = null;
+    notifyFeedListeners();
+  }, 250);
+}
+
 async function handleIncoming(event: SignedEvent, source: string): Promise<void> {
   // STAR MVP: kind-4 events never reach the events table — its schema
   // CHECKs kind IN (1,2,3). They go to the in-memory star counter instead
   // (same BLE + Nostr ingress path, same event-id dedup upstream).
   if (event.kind === EVENT_KIND_STAR) {
-    if (applyIncomingStar(event)) notifyFeedListeners();
+    if (applyIncomingStar(event)) scheduleFeedNotify();
     return;
   }
   // T19: kind-5 reshare/unreshare events never reach the events table
@@ -176,7 +193,7 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
     } catch {
       // The count already applied; rehydration reconciles later.
     }
-    notifyFeedListeners();
+    scheduleFeedNotify();
     return;
   }
   // Diagnostics: 'local' is our own publish echo (already logged as
@@ -228,7 +245,7 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
     markStarPostKnown(toHex(event.id));
     markResharePostKnown(toHex(event.id));
   }
-  notifyFeedListeners();
+  scheduleFeedNotify();
 }
 
 /**
@@ -602,6 +619,10 @@ function wireConnectivity(): void {
 
 /** Stop the transport. Call on app teardown (rarely needed on mobile). */
 export async function stopTransport(): Promise<void> {
+  if (feedNotifyTimer) {
+    clearTimeout(feedNotifyTimer);
+    feedNotifyTimer = null;
+  }
   if (syncTimer) {
     clearInterval(syncTimer);
     syncTimer = null;
