@@ -682,20 +682,22 @@ function loadCentralAdapter(): CentralAdapter | null {
     const emitter = new rn.NativeEventEmitter(rn.NativeModules.BleManager);
     return {
       start: () => mgr.start({ showAlert: false }),
-      // R3 scan audit: ble-manager's scan is POSITIONAL,
-      // scan(serviceUUIDs, seconds, allowDuplicates, scanningOptions).
-      // The old call mgr.scan({ scanMode: 2 }) passed the options object
-      // as the serviceUUIDs argument, so LowLatency never applied and
-      // discovery ran at the default LowPower pace. Correct form:
-      // serviceUUIDs [] (UNFILTERED, deliberately: the advertise packet
-      // carries manufacturer data only, no service UUID, so a UUID
-      // filter would never match a mesh peer; the JS layer filters by
-      // manufacturer data in extractTag/onDiscover), seconds 0
-      // (indefinite until stopScan), allowDuplicates false (iOS only),
-      // scanningOptions { scanMode: 2 } (Android SCAN_MODE_LOW_LATENCY).
-      // Battery trade-off, taken deliberately: fast discovery is the
-      // mesh's core promise.
-      scan: () => mgr.scan([], 0, false, { scanMode: 2 }),
+      // Scan audit (ble-manager 12.6.0): scan takes ONE options object,
+      // scan(scanningOptions). The Android native method is
+      // scan(ReadableMap scanningOptions, Callback), so passing the
+      // old positional form mgr.scan([], 0, false, { scanMode: 2 })
+      // put an array where the bridge expects a Map and every scan
+      // failed on device with "expected Map, got a array", which then
+      // tore down advertise and the adapter. Correct form, with the
+      // same intent as before: serviceUUIDs [] (UNFILTERED,
+      // deliberately: the advertise packet carries manufacturer data
+      // only, no service UUID, so a UUID filter would never match a
+      // mesh peer; the JS layer filters by manufacturer data in
+      // extractTag/onDiscover), seconds 0 (indefinite until
+      // stopScan), allowDuplicates false (iOS only), scanMode 2
+      // (Android SCAN_MODE_LOW_LATENCY). Battery trade-off, taken
+      // deliberately: fast discovery is the mesh's core promise.
+      scan: () => mgr.scan({ serviceUUIDs: [], seconds: 0, allowDuplicates: false, scanMode: 2 }),
       stopScan: () => mgr.stopScan(),
       onDiscover: (cb) => {
         const sub = emitter.addListener('BleManagerDiscoverPeripheral', (p: unknown) =>
