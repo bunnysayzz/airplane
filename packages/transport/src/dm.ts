@@ -362,6 +362,13 @@ export interface DmEnvelope {
   /** NIP-44-style sealed rumor JSON. */
   sealed: string;
   createdAt: number; // epoch seconds
+  /**
+   * Nostr event id of the relay delivery carrying this envelope, set by the
+   * relay layer. The inbound dedup key: repeat deliveries of the same event
+   * id are ignored. Absent on the in-process relay path, where no dedup
+   * applies. Never dedup by text or sender: identical texts are distinct.
+   */
+  relayEventId?: string;
 }
 
 /** Seal a DM for `recipientMeshHex`. `senderMeshHex` is recorded in the rumor. */

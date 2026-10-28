@@ -275,4 +275,23 @@ describe('DmService routing + outbox', () => {
     await expect(alice.service.sendMessage('d'.repeat(64), '')).rejects.toThrow();
     await expect(alice.service.sendMessage('d'.repeat(64), 'x'.repeat(5000))).rejects.toThrow();
   });
+
+  test('P1-06: repeat delivery of the same relay event id renders once', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 50_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    const envelope = sealDm('same text twice', alice.meshHex, bob.meshHex);
+    const delivered = { ...envelope, relayEventId: 'relay-event-1' };
+    expect(await bob.service.receiveEnvelope(delivered)).toBe('request');
+    expect(await bob.service.receiveEnvelope(delivered)).toBe('ignored');
+    const thread = await bob.service.getThread(alice.meshHex);
+    expect(thread).toHaveLength(1);
+    const convs = await bob.service.listRequests();
+    expect(convs[0].unread).toBe(1);
+    // Identical text under a different event id is a distinct message.
+    const second = { ...sealDm('same text twice', alice.meshHex, bob.meshHex), relayEventId: 'relay-event-2' };
+    expect(await bob.service.receiveEnvelope(second)).toBe('request');
+    expect(await bob.service.getThread(alice.meshHex)).toHaveLength(2);
+  });
 });

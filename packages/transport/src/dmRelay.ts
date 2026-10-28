@@ -63,6 +63,7 @@ export function nostrEventToDmEnvelope(event: NostrDmEvent): DmEnvelope | null {
     ) {
       return null;
     }
+    envelope.relayEventId = event.id;
     return envelope;
   } catch {
     return null;

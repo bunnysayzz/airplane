@@ -353,6 +353,19 @@ export class DmService {
     if (senderHex === this.ownMeshHex()) return 'ignored';
     const existing = await this.store.getConversation(senderHex);
     if (existing?.state === 'blocked') return 'dropped'; // silent drop: no row, no badge
+    // Dedup by relay event id, never by text or sender: the same event
+    // delivered twice (two relays, relay replay) renders once, with one
+    // unread increment. Envelopes without an event id (in-process relay)
+    // carry no dedup key and are always delivered.
+    if (envelope.relayEventId) {
+      let seen = this.seenRelayEventIds.get(senderHex);
+      if (!seen) {
+        seen = new Set<string>();
+        this.seenRelayEventIds.set(senderHex, seen);
+      }
+      if (seen.has(envelope.relayEventId)) return 'ignored';
+      seen.add(envelope.relayEventId);
+    }
     const nowMs = this.now();
     const row: DmMessageRow = {
       id: newId(),
@@ -542,6 +555,9 @@ export class DmService {
     if (!last) return null;
     return this.decryptRow(last).text;
   }
+
+  /** Per-conversation seen relay event ids for inbound dedup (P1-06). */
+  private readonly seenRelayEventIds = new Map<string, Set<string>>();
 
   /** Memory-only plaintext for outgoing rows (never persisted). */
   private readonly outgoingPlaintext = new Map<string, string>();
