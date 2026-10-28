@@ -268,7 +268,19 @@ export class DmService {
     if (!isHex64(peerHex)) throw new Error('startConversation: peer pubkey must be 64 lowercase hex chars');
     if (peerHex === this.ownMeshHex()) throw new Error('startConversation: cannot DM yourself');
     const existing = await this.store.getConversation(peerHex);
-    if (existing) return existing;
+    if (existing) {
+      // Own-initiated contact always lands in inbox: a request the user
+      // previously ignored must not stay invisible in both lists when the
+      // user now messages that peer. Blocked rows are untouched here;
+      // sendMessage rejects them below.
+      if (existing.state === 'request') {
+        const promoted: DmConversationRow = { ...existing, state: 'inbox', ignored: false };
+        await this.store.upsertConversation(promoted);
+        this.emit();
+        return promoted;
+      }
+      return existing;
+    }
     const row: DmConversationRow = {
       peerHex,
       state: 'inbox',

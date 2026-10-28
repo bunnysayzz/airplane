@@ -295,6 +295,24 @@ describe('DmService routing + outbox', () => {
     expect(await bob.service.getThread(alice.meshHex)).toHaveLength(2);
   });
 
+  test('P1-12: own send to an ignored request promotes it to inbox', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 70_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    // Bob receives from unknown alice, then ignores the request.
+    await bob.service.receiveEnvelope(sealDm('hey', alice.meshHex, bob.meshHex));
+    await bob.service.ignoreRequest(alice.meshHex);
+    expect(await bob.service.listRequests()).toHaveLength(0);
+    expect(await bob.service.listInbox()).toHaveLength(0);
+    // Bob now messages alice first: the conversation must surface in inbox.
+    await bob.service.sendMessage(alice.meshHex, 'actually hi');
+    const inbox = await bob.service.listInbox();
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0].peerHex).toBe(alice.meshHex);
+    expect(inbox[0].ignored).toBe(false);
+  });
+
   test('P1-09: the flush scheduler re-arms on the backoff and drains without user action', async () => {
     jest.useFakeTimers();
     try {
