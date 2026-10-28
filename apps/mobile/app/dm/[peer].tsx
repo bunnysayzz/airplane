@@ -50,10 +50,18 @@ export default function DmThreadScreen() {
             .catch((e: unknown) => Alert.alert('Could not send', e instanceof Error ? e.message : 'Unknown error'));
     };
 
-    const act = (fn: (svc: Awaited<ReturnType<typeof getDmService>>) => Promise<void>): Promise<void> =>
+    // Returns true on success, false after showing an error: actions used
+    // to fail silently (a bare act() rejection went nowhere), and Delete
+    // must not navigate back when it fails, so callers check the result.
+    const act = (fn: (svc: Awaited<ReturnType<typeof getDmService>>) => Promise<void>): Promise<boolean> =>
         getDmService()
             .then(svc => fn(svc))
-            .then(refresh);
+            .then(refresh)
+            .then(() => true)
+            .catch((e: unknown) => {
+                Alert.alert('Action failed', e instanceof Error ? e.message : 'Unknown error');
+                return false;
+            });
 
     const confirmDelete = () => {
         Alert.alert(
@@ -65,7 +73,9 @@ export default function DmThreadScreen() {
                     text: 'Delete',
                     style: 'destructive',
                     onPress: () =>
-                        act(svc => svc.deleteConversationLocalOnly(peerHex)).then(() => router.back()),
+                        act(svc => svc.deleteConversationLocalOnly(peerHex)).then(ok => {
+                            if (ok) router.back();
+                        }),
                 },
             ],
         );
@@ -87,28 +97,46 @@ export default function DmThreadScreen() {
                 <View style={[styles.requestBar, { borderBottomColor: colors.borderColor }]}>
                     <Text style={[type.meta, { color: colors.textMuted }]}>Unknown sender. This started in Requests.</Text>
                     <View style={styles.requestRow}>
-                        <Pressable onPress={() => act(svc => svc.acceptRequest(peerHex))}>
-                            <Text style={[type.meta, { color: colors.accentText }]}>Accept</Text>
+                        <Pressable
+                            style={[styles.actionButton, { backgroundColor: colors.accentColor }]}
+                            onPress={() => act(svc => svc.acceptRequest(peerHex))}
+                        >
+                            <Text style={[type.name, { color: colors.buttonTextColor }]}>Accept</Text>
                         </Pressable>
-                        <Pressable onPress={() => act(svc => svc.blockPeer(peerHex))}>
-                            <Text style={[type.meta, { color: colors.accentText }]}>Block</Text>
+                        <Pressable
+                            style={[styles.actionButton, { backgroundColor: colors.dangerColor }]}
+                            onPress={() => act(svc => svc.blockPeer(peerHex))}
+                        >
+                            <Text style={[type.name, { color: colors.buttonTextColor }]}>Block</Text>
                         </Pressable>
-                        <Pressable onPress={() => act(svc => svc.ignoreRequest(peerHex))}>
-                            <Text style={[type.meta, { color: colors.accentText }]}>Ignore</Text>
+                        <Pressable
+                            style={[styles.actionButton, styles.actionNeutral, { borderColor: colors.borderColor }]}
+                            onPress={() => act(svc => svc.ignoreRequest(peerHex))}
+                        >
+                            <Text style={[type.name, { color: colors.textPrimary }]}>Ignore</Text>
                         </Pressable>
                     </View>
                 </View>
             ) : null}
 
             <View style={[styles.actions, { borderBottomColor: colors.borderColor }]}>
-                <Pressable onPress={() => act(svc => svc.mutePeer(peerHex, !(conv?.muted ?? false)))}>
-                    <Text style={[type.meta, { color: colors.accentText }]}>{conv?.muted ? 'Unmute' : 'Mute'}</Text>
+                <Pressable
+                    style={[styles.actionButton, { backgroundColor: colors.accentColor }]}
+                    onPress={() => act(svc => svc.mutePeer(peerHex, !(conv?.muted ?? false)))}
+                >
+                    <Text style={[type.name, { color: colors.buttonTextColor }]}>{conv?.muted ? 'Unmute' : 'Mute'}</Text>
                 </Pressable>
-                <Pressable onPress={() => act(svc => svc.blockPeer(peerHex))}>
-                    <Text style={[type.meta, { color: colors.accentText }]}>Block</Text>
+                <Pressable
+                    style={[styles.actionButton, { backgroundColor: colors.dangerColor }]}
+                    onPress={() => act(svc => svc.blockPeer(peerHex))}
+                >
+                    <Text style={[type.name, { color: colors.buttonTextColor }]}>Block</Text>
                 </Pressable>
-                <Pressable onPress={confirmDelete}>
-                    <Text style={[type.meta, { color: colors.accentText }]}>Delete (this device only)</Text>
+                <Pressable
+                    style={[styles.actionButton, { backgroundColor: colors.dangerColor }]}
+                    onPress={confirmDelete}
+                >
+                    <Text style={[type.name, { color: colors.buttonTextColor }]}>Delete (this device only)</Text>
                 </Pressable>
             </View>
 
@@ -161,8 +189,10 @@ const styles = StyleSheet.create({
     header: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16, borderBottomWidth: StyleSheet.hairlineWidth },
     headerSpacer: { flex: 1 },
     requestBar: { padding: 12, borderBottomWidth: StyleSheet.hairlineWidth, gap: 8 },
-    requestRow: { flexDirection: 'row', gap: 16 },
-    actions: { flexDirection: 'row', gap: 16, padding: 12, borderBottomWidth: StyleSheet.hairlineWidth },
+    requestRow: { flexDirection: 'row', gap: 16, flexWrap: 'wrap' },
+    actions: { flexDirection: 'row', gap: 16, padding: 12, borderBottomWidth: StyleSheet.hairlineWidth, flexWrap: 'wrap' },
+    actionButton: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 8, alignItems: 'center' },
+    actionNeutral: { borderWidth: 1 },
     list: { padding: 16, gap: 8 },
     bubble: { padding: 10, borderRadius: 12, maxWidth: '80%', gap: 2 },
     out: { alignSelf: 'flex-end' },
