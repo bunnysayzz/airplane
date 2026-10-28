@@ -153,35 +153,59 @@ export class WsDmRelay implements DmRelayPort {
   /** Open one subscription per relay for kind-1059 events addressed to ownHex. */
   subscribe(ownMeshHex: string, onEnvelope: (e: DmEnvelope) => void): () => void {
     const filter = JSON.stringify({ kinds: [1059], '#p': [ownMeshHex] });
+    const subId = `dm-${ownMeshHex.slice(0, 8)}`;
+    // Set by unsubscribe: stops all reconnect retries for this subscription.
+    let closed = false;
     const sockets: WebSocketLike[] = [];
-    for (const url of this.relays) {
+    const openSocket = (url: string): void => {
+      let ws: WebSocketLike;
       try {
-        const ws = this.wsFactory(url);
-        sockets.push(ws);
-        ws.onopen = () => {
-          try {
-            ws.send(JSON.stringify(['REQ', `dm-${ownMeshHex.slice(0, 8)}`, JSON.parse(filter)]));
-          } catch {
-            // ignore; relay reconnect is the transport's job, not this sub's
-          }
-        };
-        ws.onmessage = ev => {
-          try {
-            const data = JSON.parse(String(ev.data)) as unknown[];
-            if (data[0] === 'EVENT' && data[2]) {
-              const envelope = nostrEventToDmEnvelope(data[2] as NostrDmEvent);
-              if (envelope && envelope.recipientHex === ownMeshHex) onEnvelope(envelope);
-            }
-          } catch {
-            // Malformed relay frame: ignore, never crash.
-          }
-        };
+        ws = this.wsFactory(url);
       } catch {
         // Relay unreachable: other relays still subscribe.
+        return;
       }
-    }
+      sockets.push(ws);
+      let reconnectScheduled = false;
+      const scheduleReconnect = (): void => {
+        // Error and close often fire for the same drop; schedule once per
+        // socket so a drop reopens exactly one replacement socket.
+        if (closed || reconnectScheduled) return;
+        reconnectScheduled = true;
+        setTimeout(() => {
+          if (closed) return;
+          openSocket(url);
+        }, 2000);
+      };
+      ws.onopen = () => {
+        try {
+          ws.send(JSON.stringify(['REQ', subId, JSON.parse(filter)]));
+        } catch {
+          // ignore; a drop here surfaces via onerror/onclose and reconnects
+        }
+      };
+      ws.onmessage = ev => {
+        try {
+          const data = JSON.parse(String(ev.data)) as unknown[];
+          if (data[0] === 'EVENT' && data[2]) {
+            const envelope = nostrEventToDmEnvelope(data[2] as NostrDmEvent);
+            if (envelope && envelope.recipientHex === ownMeshHex) onEnvelope(envelope);
+          }
+        } catch {
+          // Malformed relay frame: ignore, never crash.
+        }
+      };
+      ws.onerror = () => {
+        scheduleReconnect();
+      };
+      ws.onclose = () => {
+        scheduleReconnect();
+      };
+    };
+    for (const url of this.relays) openSocket(url);
     this.subSockets = sockets;
     return () => {
+      closed = true;
       for (const ws of sockets) {
         try {
           ws.close();
