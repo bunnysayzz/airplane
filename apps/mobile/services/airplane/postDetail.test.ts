@@ -69,6 +69,13 @@ test('returns null (never throws) for malformed ids', async () => {
   await expect(getPostCardById('a'.repeat(63))).resolves.toBeNull();
 });
 
+test('returns null for a deleted (tombstoned) post', async () => {
+  const post = makePost();
+  await getStore().saveEvent(post);
+  await getStore().markDeleted(toHex(post.id));
+  await expect(getPostCardById(toHex(post.id))).resolves.toBeNull();
+});
+
 test('returns null for an expired post', async () => {
   const post = makePost({ created_at: Math.floor(Date.now() / 1000) - 2 * 86400 });
   await getStore().saveEvent(post);

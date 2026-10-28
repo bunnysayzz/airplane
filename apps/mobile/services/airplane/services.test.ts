@@ -365,4 +365,11 @@ describe('emitViewReceipt', () => {
   it('returns false for unknown posts', async () => {
     expect(await emitViewReceipt('e'.repeat(64))).toBe(false);
   });
+
+  it('returns false for deleted posts and counts no view', async () => {
+    const id = await publishPost('deleted post', { geohash5: 'tdr1v' });
+    await getStore().markDeleted(id);
+    expect(await emitViewReceipt(id)).toBe(false);
+    expect(await getStore().countViews(id)).toBe(0);
+  });
 });

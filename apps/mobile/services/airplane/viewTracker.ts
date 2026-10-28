@@ -60,6 +60,12 @@ export async function emitViewReceipt(postIdHex: string): Promise<boolean> {
   const store = getStore();
   const post = await store.getEvent(postIdHex);
   if (!post) return false; // receipt only references posts we actually hold
+  // Dead posts earn no view: a deleted or expired post must not be
+  // signed and counted, even though getEvent still returns its row.
+  const state = await store.getPostState(postIdHex.toLowerCase());
+  if (!state || state.deleted || state.expiresAt <= Math.floor(Date.now() / 1000)) {
+    return false;
+  }
   // T8: signed through the KeyStorePort sign() seam — same wire shape as
   // createViewReceipt, but the secret key never enters this module.
   const receipt = await signDeviceEvent({

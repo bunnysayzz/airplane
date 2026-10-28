@@ -381,6 +381,16 @@ export class OpSqliteStore implements StorePort {
     return rows.length > 0 ? tryRowToEvent(rows[0]) : null;
   }
 
+  async getPostState(id: Hex64): Promise<{ deleted: boolean; expiresAt: number } | null> {
+    if (!/^[0-9a-fA-F]{64}$/.test(id)) return null;
+    const rows = await this.db.query<{ deleted: number; expires_at: number }>(
+      `SELECT deleted, expires_at FROM events WHERE id = ?`,
+      [hexToBytes(id.toLowerCase())],
+    );
+    if (rows.length === 0) return null;
+    return { deleted: rows[0].deleted === 1, expiresAt: rows[0].expires_at };
+  }
+
   async listFeed(opts: ListFeedOpts): Promise<FeedPost[]> {
     if (opts.cells.length === 0 || opts.limit <= 0) return [];
     if (opts.beforeId !== undefined && opts.before === undefined) {

@@ -7,7 +7,7 @@
 // card; this layer keeps the raw `createdAtMs` timestamp.
 
 import { EVENT_KIND_POST, toHex, type FeedPost, type Hex64 } from '@airplane/protocol';
-import { DEFAULT_RETENTION_SEC, rankScore, type ListFeedOpts } from '@airplane/storage';
+import { rankScore, type ListFeedOpts } from '@airplane/storage';
 import type { PostCardModel } from './types';
 import { ensureStarsHydrated, markStarPostKnown, resolveOwnPubkeyHex, starViewFor } from './stars';
 import { markResharePostKnown, reshareViewFor } from './reshares';
@@ -225,12 +225,10 @@ export async function listFeedPosts(opts: FeedQueryOpts): Promise<PostCardModel[
  * irrelevant here; looking it up directly also keeps tap-to-read working
  * when location permission/GPS flakes at tap time.
  *
- * Returns null for a malformed id, an unknown id, a non-post event, or an
- * expired post (same retention window the stores apply). Tombstone caveat:
- * getEvent does not surface the store's deleted flag, so a post whose
- * tombstone arrived after it left the feed can still resolve here once;
- * the feed itself hides it on next load. That staleness window is accepted
- * over the previous behaviour (no tap ever resolving).
+ * Returns null for a malformed id, an unknown id, a non-post event, an
+ * expired post, or a deleted (tombstoned) post: the detail route respects
+ * tombstones via getPostState, so a deleted post no longer resolves here
+ * after it leaves the feed.
  */
 export async function getPostCardById(eventId: string): Promise<PostCardModel | null> {
   if (!/^[0-9a-fA-F]{64}$/.test(eventId)) return null;
@@ -239,7 +237,8 @@ export async function getPostCardById(eventId: string): Promise<PostCardModel | 
   const event = await store.getEvent(id);
   if (!event || event.kind !== EVENT_KIND_POST) return null;
   const nowSec = Math.floor(Date.now() / 1000);
-  if (event.created_at + DEFAULT_RETENTION_SEC <= nowSec) return null;
+  const state = await store.getPostState(id);
+  if (!state || state.deleted || state.expiresAt <= nowSec) return null;
   const views = await store.countViews(id);
   const ageHours = Math.max(0, (nowSec - event.created_at) / 3600);
   const worldConfirmed = await store.isWorldConfirmed(id);

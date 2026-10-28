@@ -185,6 +185,11 @@ export class MemoryEventStore implements StorePort {
     return row ? cloneEvent(row.event) : null;
   }
 
+  async getPostState(id: Hex64): Promise<{ deleted: boolean; expiresAt: number } | null> {
+    const row = this.events.get(id.toLowerCase());
+    return row ? { deleted: row.deleted, expiresAt: row.expiresAt } : null;
+  }
+
   async listFeed(opts: ListFeedOpts): Promise<FeedPost[]> {
     const now = opts.nowSec ?? Math.floor(Date.now() / 1000);
     const cells = new Set(opts.cells);

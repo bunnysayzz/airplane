@@ -48,6 +48,9 @@ export interface StorePort {
   /** Fetch one event by id hex, or null. */
   getEvent(id: Hex64): Promise<SignedEvent | null>;
 
+  /** Deleted/expired state for one post row, or null when unknown. */
+  getPostState(id: Hex64): Promise<PostState | null>;
+
   /**
    * Reshare events (kind 5) live apart from the kind-1/2/3 events table:
    * that table's CHECK forbids kind 5, and reshare rows must never leak
@@ -142,6 +145,14 @@ export interface StorePort {
 
   /** All stored known post ids. */
   listStarKnownPosts(): Promise<Hex64[]>;
+}
+
+/** Deleted/expired state for one stored post row. */
+export interface PostState {
+  /** True when a tombstone (or markDeleted) flagged this row deleted. */
+  deleted: boolean;
+  /** Seconds after which the row is expired (created_at + retention). */
+  expiresAt: number;
 }
 
 /** Tiny string key/value store (STORE-5). Backed by MMKV on device. */
