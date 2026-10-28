@@ -183,6 +183,21 @@ describe('WorldSync', () => {
     expect(await store.isWorldConfirmed(id)).toBe(true); // still there
   });
 
+  test('confirmListener still forwards when confirmation storage fails', async () => {
+    const store = new FakeConfirmStore();
+    store.markWorldConfirmed = async () => {
+      throw new Error('disk full');
+    };
+    const nostr = new FakeNostr();
+    const sync = new WorldSync(nostr as never, store);
+    const forwarded: string[] = [];
+    const wrapped = sync.confirmListener((event, source) => {
+      forwarded.push(source);
+    });
+    await expect(wrapped(makePost('relay observed'), 'nostr')).resolves.toBeUndefined();
+    expect(forwarded).toEqual(['nostr']);
+  });
+
   test('confirmListener-wrapped handler survives and still forwards events', async () => {
     const store = new FakeConfirmStore();
     const nostr = new FakeNostr();

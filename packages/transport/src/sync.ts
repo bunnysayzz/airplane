@@ -87,7 +87,14 @@ export class WorldSync {
     return async (event: SignedEvent, source: string) => {
       if (source === 'nostr') {
         const idHex = toHex(event.id);
-        await this.store.markWorldConfirmed(idHex);
+        try {
+          await this.store.markWorldConfirmed(idHex);
+        } catch {
+          // Confirmation is a hint, delivery is the requirement: a failed
+          // confirmation write must never drop the inbound event. The
+          // event still flows to the handler below, and the next sync
+          // pass re-checks confirmation for it.
+        }
       }
       onEvent(event, source);
     };

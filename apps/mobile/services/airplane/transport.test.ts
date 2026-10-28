@@ -328,6 +328,27 @@ describe('transport manager', () => {
     expect(await store.isWorldConfirmed('08'.repeat(32))).toBe(false);
   });
 
+  test('inbound post with failing storage is dropped without an unhandled rejection', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const spy = jest.spyOn(store, 'saveEvent').mockRejectedValue(new Error('disk full'));
+    const event = makeSignedEvent();
+    // ingress is void-called by the real wiring; a rejection here would
+    // previously escape unhandled. It must resolve cleanly now.
+    hybrid!.ingress(event, 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(await store.getEvent('07'.repeat(32))).toBeNull();
+    spy.mockRestore();
+    // The handler survives the failure: a later post still stores.
+    const later = makeSignedEvent();
+    later.id = new Uint8Array(32).fill(9);
+    hybrid!.ingress(later, 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(await store.getEvent('09'.repeat(32))).not.toBeNull();
+  });
+
   test('kind-5 ingress counts, persists, and a pending reshare pulls its original post', async () => {
     await startTransport();
     const hybrid = __getHybridForTests();

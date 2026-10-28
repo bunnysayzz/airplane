@@ -200,8 +200,20 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
   }
   const store = getStore();
   // Store the event (deduped by HybridTransport already).
-  // saveEvent is idempotent.
-  await store.saveEvent(event);
+  // saveEvent is idempotent. A storage failure must not escape as an
+  // unhandled rejection (the caller uses void handleIncoming) and must
+  // not be silent: record a stage-tagged breadcrumb and drop this
+  // pass only. The event is not queued durably here (no inbound queue
+  // exists in the store schema); it re-arrives via relay replay or BLE
+  // redelivery, and the next sync pass re-checks it.
+  try {
+    await store.saveEvent(event);
+  } catch {
+    addBreadcrumb('transport: inbound store failed', {
+      id: toHex(event.id).slice(0, 16),
+    });
+    return;
+  }
   // A post arriving may release stars and reshares held pending for it.
   if (event.kind === EVENT_KIND_POST) {
     markStarPostKnown(toHex(event.id));
