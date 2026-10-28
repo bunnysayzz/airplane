@@ -176,6 +176,11 @@ function activeKeyStore(): KeyStorePort {
 
 let cached: DeviceKeypair | null = null;
 
+/** Copy both byte arrays: callers must never hold the cached reference. */
+function copyKeypair(kp: DeviceKeypair): DeviceKeypair {
+  return { publicKey: kp.publicKey.slice(), secretKey: kp.secretKey.slice() };
+}
+
 /**
  * In-flight load-or-generate promise. DATA-LOSS-CLASS race fix: two
  * concurrent getDeviceKeypair() calls would both see `cached === null` and
@@ -191,16 +196,19 @@ let inflight: Promise<DeviceKeypair> | null = null;
 /**
  * The stable device keypair. Generated once on first launch and persisted
  * in the keystore; identical across restarts. Cached in module scope so a
- * launch never re-reads the keystore per signature.
+ * launch never re-reads the keystore per signature. Every call returns a
+ * COPY of the cached pair, never the cached reference: Uint8Array is
+ * mutable, so a caller holding the reference could read or corrupt the
+ * cached secret bytes for all later signing.
  */
 export async function getDeviceKeypair(): Promise<DeviceKeypair> {
-  if (cached) return cached;
-  if (inflight) return inflight;
+  if (cached) return copyKeypair(cached);
+  if (inflight) return inflight.then(copyKeypair);
   const promise = injected ? loadOrGenerateKeypair(injected) : loadDefaultKeypair();
   inflight = promise;
   try {
     cached = await promise;
-    return cached;
+    return copyKeypair(cached);
   } finally {
     // Clear in BOTH paths: on success cached now owns it; on failure the
     // next caller must retry rather than await a settled rejection forever.

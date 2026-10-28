@@ -60,9 +60,25 @@ describe('default keystore selection', () => {
     expect(adapter.items.has('airplane.mesh.identity.v1')).toBe(true);
     expect(adapter.items.get('airplane.mesh.identity.v1')).toMatch(/^[0-9a-f]{64}$/);
 
-    // The keypair is cached at module scope: same object, no re-read.
+    // The keypair is cached at module scope (same values, no re-read),
+    // but each call returns a copy, never the cached reference.
     const kp2 = await mod.getDeviceKeypair();
-    expect(kp2).toBe(kp);
+    expect(kp2).not.toBe(kp);
+    expect(kp2.publicKey).toEqual(kp.publicKey);
+    expect(kp2.secretKey).toEqual(kp.secretKey);
+  });
+
+  test('mutating a returned keypair never corrupts the cached secret', async () => {
+    const adapter = makeAdapter({ AFTER_FIRST_UNLOCK: 1 });
+    const mod = await freshIdentity(() => adapter);
+    const kp = await mod.getDeviceKeypair();
+    kp.secretKey.fill(0);
+    kp.publicKey.fill(0);
+    const again = await mod.getDeviceKeypair();
+    expect(again.secretKey).not.toEqual(new Uint8Array(32));
+    expect(again.publicKey).not.toEqual(new Uint8Array(32));
+    // Signing still works through the untouched cache.
+    expect(again.publicKey).toHaveLength(32);
   });
 
   test('works when AFTER_FIRST_UNLOCK is undefined (storeOptions omitted)', async () => {
@@ -191,14 +207,15 @@ describe('concurrency guard and restart persistence', () => {
     const fromDefault = await mod.getDeviceKeypair();
     mod.setKeyStore(stub); // also clears the cache
     const fromInjected = await mod.getDeviceKeypair();
-    expect(fromInjected).toBe(fixed);
+    expect(fromInjected.publicKey).toEqual(fixed.publicKey);
+    expect(fromInjected.secretKey).toEqual(fixed.secretKey);
     expect(fromInjected).not.toBe(fromDefault);
   });
 
   test('__resetDeviceKeypairForTests drops the injected keystore too', async () => {
     const mod = await freshIdentity();
     mod.setKeyStore(stub);
-    expect(await mod.getDeviceKeypair()).toBe(fixed);
+    expect((await mod.getDeviceKeypair()).publicKey).toEqual(fixed.publicKey);
     mod.__resetDeviceKeypairForTests();
     const after = await mod.getDeviceKeypair();
     expect(after).not.toBe(fixed); // back on the default keystore
@@ -208,7 +225,7 @@ describe('concurrency guard and restart persistence', () => {
   test('setKeyStore(null) restores the default', async () => {
     const mod = await freshIdentity();
     mod.setKeyStore(stub);
-    expect(await mod.getDeviceKeypair()).toBe(fixed);
+    expect((await mod.getDeviceKeypair()).publicKey).toEqual(fixed.publicKey);
     mod.setKeyStore(null);
     const after = await mod.getDeviceKeypair();
     expect(after).not.toBe(fixed);
@@ -238,8 +255,10 @@ describe('secure-store call-time failure fallback (T1)', () => {
     expect(kp.secretKey).toHaveLength(32);
     // Nothing was persisted through the broken secure store.
     expect(adapter.items.has('airplane.mesh.identity.v1')).toBe(false);
-    // Cached: the same object serves the rest of the session.
-    expect(await mod.getDeviceKeypair()).toBe(kp);
+    // Cached: the same values serve the rest of the session (as copies).
+    const kpAgain = await mod.getDeviceKeypair();
+    expect(kpAgain).not.toBe(kp);
+    expect(kpAgain.publicKey).toEqual(kp.publicKey);
     // A breadcrumb records that the fallback fired (same fresh module
     // instance identity.ts imported after the registry reset).
     const sentry = await import('../../src/sentry');
