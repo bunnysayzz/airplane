@@ -313,6 +313,19 @@ describe('DmService routing + outbox', () => {
     expect(inbox[0].ignored).toBe(false);
   });
 
+  test('F6: thread orders by sender time, not arrival time', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 80_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    const late = sealDm('sent later', alice.meshHex, bob.meshHex, 2000);
+    const early = sealDm('sent earlier', alice.meshHex, bob.meshHex, 1000);
+    await bob.service.receiveEnvelope(late);
+    await bob.service.receiveEnvelope(early);
+    const thread = await bob.service.getThread(alice.meshHex);
+    expect(thread.map(t => t.text)).toEqual(['sent earlier', 'sent later']);
+  });
+
   test('P1-09: the flush scheduler re-arms on the backoff and drains without user action', async () => {
     jest.useFakeTimers();
     try {

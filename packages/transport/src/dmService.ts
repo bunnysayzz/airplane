@@ -40,6 +40,14 @@ export interface DmMessageRow {
   status: DmDelivery;
   attempts: number;
   nextAttemptAtMs: number;
+  /**
+   * Sender timestamp in epoch seconds (envelope.createdAt), set on
+   * incoming rows only. Orders messages within one conversation; never
+   * trusted globally, since a sender clock can lie. NOTE: this field is
+   * in-memory only today and MUST persist when the SQLite DM store lands,
+   * or ordering regresses to receive time on restart.
+   */
+  senderCreatedAtSec?: number;
 }
 
 export interface DmConversationRow {
@@ -445,6 +453,7 @@ export class DmService {
       status: 'Sent', // inbound: already delivered to this device
       attempts: 0,
       nextAttemptAtMs: nowMs,
+      senderCreatedAtSec: envelope.createdAt,
     };
     await this.store.addMessage(row);
     this.incomingEnvelopes.set(row.id, envelope);
@@ -595,7 +604,15 @@ export class DmService {
    *  plaintext cache (memory only, never disk). Unknown rows get null text
    *  (the UI renders the "Encrypted message" placeholder). */
   async getThread(peerHex: string): Promise<DmThreadRow[]> {
-    const rows = (await this.store.listMessages(peerHex)).sort((a, b) => a.createdAtMs - b.createdAtMs);
+    // Order by sender time within the conversation, with receive time as
+    // the tiebreak for same-second sends. Outgoing rows carry no sender
+    // timestamp, so their send time stands in for it.
+    const rows = (await this.store.listMessages(peerHex)).sort((a, b) => {
+      const aSender = a.senderCreatedAtSec ?? Math.floor(a.createdAtMs / 1000);
+      const bSender = b.senderCreatedAtSec ?? Math.floor(b.createdAtMs / 1000);
+      if (aSender !== bSender) return aSender - bSender;
+      return a.createdAtMs - b.createdAtMs;
+    });
     return rows.map(m => this.decryptRow(m));
   }
 
