@@ -454,6 +454,8 @@ export const en = {
     diagnosticsLogWriteError: 'Write error',
     diagnosticsLogLoadFailed: 'File could not be read at launch, so the count starts from this launch only.',
     diagnosticsLogPath: 'File: {{path}}',
+    diagnosticsRetryFailedNote:
+      'Retry did not restart Bluetooth. Check permissions in system settings.',
     diagnosticsLogMemory: 'Lines in memory: {{count}}',
     diagnosticsLogOnDisk: 'Lines on disk: {{count}}',
     diagnosticsSentryEnabled: 'Sentry: enabled',

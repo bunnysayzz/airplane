@@ -41,6 +41,7 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
   const [logStatus, setLogStatus] = useState(() => getDiagnosticsLogStatus());
   const [shareFailed, setShareFailed] = useState<boolean>(false);
   const [shareError, setShareError] = useState<string | null>(null);
+  const [retryFailed, setRetryFailed] = useState<boolean>(false);
 
   const refreshPermissions = () => {
     checkBlePermissionStates()
@@ -251,9 +252,10 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
                 // granted) and brings up advertise + scan; a permanently
                 // denied grant returns false and keeps the Open Settings
                 // path above, it never loops an OS dialog.
-                void enableBleRadio().then(() => {
+                void enableBleRadio().then((ok) => {
                   refreshPermissions();
                   setSnapshot(getDiagnosticsSnapshot());
+                  setRetryFailed(!ok);
                 });
               }}
               accessibilityRole="button"
@@ -265,6 +267,9 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
         </View>
         {anyDenied && (
           <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsOpenSettingsNote')}</Text>
+        )}
+        {retryFailed && (
+          <Text style={[type.meta, styles.note]}>{t('settings.diagnosticsRetryFailedNote')}</Text>
         )}
         <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogMemory', { count: logStatus.lineCount })}</Text>
         <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogOnDisk', { count: logStatus.flushedLineCount })}</Text>
