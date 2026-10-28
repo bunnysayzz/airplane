@@ -255,15 +255,26 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
  * known and releases the pending reshare. Best-effort and once per post
  * per launch: when offline the query sends nowhere, and a mesh-only post
  * stays pending until a BLE peer delivers it. Never throws.
+ *
+ * The target is marked pulled only when the query actually reached a
+ * relay: marking before the query used to block retry for the whole
+ * launch after one offline pull. The set is bounded (oldest evicted
+ * past 1000) so it cannot grow for the life of the launch.
  */
 const pulledPostIds = new Set<string>();
+const PULLED_POST_IDS_CAP = 1000;
 
 async function pullOriginalForReshare(event: SignedEvent): Promise<void> {
   const target = reshareTargetId(event);
   if (!target || pulledPostIds.has(target)) return;
-  pulledPostIds.add(target);
   try {
-    await hybrid?.nostr.queryByIds([target]);
+    const sent = await hybrid?.nostr.queryByIds([target]);
+    if (!sent) return; // offline: not pulled, so a later reshare retries
+    if (pulledPostIds.size >= PULLED_POST_IDS_CAP) {
+      const oldest = pulledPostIds.values().next().value as string | undefined;
+      if (oldest !== undefined) pulledPostIds.delete(oldest);
+    }
+    pulledPostIds.add(target);
   } catch {
     // Best-effort: the pending reshare still applies when the post arrives.
   }

@@ -129,10 +129,9 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
       finalStatus: 'fan-out failed',
     });
   });
-  try {
-    notifyFeedListeners();
-  } catch (err) {
-    throw new PublishError('notify', err);
-  }
+  // Notify is best-effort, not a publish stage that can fail the post:
+  // notifyFeedListeners guards each listener, so one throwing subscriber
+  // no longer fails a post that is already saved in the feed.
+  notifyFeedListeners();
   return toHex(event.id);
 }

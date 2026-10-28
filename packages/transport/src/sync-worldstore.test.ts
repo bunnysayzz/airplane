@@ -23,6 +23,12 @@ class FakeNostr {
     return ['wss://mock.relay'];
   }
 
+  async publishWithAck(event: SignedEvent): Promise<{ ok: string[]; rejected: string[]; timedOut: boolean }> {
+    if (!this.online) return { ok: [], rejected: [], timedOut: false };
+    this.published.push(event);
+    return { ok: ['wss://mock.relay'], rejected: [], timedOut: false };
+  }
+
   async queryByIds(ids: Hex64[]): Promise<void> {
     this.queried.push(ids);
   }

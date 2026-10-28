@@ -410,6 +410,42 @@ describe('transport manager', () => {
     expect(await getStore().getEvent(postId)).not.toBeNull();
   });
 
+  test('an offline pull does not block retry: pulled is marked only on query success', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const crypto = new NobleCrypto();
+    const other = crypto.generateKeypair();
+    const postId = 'e'.repeat(64);
+    const author = 'a'.repeat(64);
+    const mkReshare = (createdAt: number) =>
+      createReshare({
+        crypto,
+        secretKey: other.secretKey,
+        pubkey: other.publicKey,
+        geohash5: 'tdr1v',
+        originalPostId: fromHex(postId),
+        originalAuthorPubkey: fromHex(author),
+        createdAt,
+      });
+    const querySpy = jest
+      .spyOn(hybrid!.nostr, 'queryByIds')
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    hybrid!.ingress(mkReshare(1_700_000_001), 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(querySpy).toHaveBeenCalledTimes(1);
+    // A second reshare for the same still-unknown post retries the pull:
+    // the first, offline pull did not mark it pulled for the launch.
+    hybrid!.ingress(mkReshare(1_700_000_002), 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(querySpy).toHaveBeenCalledTimes(2);
+    // And now that a query succeeded, a third reshare does not re-pull.
+    hybrid!.ingress(mkReshare(1_700_000_003), 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(querySpy).toHaveBeenCalledTimes(2);
+  });
+
   test('own reshare published via publishViaTransport echoes locally as a duplicate, not a double count', async () => {
     await startTransport();
     const postId = 'd'.repeat(64);
