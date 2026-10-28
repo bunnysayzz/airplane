@@ -118,6 +118,13 @@ export interface PeripheralAdapter {
   onWrite(cb: (ev: { device: string; value: Uint8Array }) => void): () => void;
   notify(chunk: Uint8Array): Promise<void>;
   destroy(): Promise<void>;
+  /**
+   * Persistent error listener, attached after ready resolves. The
+   * creation-time once('error') is consumed at startup, so without this
+   * a later GATT server failure is invisible and advertisingState stays
+   * started. Absent on fakes and older shapes.
+   */
+  onError?(cb: (err: unknown) => void): () => void;
 }
 
 /** Injected native dependencies. Null = that role is unavailable (fail closed). */
@@ -312,6 +319,21 @@ export class GattBlePort implements TransportPort {
     this.peripheralUnsubs.push(
       adapter.onWrite(({ device, value }) => this.onPeripheralWrite(device, value)),
     );
+    // Persistent error listener: a later GATT server failure records a
+    // stage-tagged advertise failure and clears the peripheral handle, so
+    // the next Retry recreates the adapter instead of hitting the
+    // idempotent early return for a held-but-dead peripheral.
+    if (adapter.onError) {
+      const offError = adapter.onError(() => {
+        if (this.peripheral === adapter) {
+          this.peripheral = null;
+          this.ownPeerId = null;
+          this.ownTag = null;
+        }
+        recordAdvertiseFailure('ble: advertise failed: peripheral error after ready');
+      });
+      this.peripheralUnsubs.push(offError);
+    }
   }
 
   async stopAdvertise(): Promise<void> {
@@ -1154,6 +1176,15 @@ function loadPeripheralFactory(): (() => Promise<PeripheralAdapter>) | null {
       },
       stopAdvertising: async () => {
         await inst.stopAdvertising();
+      },
+      onError: (cb) => {
+        // eventemitter3: the instance emits 'error' beyond the once
+        // creation gate (whose reject is a no-op once ready resolved).
+        const handler = (err: unknown) => cb(err);
+        (inst as unknown as { on(ev: string, cb: (arg: unknown) => void): void }).on('error', handler);
+        return () => {
+          (inst as unknown as { removeListener(ev: string, cb: unknown): void }).removeListener('error', handler);
+        };
       },
       onWrite: (cb) => {
         // NOTE: the lib's TS WriteEvent type is wrong; at runtime the event

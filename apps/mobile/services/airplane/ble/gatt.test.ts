@@ -141,6 +141,7 @@ class FakePeripheral implements PeripheralAdapter {
   advTag: Uint8Array | null = null;
   advIdent: string | null = null;
   writeCb: ((ev: { device: string; value: Uint8Array }) => void) | null = null;
+  errorCb: ((err: unknown) => void) | null = null;
   notified: Uint8Array[] = [];
 
   async startAdvertising(tag: Uint8Array, identHex: string): Promise<void> {
@@ -155,6 +156,12 @@ class FakePeripheral implements PeripheralAdapter {
     this.writeCb = cb;
     return () => {
       this.writeCb = null;
+    };
+  }
+  onError(cb: (err: unknown) => void): () => void {
+    this.errorCb = cb;
+    return () => {
+      this.errorCb = null;
     };
   }
   async notify(chunk: Uint8Array): Promise<void> {
@@ -941,6 +948,25 @@ describe('scan failure callback (audit F-P2-5)', () => {
     await port.advertise(OWN_HEX);
     await expect(port.scan(() => {})).rejects.toThrow();
     expect(codes).toEqual(['central start refused']);
+    await port.close();
+  });
+});
+
+describe('persistent peripheral error listener (audit F-P2-6)', () => {
+  test('a later peripheral error records an advertise failure and clears the handle for Retry', async () => {
+    const { deps, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    expect(peripheral.advertising).toBe(true);
+    peripheral.errorCb!(new Error('gatt server died'));
+    const { getDiagnosticsSnapshot, resetDiagnosticsForTests } = await import('../diagnostics');
+    expect(getDiagnosticsSnapshot().advertising.state).toBe('stopped');
+    expect(getDiagnosticsSnapshot().advertising.lastFailure).toMatch(/peripheral error after ready/);
+    resetDiagnosticsForTests();
+    // The handle is cleared, so a fresh advertise recreates the adapter
+    // instead of returning early for the dead one.
+    await port.advertise(OWN_HEX);
+    expect(peripheral.advIdent).toBe(OWN_HEX);
     await port.close();
   });
 });
