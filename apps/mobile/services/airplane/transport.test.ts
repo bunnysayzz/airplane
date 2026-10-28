@@ -39,7 +39,7 @@ import {
   reshareViewFor,
   toggleReshare,
 } from './reshares';
-import { NobleCrypto, createReshare, fromHex } from '@airplane/protocol';
+import { NobleCrypto, createReshare, fromHex, toHex } from '@airplane/protocol';
 import type { PostCardModel } from './types';
 import { DEFAULT_RELAYS, RELAYS_KEY } from '../../src/lib/relays';
 
@@ -194,6 +194,23 @@ describe('transport manager', () => {
     expect(result).toHaveProperty('blePeers');
     expect(result).toHaveProperty('relays');
     expect(Array.isArray(result.relays)).toBe(true);
+  });
+
+  test('a relay win marks the post World-confirmed at publish time', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const event = makeSignedEvent();
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'relay',
+      status: 'relayed',
+      blePeers: 0,
+      relays: ['wss://test.relay'],
+      relayTried: true,
+      relayDetail: null,
+    });
+    await publishViaTransport(event);
+    expect(await getStore().isWorldConfirmed(toHex(event.id))).toBe(true);
   });
 
   test('online event schedules the periodic sync timer exactly once', async () => {

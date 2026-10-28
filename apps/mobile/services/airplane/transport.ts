@@ -611,6 +611,15 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
   // BLE — only Nostr — even with phones connected over GATT.
   const blePeersAtPublish = blePeerIdsForPublish(blePort?.port);
   const result = await hybrid!.publish(event, blePeersAtPublish);
+  // Relay OK is the confirmation: mark it now instead of waiting for
+  // the post to be observed back over a subscription, which left the
+  // globe dark and WorldSync re-pushing every minute. The inbound
+  // observation path still confirms other phones' relaying.
+  if (result.transport === 'relay') {
+    await getStore()
+      .markWorldConfirmed(toHex(event.id))
+      .catch(() => {});
+  }
   const nowMs = Date.now();
   // Diagnostics record exactly the stages the router actually ran: a
   // relay win never touches BLE, a skipped relay stage is marked
