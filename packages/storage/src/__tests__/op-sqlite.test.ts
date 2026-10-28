@@ -425,6 +425,24 @@ describe('saveReceipt', () => {
     expect(await store.countViews(postId)).toBe(2);
   });
 
+  test('concurrent receipts for one bucket: exactly one counts, rest report duplicate', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    const post = makeEvent({ seed: 6 });
+    const postId = bytesToHex(post.id);
+    await store.saveEvent(post);
+    const day = NOW - (NOW % 86400);
+    const base = makeReceipt(7, postId, day + 100);
+    const attempts = Array.from({ length: 5 }, (_, i) => {
+      const r = makeReceipt(20 + i, postId, day + 100);
+      r.pubkey = base.pubkey.slice();
+      return r;
+    });
+    const results = await Promise.all(attempts.map((r) => store.saveReceipt(r)));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await store.countViews(postId)).toBe(1);
+  });
+
   test('rejects non-receipt kinds and tagless receipts', async () => {
     const { port } = await migratedDb();
     const store = new OpSqliteStore(port);

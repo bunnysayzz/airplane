@@ -502,10 +502,19 @@ export class OpSqliteStore implements StorePort {
         return true;
       });
     } catch (e) {
-      // TOCTOU guard: a concurrent saveReceipt won the (pubkey, post, day)
-      // race between our dedup SELECT and INSERT. The transaction rolled
-      // back; the receipt is a duplicate, so report false, never throw.
-      if (e instanceof Error && /UNIQUE|PRIMARY/i.test(e.message)) return false;
+      // Duplicate classification without matching driver error-message
+      // text (unverified on device, and it conflated any unique
+      // violation with a duplicate receipt). Transactions are serialized
+      // per port, so a concurrent saveReceipt has committed by now: a
+      // fresh explicit dedup check settles it. Any other failure (a
+      // BEGIN error, for example) re-checks as not-a-duplicate and is
+      // rethrown instead of being misreported as one.
+      const dup = await this.db.query<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM receipts
+         WHERE pubkey = ? AND post_id = ? AND day_bucket = ?`,
+        [r.pubkey, hexToBytes(postId), dayBucket],
+      );
+      if (dup.length > 0 && dup[0].n > 0) return false;
       throw e;
     }
   }
