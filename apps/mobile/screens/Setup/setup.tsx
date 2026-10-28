@@ -154,8 +154,12 @@ const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false })
         {EXPLAINER_CARDS.map((spec) => (
           // Vertical scroll fallback for short screens: the card centers when
           // it fits and scrolls when it doesn't (e.g. landscape phones).
+          // nestedScrollEnabled is required for the inner vertical scroll to
+          // receive gestures on Android (API 21+); iOS nests by default, so
+          // the prop is a no-op there.
           <ScrollView
             key={spec.key}
+            nestedScrollEnabled
             contentContainerStyle={[styles.page, { width }]}
             showsVerticalScrollIndicator={false}
           >
