@@ -22,3 +22,33 @@ export function isNearBottom(input: NearBottomInput): boolean {
     const threshold = input.threshold ?? DM_NEAR_BOTTOM_THRESHOLD;
     return input.contentHeight - (input.offsetY + input.viewportHeight) < threshold;
 }
+
+/** Minimal bubble content: exactly the fields a DM bubble renders. */
+export interface DmBubbleItem {
+    id: string;
+    direction: 'out' | 'in';
+    text: string | null;
+    status: string;
+}
+
+export interface DmBubblePropsLike {
+    item: DmBubbleItem;
+    onRetry: (messageId: string) => void;
+}
+
+/**
+ * Memo comparison for the DM bubble (audit F5): a bubble re-renders only
+ * when its own rendered content changes. createdAtMs is deliberately
+ * excluded: it is never rendered, so a refresh that rebuilds row objects
+ * with identical content must not re-render bubbles. The parent must still
+ * pass a stable onRetry (useCallback) for the comparison to hold.
+ */
+export function dmBubblePropsEqual(prev: DmBubblePropsLike, next: DmBubblePropsLike): boolean {
+    return (
+        prev.item.id === next.item.id &&
+        prev.item.direction === next.item.direction &&
+        prev.item.text === next.item.text &&
+        prev.item.status === next.item.status &&
+        prev.onRetry === next.onRetry
+    );
+}

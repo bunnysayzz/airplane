@@ -9,9 +9,9 @@ import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow, DmThreadRow } from '@airplane/transport';
-import { DM_UNDECRYPTABLE_PLACEHOLDER } from '@airplane/transport';
 import { getDmService, dmPeerLabel, sendDm } from '../../services/airplane/dm';
 import { isNearBottom } from '../../src/lib/dmThread';
+import { DmBubble } from '../../components/DmBubble';
 import { useTheme } from '../../src/theme/themeContext';
 
 export default function DmThreadScreen() {
@@ -76,6 +76,24 @@ export default function DmThreadScreen() {
             .then(refresh)
             .catch((e: unknown) => Alert.alert('Could not send', e instanceof Error ? e.message : 'Unknown error'));
     };
+
+    // F5: stable retry + renderItem so keystrokes in the draft input do not
+    // re-render bubbles. The retry chain is unchanged from the previous
+    // inline handler (retry, flush outbox, refresh); only its identity is
+    // now stable, which is what makes the DmBubble memo comparison hold.
+    const handleRetry = useCallback(
+        (messageId: string) => {
+            void getDmService()
+                .then(svc => svc.retryMessage(peerHex, messageId))
+                .then(() => getDmService().then(svc => svc.flushOutbox()))
+                .then(refresh);
+        },
+        [peerHex, refresh],
+    );
+    const renderItem = useCallback(
+        ({ item }: { item: DmThreadRow }) => <DmBubble item={item} onRetry={handleRetry} />,
+        [handleRetry],
+    );
 
     // Returns true on success, false after showing an error: actions used
     // to fail silently (a bare act() rejection went nowhere), and Delete
@@ -175,27 +193,7 @@ export default function DmThreadScreen() {
                 onScroll={handleListScroll}
                 scrollEventThrottle={100}
                 onContentSizeChange={handleListContentSizeChange}
-                renderItem={({ item }) => (
-                    <View style={[styles.bubble, item.direction === 'out' ? styles.out : styles.in, { backgroundColor: item.direction === 'out' ? colors.accentSoft : colors.cardBackground }]}>
-                        <Text style={{ color: colors.textPrimary }}>{item.text ?? DM_UNDECRYPTABLE_PLACEHOLDER}</Text>
-                        {item.direction === 'out' ? (
-                            <Pressable
-                                onPress={() => {
-                                    if (item.status === 'Failed') {
-                                        void getDmService()
-                                            .then(svc => svc.retryMessage(peerHex, item.id))
-                                            .then(() => getDmService().then(svc => svc.flushOutbox()))
-                                            .then(refresh);
-                                    }
-                                }}
-                            >
-                                <Text style={[type.meta, { color: colors.textMuted }]}>
-                                    {item.status === 'Failed' ? 'Failed, tap to retry' : item.status}
-                                </Text>
-                            </Pressable>
-                        ) : null}
-                    </View>
-                )}
+                renderItem={renderItem}
             />
 
             <View style={[styles.sendRow, { borderTopColor: colors.borderColor, paddingBottom: insets.bottom + 12 }]}>
@@ -225,9 +223,6 @@ const styles = StyleSheet.create({
     actionButton: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 8, alignItems: 'center' },
     actionNeutral: { borderWidth: 1 },
     list: { padding: 16, gap: 8 },
-    bubble: { padding: 10, borderRadius: 12, maxWidth: '80%', gap: 2 },
-    out: { alignSelf: 'flex-end' },
-    in: { alignSelf: 'flex-start' },
     sendRow: { flexDirection: 'row', gap: 8, padding: 12, borderTopWidth: StyleSheet.hairlineWidth },
     input: { flex: 1, borderWidth: 1, borderRadius: 8, padding: 10, maxHeight: 120 },
     send: { borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
