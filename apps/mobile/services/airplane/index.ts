@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: Apache-2.0
+// @airplane mobile services - public surface (replaces services/mastodon/*).
+
+export type { PostCardModel } from './types';
+export {
+  listFeedPosts,
+  subscribeFeed,
+  notifyFeedListeners,
+  authorLabelFor,
+  toPostCardModel,
+  type FeedQueryOpts,
+  type FeedListener,
+} from './feed';
+export { publishPost, tagsForPublish, type PublishOpts } from './composer';
+export {
+  trackViewability,
+  extractNewViewIds,
+  emitViewReceipt,
+  type ViewabilityInfo,
+} from './viewTracker';
+export {
+  getDeviceKeypair,
+  getDevicePublicKey,
+  setKeyStore,
+  signWithDeviceKey,
+  signDeviceEvent,
+  rotateDeviceKey,
+  onIdentityChange,
+  crypto,
+  type DeviceKeypair,
+  type RotationResult,
+} from './identity';
+export { getStore } from './store';
+// --- RESHARE (delimited) ---
+export {
+  recordReshareEvent,
+  markResharePostKnown,
+  getReshareCluster,
+  resharerLabelFor,
+  toggleReshare,
+  getMyPubkeyHex,
+  rehydrateReshares,
+  reshareViewFor,
+} from './reshares';
+export { getKv } from './kv';
+export { startTransport, stopTransport, publishViaTransport } from './transport';

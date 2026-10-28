@@ -1,0 +1,66 @@
+# iOS build check (unsigned) — compile-only proof that the iOS app builds.
+#
+# WHAT IT DOES (manual trigger only, Actions tab -> "iOS build check" -> Run):
+#   1. Generates the iOS project with `expo prebuild` (ios/ is NOT committed;
+#      only android/ is, per the NovaMind route).
+#   2. Builds it for the iOS Simulator WITHOUT signing
+#      (CODE_SIGNING_ALLOWED=NO). A simulator build proves compilation and
+#      native-module linking (op-sqlite, mmkv, BLE) with zero Apple account
+#      requirements.
+#
+# WHAT IT DOES NOT DO (by design, until the owner supplies Apple signing):
+#   - No IPA, no device install, no TestFlight/App Store upload. A signed
+#     device build needs an Apple Developer Program membership plus a
+#     distribution certificate + provisioning profile for bundle id
+#     com.bunnysayzz.airplane, stored as GitHub secrets. That is a separate
+#     workflow (signed-ios-build) once those secrets exist.
+#   - No DSN injection: the Sentry client stays disabled without
+#     EXPO_PUBLIC_SENTRY_DSN, which never breaks the build (see sentry.ts).
+#   - No artifacts: a simulator .app is not installable on real phones.
+#
+# COST: Airplane is a public repo, so GitHub Actions minutes (including
+# macOS runners) are free/unlimited. This job is manual-dispatch only so it
+# never burns minutes on every push.
+
+name: iOS build check (unsigned)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ios-check:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Show Xcode toolchain
+        run: xcodebuild -version
+
+      - name: Generate iOS project (Expo prebuild)
+        working-directory: apps/mobile
+        run: npx expo prebuild --platform ios --non-interactive
+
+      - name: Build for iOS Simulator (unsigned)
+        run: |
+          xcodebuild \
+            -workspace apps/mobile/ios/Airplane.xcworkspace \
+            -scheme Airplane \
+            -configuration Release \
+            -sdk iphonesimulator \
+            CODE_SIGNING_ALLOWED=NO \
+            build

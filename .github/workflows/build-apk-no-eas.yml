@@ -1,0 +1,160 @@
+name: Android build (APK + AAB, no EAS)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Regression guard for the 2026-10-23 startup crash class
+      # (`Cannot find native module 'ExpoLinking'` -> SIGABRT): every package
+      # reachable from the app entry that ships an Android native module must
+      # be listed by expo-modules-autolinking resolve (the exact source the
+      # Gradle build uses). Runs BEFORE Gradle so a dropped module fails the
+      # build instead of dying silently on the device.
+      - name: Check startup-reachable native modules are autolinked
+        run: node scripts/check-native-modules.js
+
+      # Prove the guard is not a tautology: re-run it against deliberately
+      # broken autolink listings (expo-linking stripped from the real
+      # `resolve` output — the source that covers expo modules) and require
+      # it to FAIL naming the missing module.
+      - name: Prove the native-module guard fails on broken input
+        run: |
+          (cd apps/mobile && npx --no-install expo-modules-autolinking resolve -p android --json) > /tmp/resolve-real.json
+          (cd apps/mobile && npx --no-install expo-modules-autolinking react-native-config -p android --json) > /tmp/rnconfig-real.json
+          node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('/tmp/resolve-real.json', 'utf8'));
+            const mods = Array.isArray(data) ? data : data.modules;
+            if (!Array.isArray(mods) || !mods.some((m) => m && m.packageName === 'expo-linking')) {
+              console.error('proof setup broken: expo-linking not in real resolve output'); process.exit(2);
+            }
+            const stripped = mods.filter((m) => !(m && m.packageName === 'expo-linking'));
+            fs.writeFileSync('/tmp/resolve-broken.json', JSON.stringify({ modules: stripped }));
+          "
+          if node scripts/check-native-modules.js --resolve-json /tmp/resolve-broken.json --rnconfig-json /tmp/rnconfig-real.json; then
+            echo 'GUARD IS BROKEN: it passed on deliberately-broken autolink output' >&2
+            exit 1
+          else
+            echo 'Guard correctly FAILED on the deliberately-broken autolink output.'
+          fi
+
+      # Sentry (T1): the pure-JS client reads EXPO_PUBLIC_SENTRY_DSN, which
+      # babel-preset-expo inlines into the JS bundle at bundle time. The DSN
+      # lives in apps/mobile/eas.json (abandoned EAS file, inert) — read it
+      # here and hand it to the Gradle step as an env var only. The value is
+      # NEVER echoed: it goes straight from node into $GITHUB_ENV.
+      - name: Provide Sentry DSN to the JS bundle (from eas.json)
+        run: |
+          DSN=$(node -e "process.stdout.write(require('./apps/mobile/eas.json').build.production.env.EXPO_PUBLIC_SENTRY_DSN || '')")
+          if [ -z "$DSN" ]; then
+            echo '::error::EXPO_PUBLIC_SENTRY_DSN missing from apps/mobile/eas.json (production profile)'
+            exit 1
+          fi
+          printf 'EXPO_PUBLIC_SENTRY_DSN=%s\n' "$DSN" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+
+      - name: Install Android platform + build-tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-35" "platforms;android-34" "build-tools;35.0.0" "build-tools;34.0.0"
+
+      # android/ is committed to the repo (NovaMind route) — no Expo prebuild.
+      # The native project is reviewed in git and identical between builds.
+      - name: Build release APK (arm64-v8a only)
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon
+
+      # Phase 1: AAB for Play Store + clean releases (same signing as the APK;
+      # debug-signed until the T12 production keystore lands — fine for GitHub
+      # releases, NOT accepted by the Play Store).
+      - name: Build release AAB
+        working-directory: apps/mobile/android
+        run: ./gradlew bundleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon
+
+      - name: Verify APK payload (no Sentry, allowlisted .so, embedded JS bundle)
+        run: |
+          APK=apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK not found at $APK"
+            exit 1
+          fi
+          echo "=== Full .so inventory of $APK ==="
+          unzip -Z1 "$APK" | grep -E '^lib/[^/]+/[^/]+\.so$' | sort -u | tee /tmp/so-inventory.txt
+          echo "=== End of inventory ==="
+
+          # Hard fail: any Sentry native library, under any ABI/name variant.
+          if grep -qi 'sentry' /tmp/so-inventory.txt; then
+            echo "::error::Sentry native library found in APK:"
+            grep -i 'sentry' /tmp/so-inventory.txt
+            exit 1
+          fi
+
+          # Hard fail: any native library outside the known RN 0.79 / Expo SDK 53
+          # families for this app's installed modules. If a legit new module is
+          # added later, extend this allowlist in the same commit. Allowlist
+          # completed from the first verified build's inventory (run 39649181234).
+          # T2 (2026-10-25): + libop-sqlite.so (@op-engineering/op-sqlite) and
+          # libreact-native-mmkv.so (react-native-mmkv) for persistent storage/KV.
+          UNEXPECTED=$(sed -E 's|^lib/[^/]+/||' /tmp/so-inventory.txt | sort -u | grep -vE '^(libc\+\+_shared\.so|libfbjni\.so|libfolly_runtime\.so|libglog\.so|libhermes\.so|libhermes_executor\.so|libimagepipeline\.so|libjsi\.so|liblogger\.so|libmapbufferjni\.so|libreactnative\.so|libreactnativejni\.so|libturbomodulejsijni\.so|libyoga\.so|libworklets\.so|libappmodules\.so|libexpo-modules-core\.so|libExpoModulesCore\.so|libfabricjni\.so|libuimanagerjni\.so|librrc_.*\.so|libreact_codegen_.*\.so|libgesturehandler\.so|libgifimage\.so|libhermestooling\.so|libnative-filters\.so|libnative-imagetranscoder\.so|libreanimated\.so|librnscreens\.so|libstatic-webp\.so|libop-sqlite\.so|libreact-native-mmkv\.so)$' || true)
+          if [ -n "$UNEXPECTED" ]; then
+            echo "::error::Unexpected native libraries in APK:"
+            echo "$UNEXPECTED"
+            exit 1
+          fi
+
+          # Hard fail: the JS bundle must be embedded in the APK. Release builds
+          # bundle the JS (debug builds load it from Metro and ship no bundle,
+          # which is exactly the v0.0.21 "Unable to load script" RedBox).
+          echo "=== Assets in APK ==="
+          unzip -Z1 "$APK" | grep '^assets/' | sort | tee /tmp/assets-inventory.txt || true
+          if ! grep -qx 'assets/index.android.bundle' /tmp/assets-inventory.txt; then
+            echo "::error::assets/index.android.bundle is MISSING from the APK - JS bundle not embedded."
+            exit 1
+          fi
+          BUNDLE_SIZE=$(unzip -l "$APK" assets/index.android.bundle | awk 'NR==4 {print $1}')
+          echo "JS bundle embedded OK: assets/index.android.bundle (${BUNDLE_SIZE} bytes)"
+
+          echo "APK payload verification passed: no Sentry, all native libs allowlisted, JS bundle embedded."
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: airplane-release-apk
+          path: apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: airplane-release-aab
+          path: apps/mobile/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+

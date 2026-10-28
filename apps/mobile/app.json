@@ -1,0 +1,71 @@
+{
+  "expo": {
+    "name": "Airplane",
+    "slug": "airplane",
+    "scheme": "airplane",
+    "version": "0.1.12",
+    "platforms": [
+      "ios",
+      "android"
+    ],
+    "newArchEnabled": true,
+    "plugins": [
+      "expo-secure-store"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "98a17423-033b-4461-a779-82d919336f3c"
+      }
+    },
+    "owner": "bunnysayzz",
+    "android": {
+      "package": "com.bunnysayzz.airplane",
+      // Location (LOC-1, prod-13): foreground approximate location only, for
+      // scoping posts to the device's geohash-5 cell (~4.9 km). No precise
+      // fix is needed, so only ACCESS_COARSE_LOCATION is declared - the OS
+      // offers no "precise" toggle for this app. Mirrored in
+      // android/app/src/main/AndroidManifest.xml because android/ is
+      // committed and no Expo prebuild runs in CI.
+      // BLE mesh radio (prod-15): SCAN/ADVERTISE/CONNECT runtime permissions;
+      // runtime flow in services/airplane/ble/permissions.ts.
+      // T14 (in-app update, preparatory only): REQUEST_INSTALL_PACKAGES is
+      // the permission an in-app ACTION_INSTALL_PACKAGE flow needs, so it is
+      // declared here and mirrored in the committed AndroidManifest.xml.
+      // Declaring it installs nothing on its own — the download-to-cache +
+      // FileProvider + install-intent wiring is still pending device
+      // verification (see src/lib/updateCheck.ts), and until then the
+      // Download button hands the APK to the system downloader instead.
+      "permissions": [
+        "android.permission.REQUEST_INSTALL_PACKAGES",
+        "ACCESS_COARSE_LOCATION",
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.BLUETOOTH_ADVERTISE",
+        "android.permission.BLUETOOTH_CONNECT"
+      ],
+      // Declared explicitly to match the committed android/ theme, which opts
+      // out of edge-to-edge enforcement (styles.xml). System bars are opaque,
+      // so in-code insets (dock offset, toast, sheet) fall back to fixed
+      // offsets on Android rather than reading gesture-bar insets.
+      "edgeToEdgeEnabled": false,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0A0A0B"
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "com.bunnysayzz.airplane",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Airplane needs your approximate location to scope posts to your area of the mesh."
+      }
+    },
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0A0B"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}

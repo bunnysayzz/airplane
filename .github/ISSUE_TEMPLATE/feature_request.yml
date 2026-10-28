@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: Apache-2.0
+name: Feature request
+description: Pitch an idea or capability.
+labels: [feature]
+title: "[feature] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user need or pain does this solve? Why does it matter?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should the app do? Keep it concrete and scoped.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other ways to solve this, and why they don't fit.
+  - type: dropdown
+    id: roadmap-phase
+    attributes:
+      label: Roadmap phase
+      description: Which phase of docs/blueprint/ROADMAP.md does this fit in? (Best guess is fine.)
+      options:
+        - P0 — Radio spike / GO-NO-GO
+        - P1 — Foundation (current)
+        - P2
+        - P3
+        - P4
+        - P5 — Distribution
+        - Not sure / doesn't fit
+    validations:
+      required: true
