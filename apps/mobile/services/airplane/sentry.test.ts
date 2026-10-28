@@ -179,6 +179,13 @@ describe('captureError', () => {
     expect(takeSentryDisabledNote()).toBe(true);
   });
 
+  test('sentry fetch carries an abort signal', () => {
+    initSentry(TEST_DSN);
+    captureError(new Error('boom'));
+    const init = fetchMock.mock.calls[0][1] as { signal?: unknown };
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
   test('never throws, even when fetch rejects', async () => {
     initSentry(TEST_DSN);
     fetchMock.mockRejectedValue(new Error('offline'));

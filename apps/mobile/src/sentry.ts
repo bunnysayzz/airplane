@@ -218,6 +218,11 @@ export function captureError(error: unknown): void {
     const stack = error instanceof Error ? error.stack : undefined;
     const stage = (error as { stage?: unknown } | null)?.stage ?? undefined;
     const eventId = randomEventId();
+    const abortSignalCtor = (
+      globalThis as { AbortSignal?: { timeout?: (ms: number) => unknown } }
+    ).AbortSignal;
+    const timeoutSignal =
+      abortSignalCtor?.timeout !== undefined ? abortSignalCtor.timeout(10_000) : undefined;
     const scrubbedBreadcrumbs: SentryBreadcrumb[] = breadcrumbs.map((crumb) => {
       const scrubbed: SentryBreadcrumb = {
         timestamp: crumb.timestamp,
@@ -269,6 +274,9 @@ export function captureError(error: unknown): void {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-sentry-envelope' },
         body: envelope,
+        // A hung request must not linger: abort after about 10 seconds.
+        // No retry: retrying error telemetry risks duplicate events.
+        ...(timeoutSignal !== undefined ? { signal: timeoutSignal } : {}),
       },
     );
     if (result && typeof (result as { catch?: unknown }).catch === 'function') {
