@@ -487,6 +487,40 @@ describe('listFeed', () => {
     ).rejects.toThrow(/beforeId requires before/);
   });
 
+  test('one corrupt tags blob does not fail the whole feed page', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    const good = makeEvent({ seed: 71 });
+    await store.saveEvent(good);
+    const bad = makeEvent({ seed: 72 });
+    await port.exec(
+      `INSERT INTO events
+         (id, pubkey, kind, created_at, geohash, tags, content, sig,
+          received_at, expires_at, deleted)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      [
+        bad.id, bad.pubkey, bad.kind, bad.created_at, bad.geohash,
+        new TextEncoder().encode('not-json{{'),
+        bad.content, bad.sig, NOW, bad.created_at + 24 * 3600,
+      ],
+    );
+    const feed = await store.listFeed({ cells: ['tdr1v'], limit: 10, nowSec: NOW });
+    expect(feed).toHaveLength(1);
+    expect(bytesToHex(feed[0].event.id)).toBe(bytesToHex(good.id));
+    expect(await store.getEvent(bytesToHex(bad.id))).toBeNull();
+    // Corrupt star rows are skipped the same way, not page-failing.
+    await port.exec(
+      `INSERT INTO star_events
+         (event_id, pubkey, target_id, created_at, geohash, tags, content, sig)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        seedBytes(73), seedBytes(1073), good.id, NOW, 'tdr1v',
+        new TextEncoder().encode('not-json{{'), '', seedBytes(2073, 64),
+      ],
+    );
+    expect(await store.listStarEvents()).toHaveLength(0);
+  });
+
   test('expired posts are invisible to the feed even before pruning', async () => {
     const { port } = await migratedDb();
     const store = new OpSqliteStore(port, 60);

@@ -91,7 +91,9 @@ async function runTransactionInner<T>(db: DatabasePort, fn: () => Promise<T>): P
 interface EventRowShape {
   id: Uint8Array;
   pubkey: Uint8Array;
-  kind: 1 | 2 | 3;
+  // The events table only holds 1-3; tryRowToEvent is also reused for
+  // star (4) and reshare (5) rows, which carry their kind in code.
+  kind: 1 | 2 | 3 | 4 | 5;
   created_at: number;
   geohash: string;
   tags: Uint8Array;
@@ -141,6 +143,23 @@ function rowToEvent(row: EventRowShape): SignedEvent {
     content: row.content,
     sig: row.sig,
   };
+}
+
+/**
+ * Per-row decode guard: one corrupt tags blob must never fail a whole
+ * page. Returns null for a row whose tags do not decode to an array of
+ * tag arrays; page mappings skip it and keep the good rows.
+ */
+function tryRowToEvent(row: EventRowShape): SignedEvent | null {
+  try {
+    const event = rowToEvent(row);
+    if (!Array.isArray(event.tags) || event.tags.some((t) => !Array.isArray(t))) {
+      return null;
+    }
+    return event;
+  } catch {
+    return null;
+  }
 }
 
 function taggedPostId(e: SignedEvent): Hex64 | null {
@@ -345,16 +364,12 @@ export class OpSqliteStore implements StorePort {
       `SELECT id, pubkey, created_at, geohash, tags, content, sig
        FROM reshare_events ORDER BY created_at ASC, id ASC`,
     );
-    return rows.map((row) => ({
-      id: row.id,
-      pubkey: row.pubkey,
-      created_at: row.created_at,
-      kind: 5 as const,
-      geohash: row.geohash,
-      tags: decodeTags(row.tags),
-      content: row.content,
-      sig: row.sig,
-    }));
+    const out: SignedEvent[] = [];
+    for (const row of rows) {
+      const event = tryRowToEvent({ ...row, kind: 5 as const });
+      if (event) out.push(event);
+    }
+    return out;
   }
 
   async getEvent(id: Hex64): Promise<SignedEvent | null> {
@@ -363,7 +378,7 @@ export class OpSqliteStore implements StorePort {
        FROM events WHERE id = ?`,
       [hexToBytes(id.toLowerCase())],
     );
-    return rows.length > 0 ? rowToEvent(rows[0]) : null;
+    return rows.length > 0 ? tryRowToEvent(rows[0]) : null;
   }
 
   async listFeed(opts: ListFeedOpts): Promise<FeedPost[]> {
@@ -399,16 +414,19 @@ export class OpSqliteStore implements StorePort {
        LIMIT ?`,
       params,
     );
-    return rows.map((row) => {
-      const event = rowToEvent(row);
+    const out: FeedPost[] = [];
+    for (const row of rows) {
+      const event = tryRowToEvent(row);
+      if (!event) continue; // corrupt row skipped, rest of page loads
       const ageHours = Math.max(0, (now - event.created_at) / 3600);
-      return {
+      out.push({
         event,
         views: row.views,
         score: rankScore(row.views, ageHours),
         ageHours,
-      } satisfies FeedPost;
-    });
+      });
+    }
+    return out;
   }
 
   async markDeleted(postId: Hex64): Promise<void> {
@@ -635,16 +653,21 @@ export class OpSqliteStore implements StorePort {
       `SELECT event_id, pubkey, created_at, geohash, tags, content, sig
        FROM star_events ORDER BY created_at ASC, event_id ASC`,
     );
-    return rows.map((row) => ({
-      id: row.event_id,
-      pubkey: row.pubkey,
-      created_at: row.created_at,
-      kind: EVENT_KIND_STAR,
-      geohash: row.geohash,
-      tags: decodeTags(row.tags),
-      content: row.content,
-      sig: row.sig,
-    }));
+    const out: SignedEvent[] = [];
+    for (const row of rows) {
+      const event = tryRowToEvent({
+        id: row.event_id,
+        pubkey: row.pubkey,
+        created_at: row.created_at,
+        kind: EVENT_KIND_STAR,
+        geohash: row.geohash,
+        tags: row.tags,
+        content: row.content,
+        sig: row.sig,
+      });
+      if (event) out.push(event);
+    }
+    return out;
   }
 
   async listStarKnownPosts(): Promise<Hex64[]> {
