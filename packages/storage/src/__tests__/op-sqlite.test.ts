@@ -258,6 +258,14 @@ describe('migrate', () => {
     expect(old).toHaveLength(1);
   });
 
+  test('a database from a newer build fails fast with a clear error', async () => {
+    const { port } = await migratedDb();
+    await port.exec(`INSERT INTO schema_version (version, applied_at) VALUES (7, ?)`, [NOW]);
+    await expect(OpSqliteStore.migrate(port)).rejects.toThrow(
+      /database version 7 is newer than this app supports \(max 6\)/,
+    );
+  });
+
   test('failed 003 migration rolls back and records no version row', async () => {
     const db = new DatabaseSync(':memory:');
     openDbs.push(db);

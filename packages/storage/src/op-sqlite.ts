@@ -186,7 +186,9 @@ export class OpSqliteStore implements StorePort {
    *
    * - `schema_version` is bootstrapped with CREATE TABLE IF NOT EXISTS (not
    *   a numbered migration) and MAX(version) is read as the current level.
-   * - v >= 6: no-op (re-running migrate on an up-to-date DB is safe).
+   * - v == 6: no-op (re-running migrate on an up-to-date DB is safe).
+   * - v > 6: throws a clear "database is newer than this app" error
+   *   instead of silently accepting a schema this build does not know.
    * - v == 5: apply 006 (feed index). v == 4: apply 005, 006.
    * - v == 0: legacy pre-versioning DBs are detected via sqlite_master:
    *   no `events` table -> fresh install (apply 001, 002, 003, 004, 005, 006);
@@ -233,7 +235,13 @@ export class OpSqliteStore implements StorePort {
       });
     };
 
-    if (v >= 6) return;
+    if (v > 6) {
+      throw new Error(
+        `database version ${v} is newer than this app supports (max 6): ` +
+          `the database was created by a newer app version; update the app instead of opening it here`,
+      );
+    }
+    if (v === 6) return;
     if (v === 5) {
       await applyMigration(6, MIGRATION_006);
       return;
