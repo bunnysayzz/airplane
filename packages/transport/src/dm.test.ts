@@ -498,6 +498,19 @@ describe('DmService routing + outbox', () => {
     expect(await alice.service.listInbox()).toHaveLength(0);
   });
 
+  test('D11: whitespace-only DMs are rejected at the service', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 130_000_000 };
+    const alice = makePersona(relay, nowRef);
+    await expect(alice.service.sendMessage('d'.repeat(64), '   ')).rejects.toThrow();
+    await expect(alice.service.sendMessage('d'.repeat(64), '\n\t ')).rejects.toThrow();
+    // Non-blank text still sends, stored unchanged.
+    await alice.service.sendMessage('d'.repeat(64), '  padded  ');
+    const thread = await alice.service.getThread('d'.repeat(64));
+    expect(thread).toHaveLength(1);
+    expect(thread[0].text).toBe('  padded  ');
+  });
+
   test('P1-09: the flush scheduler re-arms on the backoff and drains without user action', async () => {
     jest.useFakeTimers();
     try {

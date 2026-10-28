@@ -347,7 +347,7 @@ export class DmService {
     if (new TextEncoder().encode(text).length > DM_TEXT_MAX_BYTES) {
       throw new Error(`sendMessage: DM longer than ${DM_TEXT_MAX_BYTES} bytes`);
     }
-    if (text.length === 0) throw new Error('sendMessage: empty DM');
+    if (text.trim().length === 0) throw new Error('sendMessage: empty DM');
     const conv = await this.startConversation(peerHex);
     if (conv.state === 'blocked') throw new Error('sendMessage: peer is blocked');
     const nowMs = this.now();

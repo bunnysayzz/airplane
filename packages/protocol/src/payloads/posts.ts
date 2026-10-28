@@ -71,6 +71,9 @@ export function normalizeContent(content: string): string {
   if (chars > MAX_CONTENT_CHARS) {
     throw new PayloadError(`content too long: ${chars} > ${MAX_CONTENT_CHARS} chars`);
   }
+  // Reject-only: whitespace-only content is blank, not a post. Stored
+  // text is otherwise unchanged (no trimming of valid content).
+  if (normalized.trim().length === 0) throw new PayloadError('content must not be blank');
   return normalized;
 }
 
