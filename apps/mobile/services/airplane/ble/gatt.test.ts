@@ -52,9 +52,12 @@ class FakeCentral implements CentralAdapter {
   writes: { id: string; char: string; chunk: Uint8Array }[] = [];
   mtu = 512;
   failConnect = new Set<string>();
+  failStart = false;
+  listenerRegistrations = 0;
   identHex: string = PEER_HEX;
 
   async start(): Promise<void> {
+    if (this.failStart) throw new Error('central start refused');
     this.started = true;
   }
   async scan(): Promise<void> {
@@ -64,6 +67,7 @@ class FakeCentral implements CentralAdapter {
     this.scanning = false;
   }
   onDiscover(cb: (info: { id: string; rssi: number; tag: Uint8Array | null }) => void): () => void {
+    this.listenerRegistrations++;
     this.discoverCb = cb;
     return () => {
       this.discoverCb = null;
@@ -90,12 +94,14 @@ class FakeCentral implements CentralAdapter {
     this.notificationsStarted.push(id);
   }
   onNotification(cb: (ev: { id: string; value: Uint8Array }) => void): () => void {
+    this.listenerRegistrations++;
     this.notifyCb = cb;
     return () => {
       this.notifyCb = null;
     };
   }
   onDisconnect(cb: (id: string) => void): () => void {
+    this.listenerRegistrations++;
     this.disconnectCb = cb;
     return () => {
       this.disconnectCb = null;
@@ -662,5 +668,32 @@ describe('withBleTimeout (audit P1-13)', () => {
     await expect(withBleTimeout(Promise.reject(new Error('native boom')), 1000, 'test stage')).rejects.toThrow(
       'native boom',
     );
+  });
+});
+
+describe('ensureCentral failure cleanup (audit P1-15)', () => {
+  test('a start failure is recorded, leaks no subscriber, and a retry registers listeners once', async () => {
+    const { deps, central } = makeDeps();
+    central.failStart = true;
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await expect(port.scan(() => {})).rejects.toThrow(/central start refused/);
+    // No listener survives the failed bring-up, and no scan subscriber leaked.
+    expect(central.discoverCb).toBeNull();
+    expect(central.notifyCb).toBeNull();
+    expect(central.disconnectCb).toBeNull();
+    const { getDiagnosticsSnapshot, resetDiagnosticsForTests } = await import('../diagnostics');
+    expect(getDiagnosticsSnapshot().scanning.lastFailure).toMatch(/central start refused/);
+    resetDiagnosticsForTests();
+    // Retry after the radio recovers: exactly one listener set, one connect.
+    central.failStart = false;
+    const seen: string[] = [];
+    await port.scan((peer) => seen.push(peer.peerId));
+    expect(central.listenerRegistrations).toBe(3);
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connects).toEqual(['ble-1']);
+    expect(seen).toEqual([`tag:${toHex(PEER_TAG)}`, PEER_HEX]);
+    await port.close();
   });
 });

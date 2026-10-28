@@ -294,10 +294,13 @@ export class GattBlePort implements TransportPort {
    * unavailable.
    */
   async scan(onPeer: (peer: PeerInfo) => void): Promise<() => void> {
-    this.scanSubs.add(onPeer);
+    // The subscriber joins only after ensureCentral succeeds: previously it
+    // was added first, so a failed bring-up leaked it in scanSubs forever
+    // and the caller never received the unsubscribe function.
     if (!this.scanUnsub) {
       await this.ensureCentral();
     }
+    this.scanSubs.add(onPeer);
     let done = false;
     return () => {
       if (done) return;
@@ -316,18 +319,31 @@ export class GattBlePort implements TransportPort {
   private async ensureCentral(): Promise<void> {
     const central = this.deps.central;
     if (!central) return; // scan stays inert; unsub still works
-    if (!this.centralStarted) {
-      await withBleTimeout(central.start(), BLE_TIMEOUT_MS.start, 'central start');
-      this.centralStarted = true;
-      this.centralUnsubs.push(
-        central.onDiscover((info) => this.onDiscover(info)),
-        central.onNotification(({ id, value }) => this.onCentralNotify(id, value)),
-        central.onDisconnect((id) => this.onCentralDisconnect(id)),
-      );
-    }
+    // Start, listener registration, and scan live in one try: previously
+    // the start flag and listeners were set before the fallible step, so
+    // a start failure was never recorded and the next scan registered a
+    // second set of listeners (discovery and notify callbacks fired twice).
+    // On any failure the just-registered listeners are removed, the flag
+    // is reset, and the failure is recorded, so a retry starts clean.
+    const registeredInThisCall: (() => void)[] = [];
     try {
+      if (!this.centralStarted) {
+        await withBleTimeout(central.start(), BLE_TIMEOUT_MS.start, 'central start');
+        registeredInThisCall.push(
+          central.onDiscover((info) => this.onDiscover(info)),
+          central.onNotification(({ id, value }) => this.onCentralNotify(id, value)),
+          central.onDisconnect((id) => this.onCentralDisconnect(id)),
+        );
+        this.centralUnsubs.push(...registeredInThisCall);
+        this.centralStarted = true;
+      }
       await withBleTimeout(central.scan(), BLE_TIMEOUT_MS.scan, 'central scan');
     } catch (err) {
+      // Remove every central listener (just-registered plus any held from
+      // an earlier bring-up) so a retry can never double-register.
+      for (const u of [...new Set([...registeredInThisCall, ...this.centralUnsubs])]) uSafe(u);
+      this.centralUnsubs = [];
+      this.centralStarted = false;
       recordScanFailure(err instanceof Error ? err.message : String(err));
       throw err;
     }
