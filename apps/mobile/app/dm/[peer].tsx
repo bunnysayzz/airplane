@@ -122,7 +122,8 @@ export default function DmThreadScreen() {
             void getDmService()
                 .then(svc => svc.retryMessage(peerHex, messageId))
                 .then(() => getDmService().then(svc => svc.flushOutbox()))
-                .then(refresh);
+                .then(refresh)
+                .catch((e: unknown) => Alert.alert('Action failed', dmUserErrorMessage(e)));
         },
         [peerHex, refresh],
     );

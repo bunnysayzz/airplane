@@ -153,7 +153,10 @@ export default function MessagesTab() {
                             <Text style={[type.name, { color: colors.textPrimary }]}>{dmPeerLabel(c.peerHex)}</Text>
                             <Pressable
                                 onPress={() =>
-                                    void getDmService().then(svc => svc.unblockPeer(c.peerHex)).then(refresh)
+                                    void getDmService()
+                                        .then(svc => svc.unblockPeer(c.peerHex))
+                                        .then(refresh)
+                                        .catch((e: unknown) => Alert.alert('Action failed', dmUserErrorMessage(e)))
                                 }
                             >
                                 <Text style={[type.meta, { color: colors.accentText }]}>Unblock</Text>
