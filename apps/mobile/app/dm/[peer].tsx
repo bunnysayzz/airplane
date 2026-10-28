@@ -25,6 +25,9 @@ export default function DmThreadScreen() {
     const [thread, setThread] = useState<DmThreadRow[]>([]);
     const [conv, setConv] = useState<DmConversationRow | null>(null);
     const [draft, setDraft] = useState('');
+    // A rapid double-tap used to send the same text twice as two distinct
+    // envelopes; the Send button is disabled while a send is in flight.
+    const [sending, setSending] = useState(false);
     // A failed refresh used to leave a stale thread with no error shown.
     const [refreshError, setRefreshError] = useState(false);
 
@@ -104,15 +107,20 @@ export default function DmThreadScreen() {
 
     const send = () => {
         const text = draft.trim();
-        if (!text) return;
+        if (!text || sending) return;
+        setSending(true);
         // The draft clears only on success: a failed send used to lose the
         // typed text, leaving the user to retype after the error Alert.
         sendDm(peerHex, text)
             .then(() => {
                 setDraft('');
+                setSending(false);
                 void refresh().catch(() => {});
             })
-            .catch((e: unknown) => Alert.alert('Could not send', dmUserErrorMessage(e)));
+            .catch((e: unknown) => {
+                setSending(false);
+                Alert.alert('Could not send', dmUserErrorMessage(e));
+            });
     };
 
     // F5: stable retry + renderItem so keystrokes in the draft input do not
@@ -291,7 +299,7 @@ export default function DmThreadScreen() {
                         multiline
                         style={[styles.input, { color: colors.textPrimary, borderColor: colors.borderColor }]}
                     />
-                    <Pressable onPress={send} style={[styles.send, { backgroundColor: colors.accentColor }]}>
+                    <Pressable onPress={send} disabled={sending} style={[styles.send, { backgroundColor: colors.accentColor }]}>
                         <Text style={{ color: colors.buttonTextColor }}>Send</Text>
                     </Pressable>
                 </View>
