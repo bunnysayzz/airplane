@@ -344,6 +344,24 @@ describe('DmService routing + outbox', () => {
     expect(rows[0].status).toBe('Sending');
   });
 
+  test('F8: unblock from a request restores the request, not inbox', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 95_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    await bob.service.receiveEnvelope(sealDm('stranger hi', alice.meshHex, bob.meshHex));
+    expect(await bob.service.listRequests()).toHaveLength(1);
+    await bob.service.blockPeer(alice.meshHex);
+    await bob.service.unblockPeer(alice.meshHex);
+    expect(await bob.service.listInbox()).toHaveLength(0);
+    expect(await bob.service.listRequests()).toHaveLength(1);
+    // And an inbox conversation still restores to inbox.
+    await bob.service.acceptRequest(alice.meshHex);
+    await bob.service.blockPeer(alice.meshHex);
+    await bob.service.unblockPeer(alice.meshHex);
+    expect(await bob.service.listInbox()).toHaveLength(1);
+  });
+
   test('P1-09: the flush scheduler re-arms on the backoff and drains without user action', async () => {
     jest.useFakeTimers();
     try {

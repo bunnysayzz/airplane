@@ -60,6 +60,13 @@ export interface DmConversationRow {
   lastMessageAtMs: number;
   lastSealed: string | null;
   lastDirection: 'out' | 'in' | null;
+  /**
+   * Conversation state before blockPeer, restored by unblockPeer. Null
+   * (or absent on old rows) means inbox. NOTE: in-memory only today and
+   * MUST persist when the SQLite DM store lands, or unblock after a
+   * restart restores every request straight to inbox again.
+   */
+  priorState?: 'inbox' | 'request' | null;
 }
 
 /** Decrypted-on-read thread row. `text === null` renders the placeholder. */
@@ -505,7 +512,11 @@ export class DmService {
   async blockPeer(peerHex: string): Promise<void> {
     const c = await this.store.getConversation(peerHex);
     if (c) {
-      await this.store.upsertConversation({ ...c, state: 'blocked', ignored: false, unread: 0 });
+      // Remember where the conversation came from, unless it is already
+      // blocked (blocking twice must not overwrite the original state
+      // with 'blocked', which priorState cannot represent).
+      const priorState = c.state === 'blocked' ? c.priorState ?? null : c.state;
+      await this.store.upsertConversation({ ...c, state: 'blocked', ignored: false, unread: 0, priorState });
     } else {
       await this.store.upsertConversation({
         peerHex,
@@ -516,6 +527,7 @@ export class DmService {
         lastMessageAtMs: 0,
         lastSealed: null,
         lastDirection: null,
+        priorState: null,
       });
     }
     // Rows queued to this peer must not sit in Sending forever: flush
@@ -540,7 +552,10 @@ export class DmService {
         // (requests folder), exactly as if never blocked.
         await this.store.deleteConversation(peerHex);
       } else {
-        await this.store.upsertConversation({ ...c, state: 'inbox' });
+        // Restore the pre-block state: a blocked request returns to the
+        // requests folder, not straight to inbox. Old rows without a
+        // prior state default to inbox, preserving prior behaviour.
+        await this.store.upsertConversation({ ...c, state: c.priorState ?? 'inbox', priorState: null });
       }
       this.emit();
     }
