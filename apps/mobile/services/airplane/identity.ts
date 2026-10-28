@@ -138,7 +138,7 @@ function isMissingModuleError(err: unknown): boolean {
 /**
  * Load-or-generate through the default store, falling back to the in-memory
  * store ONLY when the secure store's native module is missing at call
- * time. An explicitly injected store (tests/dev) never falls back — it
+ * time. An explicitly injected store (tests/dev) never falls back; it
  * must fail loud. A corrupt-value or other read error also fails loud:
  * it is surfaced as a breadcrumb plus the rethrown error, never as a
  * silent swap to an ephemeral identity.
