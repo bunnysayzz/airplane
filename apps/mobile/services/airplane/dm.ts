@@ -11,22 +11,23 @@
 // identity (same derivation, new secret), so old DM peers cannot reach the
 // new identity; the rotation screen says so, and rotation resets this
 // singleton so the next DM derives from the new key.
-// PERSISTENCE NOTE (P1 follow-up): the store below is MemoryDmStore —
-// conversations survive only for the app session. A SQLite DmStore on
-// SEPARATE dm_* tables (same DmStorePort) is the follow-up; the service,
-// routing, outbox and UI do not change when it lands.
+// PERSISTENCE (R5): the store below is SqliteDmStore — conversations and
+// messages live in the app's SQLite database on SEPARATE dm_* tables (see
+// dmSqlite.ts), so they survive app restarts. The service, routing, outbox
+// and UI do not change when the store changes: they all talk DmStorePort.
 
 import {
   DmService,
-  MemoryDmStore,
   WsDmRelay,
   dmFromHex,
   dmKeypairFromDeviceSecret,
   dmToHex,
 } from '@airplane/transport';
+import { SqliteDmStore } from './dmSqlite';
 import { getDeviceKeypair, onIdentityChange } from './identity';
 import { loadRelayUrls } from '../../src/lib/relays';
 import { authorLabelFor } from './names';
+import { createSqliteDatabasePort } from './sqlite';
 
 let service: DmService | null = null;
 let servicePromise: Promise<DmService> | null = null;
@@ -49,7 +50,7 @@ export async function getDmService(): Promise<DmService> {
     const kp = await getDeviceKeypair();
     const ownHex = dmToHex(kp.publicKey);
     const svc = new DmService({
-      store: new MemoryDmStore(),
+      store: new SqliteDmStore(createSqliteDatabasePort()),
       // Same configured list as the post path: DMs must not silently
       // keep using package defaults the user removed in Settings.
       relay: new WsDmRelay({ relays: await loadRelayUrls(), allowPrivateRelays: true }),
@@ -101,11 +102,23 @@ export function dmUserErrorMessage(e: unknown): string {
   return 'Something went wrong. Try again.';
 }
 
-/** Send a DM and immediately attempt delivery (outbox retries on failure). */
+/**
+ * Send a DM. R5 optimistic UI: the row is stored (status Sending) and
+ * returned at once, so the thread shows it immediately; the outbox flush
+ * then runs in the background and the service's emit refreshes the thread
+ * when the status moves to Sent/Failed. Previously this awaited the flush,
+ * so the message appeared only after the relay round-trip (up to 10 s on
+ * the old sequential relay path) — the "slow DM" feel in plan section 7.6.
+ */
+
 export async function sendDm(peerHex: string, text: string): Promise<void> {
   const svc = await getDmService();
   await svc.sendMessage(peerHex, text);
-  await svc.flushOutbox();
+  // Background flush: a store failure here must not unreject the send
+  // (the row is already stored as Sending and retries on the next flush).
+  void svc.flushOutbox().catch(() => {
+    /* status stays Sending; next flush retries */
+  });
 }
 
 /**

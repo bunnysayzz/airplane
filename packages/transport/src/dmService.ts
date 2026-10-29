@@ -36,6 +36,13 @@ export interface DmMessageRow {
   direction: 'out' | 'in';
   /** Sealed NIP-44-style payload (outgoing: sealed to the peer; incoming: as received). */
   sealed: string;
+  /**
+   * Full sendable envelope (ephemeral pubkey header + sealed payload).
+   * R5: persisted by the SQLite store next to `sealed`, so an outbox retry
+   * after a restart can re-send the identical bytes instead of going
+   * Failed for a missing in-memory envelope. Never contains plaintext.
+   */
+  envelope?: DmEnvelope;
   createdAtMs: number;
   status: DmDelivery;
   attempts: number;
@@ -357,6 +364,7 @@ export class DmService {
       peerHex,
       direction: 'out',
       sealed: envelope.sealed,
+      envelope,
       createdAtMs: nowMs,
       status: 'Sending',
       attempts: 0,
@@ -379,15 +387,15 @@ export class DmService {
   }
 
   /**
-   * Flush the outbox. Per-conversation FIFO: within one conversation the
-   * oldest due message goes first and a failure stops that conversation's
-    * queue (other conversations are unaffected). Conversations are
-    * independent, so they flush concurrently (a slow first conversation
-    * no longer delays every other one); the sequential first-OK-wins
-    * relay order inside one publish is kept. Concurrent callers share
-    * a single in-flight run, so two flushes can never publish the same
-    * Sending row twice. Never silently drops: a message that exhausts
-    * DM_MAX_ATTEMPTS becomes Failed, not deleted.
+   * Flush the outbox. R5: NO head-of-line blocking. Messages go in
+   * created order within a conversation, but a failed message no longer
+   * stops the rest of that conversation's queue (plan section 7.5): the
+   * failed row keeps its own backoff and the next due message is still
+   * attempted. Conversations are independent, so they flush concurrently
+   * (a slow first conversation no longer delays every other one).
+   * Concurrent callers share a single in-flight run, so two flushes can
+   * never publish the same Sending row twice. Never silently drops: a
+   * message that exhausts DM_MAX_ATTEMPTS becomes Failed, not deleted.
    */
   async flushOutbox(nowMs?: number): Promise<void> {
     if (this.flushInFlight) return this.flushInFlight;
@@ -413,14 +421,11 @@ export class DmService {
         for (const m of messages) {
           if (m.direction !== 'out' || m.status !== 'Sending') continue;
           if (m.nextAttemptAtMs > now) continue;
-          // A missing envelope is permanent (in-memory outbox lost, e.g.
-          // after restart): tryPublish marks it Failed, and the queue must
-          // continue past it instead of head-blocking on a dead row. A
-          // transient publish failure still stops this conversation's queue.
-          const envelopeMissing = !this.outboxEnvelopes.has(m.id);
-          const ok = await this.tryPublish(m, now);
+          // R5: no head-of-line blocking — a failed row (including a
+          // missing-envelope row, which tryPublish marks Failed) never
+          // stops the rest of this conversation's queue.
+          await this.tryPublish(m, now);
           changed = true;
-          if (!ok && !envelopeMissing) break; // FIFO head-of-line
         }
         return changed;
       }),
@@ -437,13 +442,11 @@ export class DmService {
   }
 
   private async tryPublish(m: DmMessageRow, now: number): Promise<boolean> {
-    // The stored row carries only the sealed payload; the sendable envelope
-    // (ephemeral pubkey header) lives in the memory-only outbox map, filled
-    // by sendMessage. If it is gone (app restarted before a SQLite outbox
-    // lands — see the P1-follow-up note at the bottom), the message goes
-    // Failed, visibly, never silently dropped; tap-to-retry then needs the
-    // envelope back, which only a fresh send provides.
-    const envelope = this.outboxEnvelopes.get(m.id);
+    // R5: the sendable envelope lives on the row itself (persisted by the
+    // SQLite store), with the memory-only outbox map as a fast path. A
+    // restart no longer strands an unsent row: only a row that somehow has
+    // no envelope at all goes Failed, visibly, never silently dropped.
+    const envelope = this.outboxEnvelopes.get(m.id) ?? m.envelope;
     if (!envelope) {
       m.status = 'Failed';
       await this.store.updateMessage(m);
@@ -520,6 +523,7 @@ export class DmService {
       peerHex: senderHex,
       direction: 'in',
       sealed: envelope.sealed,
+      envelope,
       createdAtMs: nowMs,
       status: 'Sent', // inbound: already delivered to this device
       attempts: 0,
@@ -756,10 +760,9 @@ export class DmService {
   private readonly outgoingPlaintext = new Map<string, string>();
 
   private decryptIncoming(m: DmMessageRow): string | null {
-    // Incoming sealed payloads decrypt with the gift-wrap path only when the
-    // full envelope (ephemeral pubkey) is present; the store keeps the sealed
-    // payload, and the envelope header arrives with it at receive time.
-    const envelope = this.incomingEnvelopes.get(m.id);
+    // R5: the envelope is on the row itself (persisted), so incoming text
+    // survives a restart; the memory-only map is a fast path for pre-R5 rows.
+    const envelope = m.envelope ?? this.incomingEnvelopes.get(m.id);
     if (!envelope) return null;
     const rumor: DmRumor | null = unsealDm(envelope, this.ownKeys(), this.ownMeshHex());
     return rumor ? rumor.content : null;
@@ -779,11 +782,12 @@ export class DmService {
   }
 }
 
-// P1-FOLLOW-UP NOTE (honest limitation): the outbox envelope header
-// (ephemeral pubkey) and outgoing plaintext live in memory only. A SQLite
-// DmStore implementing DmStorePort must persist the envelope header next to
-// `sealed` per row so retries and own-thread text survive a restart; until
-// then a restart turns unsent outbox rows Failed on next flush (visible, not
-// silently dropped) and own sent messages show the "Encrypted message"
-// placeholder. Incoming messages are unaffected: their envelopes arrive with
-// the message and decrypt on read.
+// R5 NOTE (what still lives in memory only): the outgoing plaintext cache
+// (own-thread text) is deliberately never written to disk — sealed-at-rest
+// means the store holds sealed bytes only, so after a restart an own sent
+// message shows the "Encrypted message" placeholder until it is re-read
+// from a fresh send. That is a privacy trade, not a data loss: the sealed
+// row, its envelope, and its status all survive. Incoming messages are
+// unaffected: their envelopes are on the row, so they decrypt on read
+// after a restart too. The SQLite implementation is
+// apps/mobile/services/airplane/dmSqlite.ts (separate dm_* tables).

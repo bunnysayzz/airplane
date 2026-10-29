@@ -4,6 +4,19 @@
 
 import { MemoryKeyStore } from '@airplane/crypto';
 
+// R5 wiring: getDmService builds a SqliteDmStore over the app SQLite
+// port, whose real executor is the native op-sqlite module (unloadable
+// in Jest). Mock the port factory at the seam: the test only exercises
+// singleton/rejection behaviour, never a real DM operation, and
+// SqliteDmStore migrates lazily, so a stub port is enough.
+jest.mock('./sqlite', () => ({
+  createSqliteDatabasePort: () => ({
+    exec: async () => {},
+    query: async () => [],
+    close: async () => {},
+  }),
+}));
+
 jest.mock('@airplane/transport', () => {
   const actual = jest.requireActual('@airplane/transport') as Record<string, unknown>;
   return {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // DM P1 tests: sealed round-trip, requests routing, block silent-drop,
-// delete-local-only, outbox retry -> Failed after cap, per-conversation FIFO.
+// delete-local-only, outbox retry -> Failed after cap, R5 no head-of-line
+// blocking (supersedes the P1 per-conversation FIFO rule).
 
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
@@ -274,7 +275,7 @@ describe('DmService routing + outbox', () => {
     expect(DM_MAX_ATTEMPTS).toBe(5);
   });
 
-  test('per-conversation FIFO: a failed head blocks its conversation only', async () => {
+  test('R5 no head-of-line blocking: a failed message never blocks the next DM', async () => {
     const relay = new FailingDmRelay();
     const nowRef = { now: 20_000_000 };
     const alice = makePersona(relay, nowRef);
@@ -284,18 +285,17 @@ describe('DmService routing + outbox', () => {
     await alice.service.sendMessage(peerA, 'a-second');
     await alice.service.sendMessage(peerB, 'b-only');
     await alice.service.flushOutbox();
-    // All three failed once; FIFO means a-second was never attempted while
-    // a-first was the failing head — observable via attempts on the rows.
+    // R5 (plan section 7.5) supersedes the P1 FIFO rule: every due message
+    // is attempted in created order, so a-second was attempted even though
+    // a-first failed — observable via attempts on the rows.
     const rowsA = await alice.store.listMessages(peerA);
     const rowsB = await alice.store.listMessages(peerB);
-    expect(rowsA.find(m => m.direction === 'out' && m.createdAtMs === rowsA[0].createdAtMs)).toBeDefined();
     expect(rowsA).toHaveLength(2);
     expect(rowsB).toHaveLength(1);
-    // The second message in conversation A is still queued (Sending, 0 attempts).
-    const second = rowsA[1];
-    expect(second.status).toBe('Sending');
-    expect(second.attempts).toBe(0);
-    expect(rowsB[0].attempts).toBe(1); // conversation B was not blocked by A
+    expect(rowsA[0].attempts).toBe(1);
+    expect(rowsA[1].attempts).toBe(1); // not blocked by the failing head
+    expect(rowsA[1].status).toBe('Sending');
+    expect(rowsB[0].attempts).toBe(1);
   });
 
   test('send order is preserved end to end on the relay path', async () => {
@@ -467,7 +467,7 @@ describe('DmService routing + outbox', () => {
     alice.service.stop();
   });
 
-  test('F15: missing-envelope rows fail fast instead of head-blocking the queue', async () => {
+  test('F15 (R5 supersession): after a restart the row envelope survives, so rows retry instead of failing fast; only a truly envelope-less row fails fast', async () => {
     const relay = new FailingDmRelay();
     const nowRef = { now: 110_000_000 };
     const alice = makePersona(relay, nowRef);
@@ -475,8 +475,10 @@ describe('DmService routing + outbox', () => {
     await alice.service.sendMessage(peer, 'first after restart');
     await alice.service.sendMessage(peer, 'second after restart');
     alice.service.stop();
-    // A fresh service over the same store simulates a restart: the
-    // in-memory outbox envelopes are gone, but the rows survive here.
+    // A fresh service over the same store simulates a restart. Under R5
+    // the envelope lives on the row itself (and in SqliteDmStore as
+    // envelope_json), so the rows are NOT envelope-less after restart:
+    // they are attempted once each and stay Sending on backoff, not Failed.
     const restarted = new DmService({
       store: alice.store,
       relay,
@@ -485,9 +487,25 @@ describe('DmService routing + outbox', () => {
       now: () => nowRef.now,
     });
     await restarted.flushOutbox();
-    const rows = await alice.store.listMessages(peer);
-    expect(rows.map(r => r.status)).toEqual(['Failed', 'Failed']);
+    let rows = await alice.store.listMessages(peer);
+    expect(rows.map(r => r.status)).toEqual(['Sending', 'Sending']);
+    expect(rows.map(r => r.attempts)).toEqual([1, 1]);
     restarted.stop();
+    // A row that somehow has no envelope at all still fails fast, visibly,
+    // instead of head-blocking the queue.
+    const stripped = { ...rows[0], envelope: undefined, nextAttemptAtMs: nowRef.now };
+    await alice.store.updateMessage(stripped);
+    const restarted2 = new DmService({
+      store: alice.store,
+      relay,
+      ownKeys: () => dmKeypairFromDeviceSecret(alice.secret),
+      ownMeshHex: () => alice.meshHex,
+      now: () => nowRef.now,
+    });
+    await restarted2.flushOutbox();
+    rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Failed');
+    restarted2.stop();
   });
 
   test('F16: per-conversation message lists cap with oldest eviction', async () => {

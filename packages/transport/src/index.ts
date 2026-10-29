@@ -70,4 +70,4 @@ export type {
 } from './dmService';
 
 export { WsDmRelay, dmEnvelopeToNostrEvent, nostrEventToDmEnvelope } from './dmRelay';
-export type { WsDmRelayOpts } from './dmRelay';
+export type { WsDmRelayOpts, DmRelayHealth } from './dmRelay';

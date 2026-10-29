@@ -9,6 +9,23 @@
 // {"kinds":[1059],"#p":[ownHex]}. Relays see recipient + ephemeral pubkey,
 // never plaintext. Signature validity is what relays check; the app-level
 // trust boundary is the sealed rumor (see dm.ts header).
+//
+// R5 FAST PATH (plan section 7): this replaces the P1 behaviour (fresh
+// socket per relay per send, relays in order, up to 10 s each) with:
+// * one pooled socket per relay, held across sends and reused;
+// * parallel publish to all relays with a short first-OK deadline
+//   (default 5 s): the first relay OK wins, the others are ignored, and
+//   a slow relay never makes a DM feel slow;
+// * a live subscription held across drops: on close the socket reconnects
+//   with bounded exponential backoff and re-sends its REQ, with a `since`
+//   backfill from the last envelope seen, so gaps are fetched, not lost;
+// * EOSE is never a gate: EVENT frames are delivered the moment they
+//   arrive, before or after any EOSE frame;
+// * per-relay health (OKs, failures, last OK latency) so a slow or dead
+//   relay is visible and loses the first-OK race instead of blocking it.
+// D1 default holds: strict relay first, no direct-BLE shortcut for DMs.
+// There is still no BLE DM path in this file; a mesh fallback for DMs is
+// a separate follow-up, not claimed here.
 
 import { schnorr } from '@noble/curves/secp256k1.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -20,8 +37,12 @@ import { sanitizeRelayList } from './relayUrls';
 export interface WsDmRelayOpts {
   relays?: string[];
   wsFactory?: (url: string) => WebSocketLike;
-  /** Per-attempt publish timeout, ms. Default 10000. */
+  /** First-OK deadline for a publish, ms. Default 5000 (was 10000, sequential). */
   publishTimeoutMs?: number;
+  /** Base reconnect delay after a subscription socket drops, ms. Default 1000. */
+  reconnectMs?: number;
+  /** Cap for the exponential reconnect backoff, ms. Default 30000. */
+  reconnectMaxMs?: number;
   /** Allow private-network relay targets (explicit user-added list). */
   allowPrivateRelays?: boolean;
 }
@@ -41,8 +62,6 @@ export function dmEnvelopeToNostrEvent(envelope: DmEnvelope): NostrDmEvent {
   const pubkey = dmToHex(schnorr.getPublicKey(keys));
   const tags = [['p', envelope.recipientHex]];
   const content = JSON.stringify(envelope);
-  // NIP-01: id = sha256([0, pubkey, created_at, kind, tags, content]);
-  // sig = schnorr(id) over the raw id bytes.
   const idBytes = sha256(new TextEncoder().encode(JSON.stringify([0, pubkey, envelope.createdAt, 1059, tags, content])));
   return {
     id: dmToHex(idBytes),
@@ -97,11 +116,45 @@ export function nostrEventToDmEnvelope(event: NostrDmEvent): DmEnvelope | null {
   }
 }
 
+/** Per-relay health, best first (most OKs, then lowest last OK latency). */
+export interface DmRelayHealth {
+  url: string;
+  ok: number;
+  failed: number;
+  consecutiveFailures: number;
+  lastLatencyMs: number | null;
+}
+
+interface OkWaiter {
+  onOk: (url: string, latencyMs: number) => void;
+  onRelayDone: (url: string) => void;
+  sentAtMs: Map<string, number>;
+}
+
+interface PoolEntry {
+  ws: WebSocketLike | null;
+  state: 'connecting' | 'open' | 'closed';
+  openWaiters: Set<() => void>;
+  closeWaiters: Set<() => void>;
+  reconnectAttempts: number;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+}
+
 export class WsDmRelay implements DmRelayPort {
   private readonly relays: string[];
   private readonly wsFactory: (url: string) => WebSocketLike;
   private readonly publishTimeoutMs: number;
-  private subSockets: WebSocketLike[] = [];
+  private readonly reconnectMs: number;
+  private readonly reconnectMaxMs: number;
+  private readonly pool = new Map<string, PoolEntry>();
+  private readonly health = new Map<string, DmRelayHealth>();
+  private readonly okWaiters = new Map<string, OkWaiter>();
+  private subOwnHex: string | null = null;
+  private subCb: ((e: DmEnvelope) => void) | null = null;
+  private subActive = false;
+  private lastSeenCreatedAtSec: number | null = null;
+  /** Fixed 24h bound for the first subscribe (audit); see sendSubscription. */
+  private subscribeSinceSec: number | null = null;
   /**
    * First-built Nostr event per envelope, keyed by envelope bytes. A retry
    * publishes the identical event (same id, same ephemeral key) instead of
@@ -122,10 +175,199 @@ export class WsDmRelay implements DmRelayPort {
         const WS = (globalThis as unknown as { WebSocket: new (u: string) => WebSocketLike }).WebSocket;
         return new WS(url);
       });
-    this.publishTimeoutMs = opts.publishTimeoutMs ?? 10000;
+    this.publishTimeoutMs = opts.publishTimeoutMs ?? 5000;
+    this.reconnectMs = opts.reconnectMs ?? 1000;
+    this.reconnectMaxMs = opts.reconnectMaxMs ?? 30000;
+    for (const url of this.relays) {
+      this.health.set(url, { url, ok: 0, failed: 0, consecutiveFailures: 0, lastLatencyMs: null });
+    }
   }
 
-  /** Publish to relays in order; true when ANY relay answers OK. */
+  get relayUrls(): string[] {
+    return [...this.relays];
+  }
+
+  /** Per-relay health, best first. A slow relay loses the race; it is not excluded. */
+  relayHealth(): DmRelayHealth[] {
+    return [...this.health.values()]
+      .map(h => ({ ...h }))
+      .sort((a, b) => b.ok - a.ok || (a.lastLatencyMs ?? Infinity) - (b.lastLatencyMs ?? Infinity));
+  }
+
+  private healthOf(url: string): DmRelayHealth {
+    let h = this.health.get(url);
+    if (!h) {
+      h = { url, ok: 0, failed: 0, consecutiveFailures: 0, lastLatencyMs: null };
+      this.health.set(url, h);
+    }
+    return h;
+  }
+
+  private noteOk(url: string, latencyMs: number): void {
+    const h = this.healthOf(url);
+    h.ok += 1;
+    h.consecutiveFailures = 0;
+    h.lastLatencyMs = latencyMs;
+  }
+
+  private noteFailed(url: string): void {
+    const h = this.healthOf(url);
+    h.failed += 1;
+    h.consecutiveFailures += 1;
+  }
+
+  private entryFor(url: string): PoolEntry {
+    let entry = this.pool.get(url);
+    if (!entry) {
+      entry = { ws: null, state: 'closed', openWaiters: new Set(), closeWaiters: new Set(), reconnectAttempts: 0, reconnectTimer: null };
+      this.pool.set(url, entry);
+    }
+    return entry;
+  }
+
+  /** Open (or reuse) the pooled socket for a relay. Idempotent. */
+  private connect(url: string): PoolEntry {
+    const entry = this.entryFor(url);
+    if (entry.state === 'open' || entry.state === 'connecting') return entry;
+    if (entry.reconnectTimer) {
+      clearTimeout(entry.reconnectTimer);
+      entry.reconnectTimer = null;
+    }
+    entry.state = 'connecting';
+    let ws: WebSocketLike;
+    try {
+      ws = this.wsFactory(url);
+    } catch {
+      entry.state = 'closed';
+      this.noteFailed(url);
+      this.scheduleReconnect(url);
+      return entry;
+    }
+    entry.ws = ws;
+    ws.onopen = () => {
+      entry.state = 'open';
+      entry.reconnectAttempts = 0;
+      for (const w of [...entry.openWaiters]) w();
+      entry.openWaiters.clear();
+      if (this.subActive && this.subOwnHex) this.sendSubscription(url);
+    };
+    ws.onmessage = ev => {
+      try {
+        this.handleMessage(url, ev.data);
+      } catch {
+        // Malformed relay frame: ignore, never crash.
+      }
+    };
+    const onGone = () => {
+      if (entry.state === 'closed') return;
+      entry.state = 'closed';
+      entry.ws = null;
+      for (const w of [...entry.closeWaiters]) w();
+      entry.closeWaiters.clear();
+      for (const w of [...entry.openWaiters]) w();
+      entry.openWaiters.clear();
+      this.failWaitersOnRelay(url);
+      if (this.subActive) this.scheduleReconnect(url);
+    };
+    ws.onerror = () => {
+      onGone();
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+    };
+    ws.onclose = () => {
+      onGone();
+    };
+    return entry;
+  }
+
+  private scheduleReconnect(url: string): void {
+    if (!this.subActive) return;
+    const entry = this.entryFor(url);
+    if (entry.reconnectTimer) return;
+    const delay = Math.min(this.reconnectMs * 2 ** entry.reconnectAttempts, this.reconnectMaxMs);
+    entry.reconnectAttempts += 1;
+    entry.reconnectTimer = setTimeout(() => {
+      entry.reconnectTimer = null;
+      if (this.subActive) this.connect(url);
+    }, delay);
+  }
+
+  private sendSubscription(url: string): void {
+    const entry = this.entryFor(url);
+    const ws = entry.ws;
+    if (!ws || entry.state !== 'open' || !this.subOwnHex) return;
+    const filter: Record<string, unknown> = { kinds: [1059], '#p': [this.subOwnHex] };
+    const since = this.lastSeenCreatedAtSec ?? this.subscribeSinceSec;
+    if (since !== null) filter.since = since;
+    try {
+      ws.send(JSON.stringify(['REQ', `dm-${this.subOwnHex.slice(0, 8)}`, filter]));
+    } catch {
+      // Relay reconnect is the transport's job, not this sub's.
+    }
+  }
+
+  private handleMessage(url: string, data: string): void {
+    const parsed = JSON.parse(data) as unknown[];
+    if (parsed[0] === 'OK' && typeof parsed[1] === 'string') {
+      const waiter = this.okWaiters.get(parsed[1]);
+      if (!waiter) return;
+      if (parsed[2] === true) {
+        const sentAt = waiter.sentAtMs.get(url);
+        const latency = sentAt !== undefined ? Date.now() - sentAt : 0;
+        this.noteOk(url, latency);
+        waiter.onOk(url, latency);
+      } else {
+        this.noteFailed(url);
+        waiter.onRelayDone(url);
+      }
+      return;
+    }
+    if (parsed[0] === 'EVENT' && this.subActive && this.subOwnHex && this.subCb) {
+      // Only frames for this subscription id are delivered (audit F12
+      // behaviour kept on the pooled path); EOSE is a backfill signal,
+      // never a gate, and EVENTs are delivered at once.
+      if (parsed[1] !== `dm-${this.subOwnHex.slice(0, 8)}`) return;
+      const envelope = nostrEventToDmEnvelope(parsed[2] as NostrDmEvent);
+      if (envelope && envelope.recipientHex === this.subOwnHex) {
+        if (this.lastSeenCreatedAtSec === null || envelope.createdAt > this.lastSeenCreatedAtSec) {
+          this.lastSeenCreatedAtSec = envelope.createdAt;
+        }
+        this.subCb(envelope);
+      }
+      return;
+    }
+    // EOSE and anything else: no action. EOSE never gates delivery.
+  }
+
+  private failWaitersOnRelay(url: string): void {
+    for (const waiter of [...this.okWaiters.values()]) {
+      if (waiter.sentAtMs.has(url)) waiter.onRelayDone(url);
+    }
+  }
+
+  private waitOpen(entry: PoolEntry): Promise<boolean> {
+    if (entry.state === 'open') return Promise.resolve(true);
+    if (entry.state === 'closed') return Promise.resolve(false);
+    return new Promise(resolve => {
+      const onDone = () => {
+        entry.openWaiters.delete(onDone);
+        entry.closeWaiters.delete(onDone);
+        resolve(entry.state === 'open');
+      };
+      entry.openWaiters.add(onDone);
+      entry.closeWaiters.add(onDone);
+    });
+  }
+
+  /**
+   * Publish in parallel to all relays; true on the FIRST relay OK, false
+   * when every relay has failed/rejected or the deadline expires. Pooled
+   * sockets are reused across sends; a socket that is still connecting
+   * is waited on only until the same deadline.
+   */
   async publish(envelope: DmEnvelope): Promise<boolean> {
     const key = JSON.stringify(envelope);
     let cached = this.eventCache.get(key);
@@ -138,150 +380,112 @@ export class WsDmRelay implements DmRelayPort {
       }
       this.eventCache.set(key, cached);
     }
-    for (const url of this.relays) {
-      try {
-        const ok = await this.publishOne(url, cached.message, cached.id);
-        if (ok) return true;
-      } catch {
-        // Try the next relay.
-      }
-    }
-    return false;
-  }
-
-  private publishOne(url: string, message: string, eventId: string): Promise<boolean> {
-    return new Promise(resolve => {
-      let ws: WebSocketLike;
-      try {
-        ws = this.wsFactory(url);
-      } catch {
-        resolve(false);
-        return;
-      }
-      // First outcome wins: close() fires onclose synchronously on fake
-      // and real sockets alike, so a success close must not let onclose
-      // overwrite the OK, and a timeout close must not double-resolve.
+    const event = { id: cached.id };
+    const message = cached.message;
+    if (this.relays.length === 0) return false;
+    return new Promise<boolean>(resolve => {
       let settled = false;
-      const finish = (value: boolean): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(value);
-      };
-      const closeQuietly = (): void => {
-        try {
-          ws.close();
-        } catch {
-          // ignore
-        }
+      let settledRelays = 0;
+      const doneUrls = new Set<string>();
+      const waiter: OkWaiter = {
+        sentAtMs: new Map(),
+        onOk: () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          this.okWaiters.delete(event.id);
+          resolve(true);
+        },
+        onRelayDone: (url: string) => {
+          if (doneUrls.has(url)) return;
+          doneUrls.add(url);
+          settledRelays += 1;
+          if (!settled && settledRelays >= this.relays.length) {
+            settled = true;
+            clearTimeout(timer);
+            this.okWaiters.delete(event.id);
+            resolve(false);
+          }
+        },
       };
       const timer = setTimeout(() => {
-        closeQuietly();
-        finish(false);
+        if (settled) return;
+        settled = true;
+        this.okWaiters.delete(event.id);
+        resolve(false);
       }, this.publishTimeoutMs);
-      ws.onopen = () => {
-        try {
-          ws.send(message);
-        } catch {
-          closeQuietly();
-          finish(false);
-        }
-      };
-      ws.onmessage = ev => {
-        try {
-          const data = JSON.parse(String(ev.data)) as unknown[];
-          if (data[0] === 'OK' && data[1] === eventId && data[2] === true) {
-            finish(true);
-            closeQuietly();
+      this.okWaiters.set(event.id, waiter);
+      for (const url of this.relays) {
+        void (async () => {
+          const entry = this.connect(url);
+          const open = await this.waitOpen(entry);
+          if (settled) return;
+          if (!open || !entry.ws) {
+            this.noteFailed(url);
+            waiter.onRelayDone(url);
+            return;
           }
-        } catch {
-          // Not an OK frame; keep waiting until timeout.
-        }
-      };
-      ws.onerror = () => {
-        closeQuietly();
-        finish(false);
-      };
-      ws.onclose = () => {
-        // A relay that closes without an OK or an error used to stall
-        // until the full per-attempt timeout; resolve immediately instead.
-        finish(false);
-      };
+          try {
+            entry.ws.send(message);
+            waiter.sentAtMs.set(url, Date.now());
+          } catch {
+            this.noteFailed(url);
+            // A socket that throws on send is broken: close and drop it
+            // so the next publish reconnects instead of reusing it.
+            const broken = entry.ws;
+            entry.ws = null;
+            entry.state = 'closed';
+            try {
+              broken?.close();
+            } catch {
+              // ignore
+            }
+            waiter.onRelayDone(url);
+          }
+        })();
+      }
     });
   }
 
-  /** Open one subscription per relay for kind-1059 events addressed to ownHex. */
+  /**
+   * Open one pooled subscription per relay for kind-1059 events addressed
+   * to ownHex, held across drops: a dropped socket reconnects with
+   * backoff and re-sends its REQ with a since backfill. The returned
+   * function stops the subscription and closes the pooled sockets.
+   */
   subscribe(ownMeshHex: string, onEnvelope: (e: DmEnvelope) => void): () => void {
-    // Bounded replay: the last 24h, not the relay's full stored history
-    // for this recipient on every fresh subscribe. No limit is set: a
-    // limit could silently truncate the newest events without an
-    // ordering guarantee from the relay.
-    const filter = JSON.stringify({
-      kinds: [1059],
-      '#p': [ownMeshHex],
-      since: Math.floor(Date.now() / 1000) - 86400,
-    });
-    const subId = `dm-${ownMeshHex.slice(0, 8)}`;
-    // Set by unsubscribe: stops all reconnect retries for this subscription.
-    let closed = false;
-    const sockets: WebSocketLike[] = [];
-    const openSocket = (url: string): void => {
-      let ws: WebSocketLike;
-      try {
-        ws = this.wsFactory(url);
-      } catch {
-        // Relay unreachable: other relays still subscribe.
-        return;
-      }
-      sockets.push(ws);
-      let reconnectScheduled = false;
-      const scheduleReconnect = (): void => {
-        // Error and close often fire for the same drop; schedule once per
-        // socket so a drop reopens exactly one replacement socket.
-        if (closed || reconnectScheduled) return;
-        reconnectScheduled = true;
-        setTimeout(() => {
-          if (closed) return;
-          openSocket(url);
-        }, 2000);
-      };
-      ws.onopen = () => {
-        try {
-          ws.send(JSON.stringify(['REQ', subId, JSON.parse(filter)]));
-        } catch {
-          // ignore; a drop here surfaces via onerror/onclose and reconnects
-        }
-      };
-      ws.onmessage = ev => {
-        try {
-          const data = JSON.parse(String(ev.data)) as unknown[];
-          if (data[0] === 'EVENT' && data[1] === subId && data[2]) {
-            const envelope = nostrEventToDmEnvelope(data[2] as NostrDmEvent);
-            if (envelope && envelope.recipientHex === ownMeshHex) onEnvelope(envelope);
-          }
-        } catch {
-          // Malformed relay frame: ignore, never crash.
-        }
-      };
-      ws.onerror = () => {
-        scheduleReconnect();
-      };
-      ws.onclose = () => {
-        scheduleReconnect();
-      };
-    };
-    for (const url of this.relays) openSocket(url);
-    this.subSockets = sockets;
+    this.subOwnHex = ownMeshHex;
+    this.subCb = onEnvelope;
+    this.subActive = true;
+    // Bounded replay (audit): the last 24h, not the relay's full stored
+    // history on every fresh subscribe. This bound is fixed at subscribe
+    // time so a reconnect re-sends the same REQ; once an envelope is
+    // seen, reconnects use the last-seen backfill instead (R5).
+    this.lastSeenCreatedAtSec = null;
+    this.subscribeSinceSec = Math.floor(Date.now() / 1000) - 86400;
+    for (const url of this.relays) this.connect(url);
     return () => {
-      closed = true;
-      for (const ws of sockets) {
-        try {
-          ws.close();
-        } catch {
-          // ignore
+      this.subActive = false;
+      this.subOwnHex = null;
+      this.subCb = null;
+      this.lastSeenCreatedAtSec = null;
+      this.subscribeSinceSec = null;
+      for (const entry of this.pool.values()) {
+        if (entry.reconnectTimer) {
+          clearTimeout(entry.reconnectTimer);
+          entry.reconnectTimer = null;
+        }
+        const ws = entry.ws;
+        entry.ws = null;
+        entry.state = 'closed';
+        if (ws) {
+          try {
+            ws.close();
+          } catch {
+            // ignore
+          }
         }
       }
-      this.subSockets = this.subSockets.filter(s => !sockets.includes(s));
     };
   }
 }

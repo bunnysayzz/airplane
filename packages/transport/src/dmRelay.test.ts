@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // WsDmRelay tests: subscription reconnect, publish socket close/error paths,
-// custom relay lists, bounded subscribe filters.
+// custom relay lists, bounded subscribe filters, plus the R5 pooled fast
+// path (parallel publish, pooled sockets, live resubscribe/backfill).
 // Relays are fully mocked; no network touches this file.
 
 import { ed25519 } from '@noble/curves/ed25519.js';
@@ -42,6 +43,10 @@ class FakeSocket implements WebSocketLike {
 
   receive(msg: unknown[]): void {
     if (this.onmessage) this.onmessage({ data: JSON.stringify(msg) });
+  }
+
+  eventsSent(): unknown[][] {
+    return this.sent.map(s => JSON.parse(s) as unknown[]);
   }
 
   fail(): void {
@@ -201,17 +206,21 @@ describe('WsDmRelay.publish socket paths (P1-11)', () => {
     expect(sockets[0].closed).toBe(true);
   });
 
-  test('sequential first-OK-wins order is unchanged: an OK still resolves true', async () => {
+  test('first-OK-wins: an OK still resolves true, and the pooled socket stays open for reuse', async () => {
     const sockets: FakeSocket[] = [];
     const relay = makeRelay(sockets);
     const envelope = sealDm('ok me', 'd'.repeat(64), 'e'.repeat(64));
     const result = relay.publish(envelope);
     sockets[0].open();
+    // Pooled publish sends on a microtask after open (waitOpen), so wait
+    // a tick before reading the sent frame.
+    await new Promise(r => setTimeout(r, 0));
     const sent = JSON.parse(sockets[0].sent[0]) as unknown[];
     const event = sent[1] as { id: string };
     sockets[0].receive(['OK', event.id, true]);
     await expect(result).resolves.toBe(true);
-    expect(sockets[0].closed).toBe(true);
+    // R5 pooled sockets are held across sends, not closed per publish.
+    expect(sockets[0].closed).toBe(false);
   });
 });
 
@@ -222,15 +231,19 @@ describe('WsDmRelay.publish event reuse on retry (F14-retry)', () => {
     const envelope = sealDm('retry me', 'd'.repeat(64), 'e'.repeat(64));
     const first = relay.publish(envelope);
     sockets[0].open();
+    await new Promise(r => setTimeout(r, 0));
     const firstEvent = JSON.parse(sockets[0].sent[0]) as unknown[];
     const firstId = (firstEvent[1] as { id: string }).id;
     sockets[0].receive(['OK', firstId, true]);
     await expect(first).resolves.toBe(true);
+    // R5 pooled path: the second publish reuses the SAME socket, and the
+    // cached event keeps the same id.
     const second = relay.publish(envelope);
-    sockets[1].open();
-    const secondEvent = JSON.parse(sockets[1].sent[0]) as unknown[];
+    await new Promise(r => setTimeout(r, 0));
+    expect(sockets).toHaveLength(1);
+    const secondEvent = JSON.parse(sockets[0].sent[1]) as unknown[];
     expect((secondEvent[1] as { id: string }).id).toBe(firstId);
-    sockets[1].receive(['OK', firstId, true]);
+    sockets[0].receive(['OK', firstId, true]);
     await expect(second).resolves.toBe(true);
   });
 });
@@ -293,5 +306,128 @@ describe('nostrEventToDmEnvelope event id carry (P1-06)', () => {
     const event = dmEnvelopeToNostrEvent(envelope);
     const parsed = nostrEventToDmEnvelope(event);
     expect(parsed?.relayEventId).toBe(event.id);
+  });
+});
+
+const tick = (ms = 10) => new Promise<void>(r => setTimeout(r, ms));
+
+function makePooledRelay(opts?: { publishTimeoutMs?: number; reconnectMs?: number }) {
+  const sockets = new Map<string, FakeSocket[]>();
+  const relay = new WsDmRelay({
+    relays: ['wss://fast.relay', 'wss://slow.relay'],
+    wsFactory: url => {
+      const s = new FakeSocket(url);
+      const list = sockets.get(url) ?? [];
+      list.push(s);
+      sockets.set(url, list);
+      return s;
+    },
+    publishTimeoutMs: opts?.publishTimeoutMs ?? 200,
+    reconnectMs: opts?.reconnectMs ?? 10,
+    reconnectMaxMs: 50,
+  });
+  const socketFor = (url: string, index = 0) => sockets.get(url)?.[index];
+  const openAll = () => {
+    for (const list of sockets.values()) for (const s of list) s.open();
+  };
+  return { relay, sockets, socketFor, openAll };
+}
+const envelope = (): DmEnvelope => sealDm('hello r5', 'a'.repeat(64), 'b'.repeat(64), 1700000000);
+
+describe('WsDmRelay pooled fast path', () => {
+  test('parallel publish: first OK wins, slow relay never delays it', async () => {
+    const { relay, socketFor, openAll } = makePooledRelay();
+    const pending = relay.publish(envelope());
+    await tick();
+    openAll();
+    await tick();
+    expect(socketFor('wss://fast.relay')?.eventsSent().filter(m => m[0] === 'EVENT')).toHaveLength(1);
+    expect(socketFor('wss://slow.relay')?.eventsSent().filter(m => m[0] === 'EVENT')).toHaveLength(1);
+    const eventId = (socketFor('wss://fast.relay')?.eventsSent().find(m => m[0] === 'EVENT')?.[1] as { id: string }).id;
+    socketFor('wss://fast.relay')?.receive(['OK', eventId, true, '']);
+    await expect(pending).resolves.toBe(true);
+    expect(relay.relayHealth().find(h => h.url === 'wss://fast.relay')?.ok).toBe(1);
+  });
+
+  test('pooled sockets are reused across sends (no fresh socket per DM)', async () => {
+    const { relay, sockets, openAll } = makePooledRelay();
+    const first = relay.publish(envelope());
+    await tick();
+    openAll();
+    await tick();
+    const eventId = (sockets.get('wss://fast.relay')?.[0].eventsSent().find(m => m[0] === 'EVENT')?.[1] as { id: string }).id;
+    sockets.get('wss://fast.relay')?.[0].receive(['OK', eventId, true, '']);
+    await expect(first).resolves.toBe(true);
+    const second = relay.publish(envelope());
+    await tick();
+    expect(sockets.get('wss://fast.relay')).toHaveLength(1);
+    expect(sockets.get('wss://slow.relay')).toHaveLength(1);
+    expect(sockets.get('wss://fast.relay')?.[0].eventsSent().filter(m => m[0] === 'EVENT')).toHaveLength(2);
+    await tick(250);
+    await expect(second).resolves.toBe(false);
+  });
+
+  test('deadline expiry resolves false when no relay answers', async () => {
+    const { relay, openAll } = makePooledRelay({ publishTimeoutMs: 50 });
+    const pending = relay.publish(envelope());
+    await tick();
+    openAll();
+    await expect(pending).resolves.toBe(false);
+  });
+
+  test('all relays rejecting resolves false without waiting for the deadline', async () => {
+    const { relay, socketFor, openAll } = makePooledRelay({ publishTimeoutMs: 5000 });
+    const pending = relay.publish(envelope());
+    await tick();
+    openAll();
+    await tick();
+    const fast = socketFor('wss://fast.relay');
+    const slow = socketFor('wss://slow.relay');
+    const eventId = (fast?.eventsSent().find(m => m[0] === 'EVENT')?.[1] as { id: string }).id;
+    fast?.receive(['OK', eventId, false, 'rejected']);
+    slow?.receive(['OK', eventId, false, 'rejected']);
+    await expect(pending).resolves.toBe(false);
+  });
+
+  test('EVENT before EOSE is delivered at once; EOSE never gates it', async () => {
+    const { relay, socketFor, openAll } = makePooledRelay();
+    const seen: DmEnvelope[] = [];
+    const ownHex = 'b'.repeat(64);
+    relay.subscribe(ownHex, e => seen.push(e));
+    await tick();
+    openAll();
+    await tick();
+    const fast = socketFor('wss://fast.relay');
+    expect(fast?.eventsSent().filter(m => m[0] === 'REQ')).toHaveLength(1);
+    const event = dmEnvelopeToNostrEvent(sealDm('before eose', 'a'.repeat(64), ownHex, 1700000100));
+    fast?.receive(['EVENT', 'dm-bbbbbbbb', event]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].sealed).toBeDefined();
+    fast?.receive(['EOSE', 'dm-bbbbbbbb']);
+    expect(seen).toHaveLength(1);
+  });
+
+  test('dropped subscription socket reconnects and backfills with since', async () => {
+    const { relay, sockets, socketFor, openAll } = makePooledRelay({ reconnectMs: 10 });
+    const seen: DmEnvelope[] = [];
+    const ownHex = 'b'.repeat(64);
+    const unsub = relay.subscribe(ownHex, e => seen.push(e));
+    await tick();
+    openAll();
+    await tick();
+    const fast = socketFor('wss://fast.relay');
+    const event = dmEnvelopeToNostrEvent(sealDm('first', 'a'.repeat(64), ownHex, 1700000200));
+    fast?.receive(['EVENT', 'dm-bbbbbbbb', event]);
+    expect(seen).toHaveLength(1);
+    fast?.close();
+    await tick(100);
+    const reconnected = sockets.get('wss://fast.relay')?.[1];
+    expect(reconnected).toBeDefined();
+    reconnected?.open();
+    await tick();
+    const reqs = reconnected?.eventsSent().filter(m => m[0] === 'REQ') ?? [];
+    expect(reqs).toHaveLength(1);
+    expect((reqs[0][2] as Record<string, unknown>).since).toBe(1700000200);
+    unsub();
   });
 });
