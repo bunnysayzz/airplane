@@ -440,6 +440,26 @@ export const en = {
     identityHint: 'Opens identity settings',
     diagnosticsTitle: 'Diagnostics',
     diagnosticsHint: 'Opens transport diagnostics',
+    backgroundTitle: 'Background and battery',
+    backgroundHint: 'Opens background delivery settings',
+    backgroundLead:
+      'Android can stop Airplane in the background to save battery. When that happens, a locked phone may miss mesh posts until it is opened again.',
+    backgroundNoService:
+      'This version has no permanent background service, so delivery to a locked phone over Bluetooth is not guaranteed yet. That part still needs a two-phone test.',
+    backgroundOnReturn:
+      'When you reopen the app, it rechecks the radio and syncs with relays, so posts that reached a relay while you were away show up then.',
+    backgroundOem: 'Keep the app running in the background',
+    backgroundSamsung:
+      'Samsung: Settings, Apps, Airplane, Battery, then choose Unrestricted.',
+    backgroundXiaomi:
+      'Xiaomi: enable Autostart for Airplane, then set Battery saver to No restrictions.',
+    backgroundOnePlus:
+      'OnePlus: Settings, Apps, Airplane, Battery, then allow background activity.',
+    backgroundPixel:
+      'Pixel: Settings, Apps, Airplane, Battery, then choose Unrestricted.',
+    backgroundOpenSettings: 'Open app settings',
+    backgroundOpenSettingsNote:
+      'This opens the system app info page. From there, open Battery and pick the unrestricted option for your phone.',
     diagnosticsLead:
       'Live radio and transport state from this phone. Values come from the BLE stack and the transport, never from samples.',
     diagnosticsRefresh: 'Refresh',

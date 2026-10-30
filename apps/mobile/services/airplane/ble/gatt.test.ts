@@ -500,6 +500,20 @@ describe('send/receive over the central role', () => {
     expect(port.frameSizeFor(PEER_HEX)).toBe(469);
     expect(port.frameSizeFor('nobody')).toBe(469);
   });
+
+  test('frameSizeFor follows the negotiated MTU on a default-MTU link (R6)', async () => {
+    const { deps, central } = makeDeps();
+    central.mtu = ATT_DEFAULT_MTU; // negotiation fails to improve on 23
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    // 23 minus 3 bytes ATT overhead: a 2 KB post fragments into small
+    // frames here instead of 469-byte frames the port must re-chop.
+    expect(port.frameSizeFor(PEER_HEX)).toBe(20);
+    expect(port.frameSizeFor('nobody')).toBe(469);
+  });
 });
 
 describe('peripheral role: inbound writes + notify send', () => {

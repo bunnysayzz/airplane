@@ -14,6 +14,7 @@ import Appearance from './appearance';
 import Relays from './relays';
 import Identity from './identity';
 import Diagnostics from './diagnostics';
+import Background from './background';
 import { SettingsHeader } from './header';
 import { makeStyles } from './styles';
 import { useI18n } from '../../src/i18n/i18nContext';
@@ -41,7 +42,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   // Appearance, Relays, Identity, Diagnostics and the privacy explainer
   // are second levels inside Settings
   const [page, setPage] = useState<
-    'main' | 'appearance' | 'relays' | 'identity' | 'diagnostics' | 'privacy'
+    'main' | 'appearance' | 'relays' | 'identity' | 'diagnostics' | 'background' | 'privacy'
   >('main');
   const { t } = useI18n();
   const coatName = t(`coats.${getCoat(coat).key}`);
@@ -113,6 +114,14 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     return (
       <SafeAreaView style={styles.safeArea}>
         <Diagnostics onBack={() => setPage('main')} />
+      </SafeAreaView>
+    );
+  }
+
+  if (page === 'background') {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <Background onBack={() => setPage('main')} />
       </SafeAreaView>
     );
   }
@@ -219,6 +228,18 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           >
             <Ionicons name="pulse-outline" size={20} color={colors.accentText} />
             <Text style={[labelStyle, styles.rowText]}>{t('settings.diagnosticsTitle')}</Text>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+          </Pressable>
+          <View style={styles.divider} />
+          <Pressable
+            style={styles.row}
+            onPress={() => setPage('background')}
+            accessibilityRole="button"
+            accessibilityLabel={t('settings.backgroundTitle')}
+            accessibilityHint={t('settings.backgroundHint')}
+          >
+            <Ionicons name="moon-outline" size={20} color={colors.accentText} />
+            <Text style={[labelStyle, styles.rowText]}>{t('settings.backgroundTitle')}</Text>
             <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
           </Pressable>
           <View style={styles.divider} />

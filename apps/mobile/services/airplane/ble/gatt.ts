@@ -52,7 +52,7 @@
 //   the peripheral half is the highest-risk dependency in this file.
 
 import type { PeerInfo, TransportPort } from '@airplane/protocol';
-import { FRAG_WIRE_MAX, fromHex, toHex } from '@airplane/protocol';
+import { FRAG_HEADER_LEN, FRAG_WIRE_MAX, fromHex, toHex } from '@airplane/protocol';
 import {
   recordAdvertiseFailure,
   recordAdvertiseStopped,
@@ -787,11 +787,26 @@ export class GattBlePort implements TransportPort {
     recordPacketSent(peerId);
   }
 
-  /** Max bytes send() accepts for this peer: the protocol wire-frame max. */
-  frameSizeFor(_peerId: string): number {
-    // The port chunks datagrams to the link MTU itself, so the protocol
-    // frame size stays at the wire-spec maximum on every link.
-    return FRAG_WIRE_MAX;
+  /**
+   * Max bytes send() accepts for this peer (R6, plan section 6 fix 5:
+   * fragment at the smaller of the wire-spec max or the negotiated link
+   * MTU minus ATT overhead). The spec cap (469) binds below the plan's
+   * 500-byte figure, so a 512-MTU link still gets 469-byte frames, while
+   * a default 23-byte MTU link gets 20-byte frames instead of 469-byte
+   * frames that the port then has to chop into ~24 ATT writes. An
+   * unknown peer (no negotiated MTU yet) falls back to the spec cap;
+   * the port still chunks datagrams to mtu minus 3 on send, so a frame
+   * larger than the link MTU is never a wire error, only less efficient.
+   * A failed MTU negotiation already leaves the connection at the
+   * default 23, so "assume 23 until negotiation proves otherwise" holds.
+   */
+  frameSizeFor(peerId: string): number {
+    const conn = this.conns.get(peerId);
+    if (!conn) return FRAG_WIRE_MAX;
+    return Math.max(
+      Math.min(FRAG_WIRE_MAX, conn.mtu - ATT_OVERHEAD),
+      FRAG_HEADER_LEN + 1,
+    );
   }
 
   // ------------------------------------------------------------------ receive
