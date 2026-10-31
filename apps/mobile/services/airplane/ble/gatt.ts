@@ -69,6 +69,7 @@ import {
   recordPeerResolved,
   recordPeerSeen,
   recordScanFailure,
+  recordScanSightings,
   recordScanStarted,
   recordScanStopped,
 } from '../diagnostics';
@@ -514,6 +515,18 @@ export class GattBlePort implements TransportPort {
               }
             }
           });
+        }
+      }
+      // Adapter pre-check (mesh-scan fix): the native scan call never
+      // calls back when the adapter is not enabled at scan time, so a
+      // scan issued then hangs until the 10s timeout and tears the
+      // radio down. Check first and fail fast with a clear stage
+      // instead of hanging. A null or unknown state means the check
+      // is unavailable, so proceed to the scan as before.
+      if (central.checkState) {
+        const adapterState = await central.checkState().catch(() => null);
+        if (typeof adapterState === 'string' && adapterState !== 'on') {
+          throw new Error('ble: adapter not on, scan skipped');
         }
       }
       await withBleTimeout(central.scan(), BLE_TIMEOUT_MS.scan, 'central scan');
@@ -1036,6 +1049,76 @@ function loadCentralAdapter(): CentralAdapter | null {
     if (!mgr || typeof mgr.start !== 'function') return null;
     if (!rn?.NativeModules || typeof rn.NativeEventEmitter !== 'function') return null;
     const emitter = new rn.NativeEventEmitter(rn.NativeModules.BleManager);
+    // Scan sighting instrumentation (mesh-scan fix): every discover
+    // event is counted, mesh-tagged or not, so the next device run can
+    // tell "scanner delivered nothing" apart from "scanner delivered
+    // packets but no mesh tag". Counts and company ids only, never
+    // device ids, names, or RSSI. Flushed as one diagnostics line per
+    // 60s window while sightings arrive.
+    let sightTotal = 0;
+    let sightMesh = 0;
+    let sightNonMesh = 0;
+    const sightMd = new Map<string, number>();
+    let sightWindowStartMs = 0;
+    const SIGHTING_WINDOW_MS = 60_000;
+    function manufacturerSummary(p: unknown): string[] {
+      try {
+        const md = (p as { advertising?: { manufacturerData?: Record<string, { bytes?: unknown; data?: unknown }> } })?.advertising
+          ?.manufacturerData;
+        if (!md || typeof md !== 'object') return [];
+        return Object.entries(md)
+          .slice(0, 5)
+          .map(([key, entry]) => {
+            let len = -1;
+            if (Array.isArray((entry as { bytes?: unknown })?.bytes)) len = ((entry as { bytes: unknown[] }).bytes).length;
+            else if (typeof (entry as { data?: unknown })?.data === 'string') {
+              try {
+                len = Buffer.from((entry as { data: string }).data, 'base64').length;
+              } catch {
+                len = -1;
+              }
+            }
+            return `${key}:${len}`;
+          });
+      } catch {
+        return [];
+      }
+    }
+    function noteSighting(p: unknown, tag: Uint8Array | null): void {
+      sightTotal++;
+      if (tag) sightMesh++;
+      else {
+        sightNonMesh++;
+        for (const s of manufacturerSummary(p)) sightMd.set(s, (sightMd.get(s) ?? 0) + 1);
+      }
+      const now = Date.now();
+      if (sightWindowStartMs === 0) {
+        sightWindowStartMs = now;
+        return;
+      }
+      if (now - sightWindowStartMs >= SIGHTING_WINDOW_MS && sightTotal > 0) {
+        recordScanSightings(
+          sightTotal,
+          sightMesh,
+          sightNonMesh,
+          [...sightMd.entries()].map(([k, c]) => `${k}x${c}`).join(','),
+        );
+        sightTotal = 0;
+        sightMesh = 0;
+        sightNonMesh = 0;
+        sightMd.clear();
+        sightWindowStartMs = now;
+      }
+    }
+    function mapDiscover(p: unknown): { id: string; rssi: number; tag: Uint8Array | null } {
+      const tag = extractTag(p);
+      noteSighting(p, tag);
+      return {
+        id: String((p as { id?: unknown })?.id ?? ''),
+        rssi: typeof (p as { rssi?: unknown })?.rssi === 'number' ? ((p as { rssi: number }).rssi as number) : 0,
+        tag,
+      };
+    }
     return {
       start: () => mgr.start({ showAlert: false }),
       // Scan audit (ble-manager 12.6.0): scan takes ONE options object,
@@ -1056,13 +1139,30 @@ function loadCentralAdapter(): CentralAdapter | null {
       scan: () => mgr.scan({ serviceUUIDs: [], seconds: 0, allowDuplicates: false, scanMode: 2 }),
       stopScan: () => mgr.stopScan(),
       onDiscover: (cb) => {
-        const sub = emitter.addListener('BleManagerDiscoverPeripheral', (p: unknown) =>
-          cb({
-            id: String((p as { id?: unknown })?.id ?? ''),
-            rssi: typeof (p as { rssi?: unknown })?.rssi === 'number' ? ((p as { rssi: number }).rssi as number) : 0,
-            tag: extractTag(p),
-          }),
-        );
+        // ble-manager 12.6.0 supports only the new architecture
+        // (README: "RN 0.76+ only the new architecture is supported"),
+        // so its discover events flow through the codegen event
+        // emitter (mgr.onDiscoverPeripheral), not through the legacy
+        // NativeEventEmitter. The legacy subscription silently
+        // received nothing on new-arch builds, which is why scanning
+        // stayed up for minutes with zero peers on every device even
+        // while other phones advertised. Prefer the codegen method;
+        // keep the legacy emitter only as a fallback for older
+        // library shapes.
+        const mgrAny = mgr as unknown as {
+          onDiscoverPeripheral?: (cb: (p: unknown) => void) => { remove: () => void };
+        };
+        if (typeof mgrAny.onDiscoverPeripheral === 'function') {
+          const sub = mgrAny.onDiscoverPeripheral((p: unknown) => cb(mapDiscover(p)));
+          return () => {
+            try {
+              sub.remove();
+            } catch {
+              // ignore
+            }
+          };
+        }
+        const sub = emitter.addListener('BleManagerDiscoverPeripheral', (p: unknown) => cb(mapDiscover(p)));
         return () => sub.remove();
       },
       connect: (id) => mgr.connect(id),
@@ -1081,19 +1181,55 @@ function loadCentralAdapter(): CentralAdapter | null {
         mgr.writeWithoutResponse(id, serviceUuid, charUuid, Array.from(chunk), chunk.length, 10),
       startNotification: (id, serviceUuid, charUuid) => mgr.startNotification(id, serviceUuid, charUuid),
       onNotification: (cb) => {
-        const sub = emitter.addListener('BleManagerDidUpdateValueForCharacteristic', (e: unknown) => {
-          const ev = e as { peripheral?: unknown; value?: unknown };
-          const raw = ev?.value;
+        // Same new-architecture rule as onDiscover above: prefer the
+        // codegen event method, legacy emitter only as a fallback.
+        const mgrAny = mgr as unknown as {
+          onDidUpdateValueForCharacteristic?: (cb: (e: { peripheral?: unknown; value?: unknown }) => void) => {
+            remove: () => void;
+          };
+        };
+        const mapNotify = (e: { peripheral?: unknown; value?: unknown }): void => {
+          const raw = e?.value;
           let bytes: Uint8Array | null = null;
           if (Array.isArray(raw)) bytes = new Uint8Array(raw as number[]);
           else if (typeof raw === 'string') {
             bytes = base64ToBytes(raw);
           }
-          if (bytes) cb({ id: String(ev?.peripheral ?? ''), value: bytes });
+          if (bytes) cb({ id: String(e?.peripheral ?? ''), value: bytes });
+        };
+        if (typeof mgrAny.onDidUpdateValueForCharacteristic === 'function') {
+          const sub = mgrAny.onDidUpdateValueForCharacteristic((e) => mapNotify(e));
+          return () => {
+            try {
+              sub.remove();
+            } catch {
+              // ignore
+            }
+          };
+        }
+        const sub = emitter.addListener('BleManagerDidUpdateValueForCharacteristic', (e: unknown) => {
+          mapNotify(e as { peripheral?: unknown; value?: unknown });
         });
         return () => sub.remove();
       },
       onDisconnect: (cb) => {
+        // Same new-architecture rule as onDiscover above: prefer the
+        // codegen event method, legacy emitter only as a fallback.
+        const mgrAny = mgr as unknown as {
+          onDisconnectPeripheral?: (cb: (e: { peripheral?: unknown }) => void) => { remove: () => void };
+        };
+        if (typeof mgrAny.onDisconnectPeripheral === 'function') {
+          const sub = mgrAny.onDisconnectPeripheral((e) => {
+            if (e?.peripheral) cb(String(e.peripheral));
+          });
+          return () => {
+            try {
+              sub.remove();
+            } catch {
+              // ignore
+            }
+          };
+        }
         const sub = emitter.addListener('BleManagerDisconnectPeripheral', (e: unknown) => {
           const periph = (e as { peripheral?: unknown })?.peripheral;
           if (periph) cb(String(periph));
