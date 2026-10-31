@@ -23,8 +23,9 @@ class MainApplication : Application(), ReactApplication {
         object : DefaultReactNativeHost(this) {
           override fun getPackages(): List<ReactPackage> {
             val packages = PackageList(this).packages
-            // Packages that cannot be autolinked yet can be added manually here, for example:
-            // packages.add(MyReactNativePackage())
+            // T4: the foreground-relay service is app code, not an
+            // autolinked library, so it is registered manually here.
+            packages.add(AirplaneForegroundServicePackage())
             return packages
           }
 

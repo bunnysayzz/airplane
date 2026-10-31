@@ -18,6 +18,12 @@
   <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
   <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+  <!-- T4 background relay: foreground service (connectedDevice type, plan
+       fix 6). Declared here because android/ is committed and CI builds
+       it directly (no prebuild); keep in sync with the
+       android.permissions array in app.json for future prebuilds. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
   <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
   <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
   <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"/>
@@ -33,6 +39,11 @@
     <meta-data android:name="expo.modules.updates.ENABLED" android:value="false"/>
     <meta-data android:name="expo.modules.updates.EXPO_UPDATES_CHECK_ON_LAUNCH" android:value="ALWAYS"/>
     <meta-data android:name="expo.modules.updates.EXPO_UPDATES_LAUNCH_WAIT_MS" android:value="0"/>
+    <!-- T4: keep-alive foreground service for background relay. Not
+         exported: only this app (JS bridge + its own Stop action) starts
+         or stops it. The service runs no BLE or relay code itself; it
+         keeps the JS hybrid transport alive while backgrounded. -->
+    <service android:name=".AirplaneForegroundService" android:foregroundServiceType="connectedDevice" android:exported="false"/>
     <activity android:name=".MainActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode" android:launchMode="singleTask" android:windowSoftInputMode="adjustResize" android:theme="@style/Theme.App.SplashScreen" android:exported="true">
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>

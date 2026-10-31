@@ -1,6 +1,10 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { getSetting, saveSetting } from './storage';
 import {
+  startForegroundRelay,
+  stopForegroundRelay,
+} from '../../services/airplane/foregroundService';
+import {
     DEFAULT_RELAYS,
     addRelayUrl,
     loadStoredRelays,
@@ -14,6 +18,13 @@ import {
 interface SettingsContextType {
     compactMode: boolean;
     setCompactMode: (value: boolean) => Promise<void>;
+    /** T4: background-relay preference (default OFF). False on iOS and on
+     * builds without the native service: the toggle reports failure
+     * instead of pretending the service started. */
+    foregroundRelayEnabled: boolean;
+    /** Persist first, then start/stop the service; returns false when
+     * the service could not start, in which case the toggle stays off. */
+    setForegroundRelayEnabled: (value: boolean) => Promise<boolean>;
     /** Effective relay list: the custom list, or DEFAULT_RELAYS when uncustomized. */
     relays: string[];
     /** True once the user has saved any custom list (including an empty one). */
@@ -30,9 +41,11 @@ interface SettingsContextType {
 const SettingsContext = createContext<SettingsContextType | undefined>(undefined);
 
 export const COMPACT_KEY = 'airplane_settings_compact';
+export const FOREGROUND_RELAY_KEY = 'airplane_settings_foreground_relay';
 
 export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [compactMode, setCompactModeState] = useState(false);
+    const [foregroundRelayEnabled, setForegroundRelayEnabledState] = useState(false);
     const [relays, setRelaysState] = useState<string[]>([...DEFAULT_RELAYS]);
     const [relaysCustomized, setRelaysCustomized] = useState(false);
     const [loadingSettings, setLoadingSettings] = useState(true);
@@ -42,6 +55,19 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             try {
                 const compact = await getSetting(COMPACT_KEY, false);
                 setCompactModeState(compact);
+                // T4 restore: a saved ON preference re-starts the service
+                // on launch (a foreground service does not survive a
+                // process kill by design: START_NOT_STICKY, see the
+                // Kotlin service). A failed restore leaves the toggle
+                // off rather than claiming a running service.
+                const relayOn = await getSetting(FOREGROUND_RELAY_KEY, false);
+                if (relayOn) {
+                    const started = await startForegroundRelay().catch(() => false);
+                    setForegroundRelayEnabledState(started);
+                    if (!started) {
+                        await saveSetting(FOREGROUND_RELAY_KEY, false).catch(() => {});
+                    }
+                }
                 const stored = await loadStoredRelays();
                 if (stored !== null) {
                     setRelaysState(stored);
@@ -65,6 +91,27 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             return;
         }
         setCompactModeState(value);
+    };
+
+    const setForegroundRelayEnabled = async (value: boolean): Promise<boolean> => {
+        try {
+            await saveSetting(FOREGROUND_RELAY_KEY, value);
+        } catch {
+            return false;
+        }
+        if (value) {
+            const started = await startForegroundRelay().catch(() => false);
+            setForegroundRelayEnabledState(started);
+            if (!started) {
+                // The toggle must not claim ON for a service that is
+                // not running (iOS, Expo Go, missing native module).
+                await saveSetting(FOREGROUND_RELAY_KEY, false).catch(() => {});
+            }
+            return started;
+        }
+        await stopForegroundRelay().catch(() => {});
+        setForegroundRelayEnabledState(false);
+        return true;
     };
 
     // The transport reads the same persisted list at launch (see
@@ -116,6 +163,8 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             value={{
                 compactMode,
                 setCompactMode,
+                foregroundRelayEnabled,
+                setForegroundRelayEnabled,
                 relays,
                 relaysCustomized,
                 addRelay,

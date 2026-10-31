@@ -23,6 +23,11 @@ import {
   shareDiagnosticsLogFile,
 } from '../../services/airplane/diagnosticsLogExpo';
 import { retryBleRadio } from '../../services/airplane/transport';
+import {
+  getForegroundRelayState,
+  syncForegroundRelayState,
+  type ForegroundRelayState,
+} from '../../services/airplane/foregroundService';
 
 interface DiagnosticsProps {
   onBack: () => void;
@@ -38,6 +43,9 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
   const insets = useSafeAreaInsets();
   const { t } = useI18n();
   const [snapshot, setSnapshot] = useState<DiagnosticsSnapshot>(() => getDiagnosticsSnapshot());
+  const [foregroundState, setForegroundState] = useState<ForegroundRelayState>(() =>
+    getForegroundRelayState(),
+  );
   const [logStatus, setLogStatus] = useState(() => getDiagnosticsLogStatus());
   const [shareFailed, setShareFailed] = useState<boolean>(false);
   const [shareError, setShareError] = useState<string | null>(null);
@@ -71,6 +79,10 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
     const timer = setInterval(() => {
       setSnapshot(getDiagnosticsSnapshot());
       setLogStatus(getDiagnosticsLogStatus());
+      // T4: reconciles the JS state with the native service flag, so a
+      // service stopped from its own notification (or killed by the OS)
+      // shows as off here instead of stale-running.
+      void syncForegroundRelayState().then(setForegroundState);
     }, 5000);
     return () => {
       unsub();
@@ -82,6 +94,7 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
     useCallback(() => {
       setSnapshot(getDiagnosticsSnapshot());
       setLogStatus(getDiagnosticsLogStatus());
+      void syncForegroundRelayState().then(setForegroundState);
     }, []),
   );
 
@@ -304,6 +317,22 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
             {shareError !== null ? `: ${shareError}` : ''}
           </Text>
         )}
+
+        {/* T4: background-relay service state. The state comes from the
+            JS lifecycle module reconciled against the native flag, never
+            from the toggle preference alone, so a service stopped from
+            its notification shows as off here. */}
+        <SectionLabel style={styles.sectionLabel}>{t('settings.diagnosticsForegroundRelay')}</SectionLabel>
+        <Card style={styles.group}>
+          <Text style={[type.body, styles.kvValue]}>
+            {foregroundState === 'running'
+              ? t('settings.diagnosticsForegroundRunning')
+              : foregroundState === 'unavailable'
+                ? t('settings.diagnosticsForegroundUnavailable')
+                : t('settings.diagnosticsForegroundStopped')}
+          </Text>
+          <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsForegroundNote')}</Text>
+        </Card>
 
         <SectionLabel style={styles.sectionLabel}>{t('settings.diagnosticsRadio')}</SectionLabel>
         <Card style={styles.group}>

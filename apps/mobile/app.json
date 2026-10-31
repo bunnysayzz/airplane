@@ -35,12 +35,16 @@
       // FileProvider + install-intent wiring is still pending device
       // verification (see src/lib/updateCheck.ts), and until then the
       // Download button hands the APK to the system downloader instead.
+      // T4 (background relay): FOREGROUND_SERVICE + CONNECTED_DEVICE
+      // mirror the committed AndroidManifest.xml service declaration.
       "permissions": [
         "android.permission.REQUEST_INSTALL_PACKAGES",
         "ACCESS_COARSE_LOCATION",
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_ADVERTISE",
-        "android.permission.BLUETOOTH_CONNECT"
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"
       ],
       // Declared explicitly to match the committed android/ theme, which opts
       // out of edge-to-edge enforcement (styles.xml). System bars are opaque,

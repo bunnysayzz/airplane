@@ -8,6 +8,10 @@ import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
 import { startTransport, stopTransport, pruneExpiredStore } from '../services/airplane';
 import { revalidateBleRadio } from '../services/airplane/transport';
+import {
+  ensureForegroundRelayRunning,
+  syncForegroundRelayState,
+} from '../services/airplane/foregroundService';
 import { flushDmOutboxIfStarted } from '../services/airplane/dm';
 import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
 import { friendlyErrorMessage } from '../src/lib/errorCopy';
@@ -78,6 +82,19 @@ export default function RootLayout() {
         void startDiagnosticsLogFile().catch(() => {});
         const appStateSub = AppState.addEventListener('change', async (state) => {
           await recordDiagnosticsLogAppState(state);
+          // T4: backgrounding NEVER stops the transport. When the user
+          // has background relay on, re-assert the foreground service
+          // so the OS keeps the (already running) hybrid transport
+          // alive; when it is off, this is a no-op and the transport
+          // follows its normal lifecycle. On foreground return, sync
+          // the JS service state against the native flag (a service
+          // stopped from its notification, or killed, shows as off).
+          if (state === 'background' || state === 'inactive') {
+            void ensureForegroundRelayRunning().catch(() => {});
+          }
+          if (state === 'active') {
+            void syncForegroundRelayState().catch(() => {});
+          }
           // Foreground retention cleanup (best-effort, shared in-flight
           // guard with the startup and sync prunes).
           if (state === 'active') void pruneExpiredStore();

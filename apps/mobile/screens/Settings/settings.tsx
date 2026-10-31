@@ -37,7 +37,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const { colors, type, coat } = useTheme();
   const styles = useThemedStyles(makeStyles);
   const insets = useSafeAreaInsets();
-  const { compactMode, setCompactMode } = useSettings();
+  const { compactMode, setCompactMode, foregroundRelayEnabled, setForegroundRelayEnabled } = useSettings();
   // Appearance, Relays, Identity, Diagnostics and the privacy explainer
   // are second levels inside Settings
   const [page, setPage] = useState<
@@ -231,6 +231,31 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
               accessibilityLabel={t('settings.compactMode')}
             />
           </View>
+          {/* T4: Android only. The native foreground service exists only
+              on Android; on iOS there is no equivalent module in this
+              app, so no dead toggle is offered there. Default OFF:
+              background relay costs battery and shows a persistent
+              notification, so it is opt-in, not on by default. */}
+          {Platform.OS === 'android' && (
+            <>
+              <View style={styles.divider} />
+              <View style={styles.row}>
+                <Ionicons name="radio-outline" size={20} color={colors.accentText} />
+                <Text style={[labelStyle, styles.rowText]}>{t('settings.foregroundRelay')}</Text>
+                <ThemedSwitch
+                  value={foregroundRelayEnabled}
+                  onValueChange={(value) => {
+                    void setForegroundRelayEnabled(value).then((ok) => {
+                      if (!ok) dialog.toast(t('settings.foregroundRelayFailed'));
+                    });
+                  }}
+                  accessibilityLabel={t('settings.foregroundRelay')}
+                  accessibilityHint={t('settings.foregroundRelayHint')}
+                />
+              </View>
+              <Text style={[type.meta, styles.privacyLead]}>{t('settings.foregroundRelayNote')}</Text>
+            </>
+          )}
         </Card>
 
         <SectionLabel style={styles.sectionLabel}>{t('settings.about')}</SectionLabel>

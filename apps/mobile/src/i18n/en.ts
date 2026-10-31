@@ -415,6 +415,12 @@ export const en = {
     appearanceLabel: 'Appearance, {{coat}}',
     appearanceHint: 'Opens appearance settings',
     compactMode: 'Compact Mode',
+    foregroundRelay: 'Background relay',
+    foregroundRelayHint: 'Keeps relaying posts while the app is in the background',
+    foregroundRelayNote:
+      'Shows a persistent "Airplane relay running" notification you can stop at any time. Uses more battery while it runs, because the radio and the relay stay up. Off by default.',
+    foregroundRelayFailed:
+      'Background relay could not start on this device. It stays off.',
     about: 'About',
     version: 'App Version',
     updateCheck: 'Check for updates',
@@ -440,6 +446,12 @@ export const en = {
     identityHint: 'Opens identity settings',
     diagnosticsTitle: 'Diagnostics',
     diagnosticsHint: 'Opens transport diagnostics',
+    diagnosticsForegroundRelay: 'Background relay',
+    diagnosticsForegroundRunning: 'Running (service up)',
+    diagnosticsForegroundStopped: 'Off',
+    diagnosticsForegroundUnavailable: 'Not available on this device',
+    diagnosticsForegroundNote:
+      'While running, the transport stays up in the background so received posts keep flowing through the existing relay path. The service itself runs no relay code; it only keeps the app alive.',
     diagnosticsLead:
       'Live radio and transport state from this phone. Values come from the BLE stack and the transport, never from samples.',
     diagnosticsRefresh: 'Refresh',
