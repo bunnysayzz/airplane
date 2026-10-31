@@ -602,6 +602,35 @@ describe('BLE publish targets + mesh status', () => {
 });
 
 describe('mesh-scan fix: scan failure keeps advertising', () => {
+  // This describe sits outside the file's 'transport manager' describe,
+  // so it needs its own lifecycle: fake timers for the scan retry
+  // backoff, and stopTransport cleanup so no retry timer outlives a test.
+  let realWebSocket: unknown;
+
+  beforeEach(() => {
+    realWebSocket = (globalThis as Record<string, unknown>).WebSocket;
+    (globalThis as Record<string, unknown>).WebSocket = FakeSocket;
+    FakeSocket.instances = [];
+    netInfoMock.fetch.mockResolvedValue({ isConnected: false, isInternetReachable: false });
+    netInfoMock.addEventListener.mockClear();
+    netInfoMock.addEventListener.mockReturnValue(jest.fn());
+    __resetStoreForTests();
+    __resetNetInfoForTests();
+    __resetResharesForTests();
+    __resetPulledPostsForTests();
+    __resetDeviceKeypairForTests();
+    AsyncStorageMock.__clear();
+    jest.useFakeTimers();
+  });
+
+  afterEach(async () => {
+    jest.clearAllTimers();
+    await stopTransport();
+    jest.useRealTimers();
+    (globalThis as Record<string, unknown>).WebSocket = realWebSocket;
+    __setBlePortForTests(null);
+  });
+
   function grantPermissions(): void {
     RN.PermissionsAndroid.check.mockReset();
     RN.PermissionsAndroid.check.mockResolvedValue(true);
