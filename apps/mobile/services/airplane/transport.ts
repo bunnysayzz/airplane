@@ -87,24 +87,18 @@ function getNetInfo() {
  * RADIO-UNVERIFIED - see services/airplane/ble/gatt.ts.
  */
 /**
- * Mid-session scan failure: reclassify the radio by re-checking
- * permissions at that moment (permission-blocked when grants vanished,
- * unavailable otherwise). Runs only while the radio reports on; bring-up
- * failures are classified by the start path instead.
+ * Mid-session scan failure (mesh-scan fix): intentionally no longer
+ * reclassifies the radio. A scan failure used to set the radio
+ * unavailable, and the startup path then tore advertising down too,
+ * leaving the phone mute and deaf until relaunch. Advertising stays
+ * up across a scan failure now (see bringUpBleRadio), the failure
+ * itself is already recorded in diagnostics by the port, and scanning
+ * recovers via the retry timer, foreground re-validation, adapter-on
+ * events, or manual Retry. The callback wiring stays so a future use
+ * has a place to hook in.
  */
 async function handleScanFailure(_code: string): Promise<void> {
-  if (bleRadioState !== 'on') return;
-  try {
-    if (!(await checkBlePermissions().catch(() => false))) {
-      await tearDownBleRadio();
-      bleRadioState = 'permission-blocked';
-    } else {
-      bleRadioState = 'unavailable';
-    }
-  } catch {
-    bleRadioState = 'unavailable';
-  }
-  syncDiagnosticsAdapterState();
+  return;
 }
 
 function makeBlePort(): { port: TransportPort; close: () => Promise<void> } {
@@ -153,6 +147,22 @@ let syncTimer: ReturnType<typeof setInterval> | null = null;
 let lastOnline: boolean | null = null;
 let blePort: { port: TransportPort; close: () => Promise<void> } | null = null;
 let bleScanUnsub: (() => void) | null = null;
+/**
+ * Scan health and retry (mesh-scan fix). bleScanUp is true only while a
+ * scan is actually running; advertising can be up while scanning is
+ * down, and that split is exactly what the old code hid by tearing
+ * the whole radio down on any scan failure. scanRetryTimer re-runs
+ * bring-up with backoff after a scan failure; at most one timer is
+ * ever pending, and it is cleared on teardown, on stop, and on scan
+ * success. bringUpPromise serializes concurrent bring-ups: without
+ * it, two bring-ups racing at startup each ran the native scan and
+ * the logs showed double scan started lines.
+ */
+let bleScanUp = false;
+let scanRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let scanRetryAttempt = 0;
+const SCAN_RETRY_DELAYS_MS = [2000, 5000, 15000, 30000, 60000];
+let bringUpPromise: Promise<void> | null = null;
 /**
  * True once startTransport() has failed and not since succeeded. The
  * launch caller swallows the throw (launch must never die on transport),
@@ -468,12 +478,25 @@ export async function revalidateBleRadio(): Promise<void> {
       return;
     }
     if (bleRadioState !== 'on') {
+      // A bring-up already running elsewhere wins: await it instead of
+      // tearing it down mid-flight, then re-check the state it left.
+      if (bringUpPromise) {
+        await bringUpPromise.catch(() => {});
+        if (bleRadioState === 'on') return;
+      }
       const publicKey = await getDevicePublicKey();
       await tearDownBleRadio();
       await bringUpBleRadio(toHex(publicKey));
       bleRadioState = 'on';
       radioWasOn = true;
       syncDiagnosticsAdapterState();
+    } else if (!bleScanUp) {
+      // Radio reports on but scanning is down (scan failure with
+      // advertising up): re-run bring-up without tearing advertising
+      // down. advertise() is idempotent for the same peer id, so this
+      // only re-attempts the scan.
+      const publicKey = await getDevicePublicKey();
+      await bringUpBleRadio(toHex(publicKey));
     }
   } catch {
     // A failed revalidation leaves the radio unavailable, not wedged.
@@ -632,18 +655,91 @@ export async function startTransport(): Promise<void> {
   await pruneExpiredStore();
 }
 
-/** Advertise our identity and scan for mesh peers. Throws on radio failure. */
+/** Clear any pending scan retry timer and reset the backoff. Never throws. */
+function clearScanRetry(): void {
+  if (scanRetryTimer) {
+    clearTimeout(scanRetryTimer);
+    scanRetryTimer = null;
+  }
+  scanRetryAttempt = 0;
+}
+
+/**
+ * Schedule one more bring-up attempt after a scan failure, with
+ * backoff. At most one timer is ever pending, and an exhausted
+ * backoff simply stops: foreground re-validation, adapter-on events,
+ * and manual Retry remain as recovery paths.
+ */
+function scheduleScanRetry(): void {
+  if (scanRetryTimer || scanRetryAttempt >= SCAN_RETRY_DELAYS_MS.length) return;
+  const delay = SCAN_RETRY_DELAYS_MS[scanRetryAttempt++];
+  scanRetryTimer = setTimeout(() => {
+    scanRetryTimer = null;
+    if (!blePort || !hybrid) return;
+    void (async () => {
+      try {
+        const publicKey = await getDevicePublicKey();
+        await bringUpBleRadio(toHex(publicKey));
+      } catch {
+        // Advertise failed on retry: the radio is genuinely down.
+        // Leave reclassification to the next foreground re-validation
+        // or manual Retry; do not schedule further retries here.
+        bleScanUp = false;
+      }
+    })();
+  }, delay);
+}
+
+/**
+ * Advertise our identity and scan for mesh peers. Throws only when
+ * advertising fails. Concurrent callers join the in-flight bring-up
+ * instead of racing it (mesh-scan fix): without this, two bring-ups
+ * at startup each ran the native scan and the logs showed double
+ * scan started lines.
+ */
 async function bringUpBleRadio(peerIdHex: string): Promise<void> {
+  if (bringUpPromise) return bringUpPromise;
+  bringUpPromise = bringUpBleRadioInner(peerIdHex).finally(() => {
+    bringUpPromise = null;
+  });
+  return bringUpPromise;
+}
+
+/**
+ * Bring-up body. A scan failure does NOT throw here (mesh-scan fix):
+ * advertising is up, so the phone stays discoverable, and scanning
+ * recovers via the retry timer. The old code threw on scan failure
+ * and every caller tore the radio down, which also stopped
+ * advertising: one scan timeout left the phone mute and deaf until
+ * relaunch, and since the radio never reached 'on', foreground
+ * re-validation refused to retry it (radioWasOn stayed false).
+ * Callers still mark the radio 'on' after this resolves: 'on' means
+ * the radio is up (advertising); live scan health is in diagnostics
+ * (scanning state plus last failure) and in bleScanUp.
+ */
+async function bringUpBleRadioInner(peerIdHex: string): Promise<void> {
   if (!blePort) throw new Error('ble: port not constructed');
   await blePort.port.advertise(peerIdHex);
-  bleScanUnsub = await blePort.port.scan(() => {
-    // Peer registry for future UI (MeshStatus); discovery itself drives
-    // the port's auto-connect. Nothing to do per peer in v1.
-  });
+  try {
+    bleScanUnsub = await blePort.port.scan(() => {
+      // Peer registry for future UI (MeshStatus); discovery itself drives
+      // the port's auto-connect. Nothing to do per peer in v1.
+    });
+    bleScanUp = true;
+    clearScanRetry();
+  } catch {
+    // Scan failed, advertising stands. The port already recorded the
+    // scan failure in diagnostics. Return normally so callers do not
+    // tear advertising down; schedule a scan retry with backoff.
+    bleScanUp = false;
+    scheduleScanRetry();
+  }
 }
 
 /** Tear down whatever half of the radio bring-up succeeded. Never throws. */
 async function tearDownBleRadio(): Promise<void> {
+  clearScanRetry();
+  bleScanUp = false;
   try {
     bleScanUnsub?.();
   } catch {
@@ -800,6 +896,11 @@ export function __getHybridForTests(): HybridTransport | null {
   return hybrid;
 }
 
+/** Test-only seam: replace the BLE port (transport tests drive bring-up without native modules). */
+export function __setBlePortForTests(port: TransportPort | null): void {
+  blePort = port ? { port, close: async () => {} } : null;
+}
+
 /**
  * Narrow the relay subscribe filter to the viewer's in-scope cells
  * (feed tab owns the current cells). The next reconnect subscribes with
@@ -891,6 +992,8 @@ export async function stopTransport(): Promise<void> {
   netUnsub?.();
   netUnsub = null;
   lastOnline = null;
+  clearScanRetry();
+  bleScanUp = false;
   try {
     bleScanUnsub?.();
   } catch {
