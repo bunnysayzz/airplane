@@ -480,9 +480,11 @@ export async function revalidateBleRadio(): Promise<void> {
     if (bleRadioState !== 'on') {
       // A bring-up already running elsewhere wins: await it instead of
       // tearing it down mid-flight, then re-check the state it left.
+      // Read through the getter: the narrowed local type cannot see
+      // the state change the awaited bring-up made.
       if (bringUpPromise) {
         await bringUpPromise.catch(() => {});
-        if (bleRadioState === 'on') return;
+        if (getBleRadioState() === 'on') return;
       }
       const publicKey = await getDevicePublicKey();
       await tearDownBleRadio();
