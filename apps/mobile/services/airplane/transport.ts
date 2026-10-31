@@ -675,21 +675,23 @@ function clearScanRetry(): void {
 function scheduleScanRetry(): void {
   if (scanRetryTimer || scanRetryAttempt >= SCAN_RETRY_DELAYS_MS.length) return;
   const delay = SCAN_RETRY_DELAYS_MS[scanRetryAttempt++];
-  scanRetryTimer = setTimeout(() => {
-    scanRetryTimer = null;
-    if (!blePort || !hybrid) return;
-    void (async () => {
-      try {
-        const publicKey = await getDevicePublicKey();
-        await bringUpBleRadio(toHex(publicKey));
-      } catch {
-        // Advertise failed on retry: the radio is genuinely down.
-        // Leave reclassification to the next foreground re-validation
-        // or manual Retry; do not schedule further retries here.
-        bleScanUp = false;
-      }
-    })();
-  }, delay);
+  scanRetryTimer = setTimeout(
+    () =>
+      (async () => {
+        scanRetryTimer = null;
+        if (!blePort || !hybrid) return;
+        try {
+          const publicKey = await getDevicePublicKey();
+          await bringUpBleRadio(toHex(publicKey));
+        } catch {
+          // Advertise failed on retry: the radio is genuinely down.
+          // Leave reclassification to the next foreground re-validation
+          // or manual Retry; do not schedule further retries here.
+          bleScanUp = false;
+        }
+      })(),
+    delay,
+  );
 }
 
 /**
