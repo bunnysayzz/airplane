@@ -348,6 +348,17 @@ export function recordScanFailure(code: string): void {
   notifyThrottled();
 }
 
+// Scan sighting summary (mesh-scan fix): counts of discover events in a
+// window, split into mesh-tagged and non-mesh, plus the manufacturer
+// data shapes seen (company id hex and byte length only). Counts and
+// company ids are not identifiers: no device ids, names, or RSSI here.
+// This line is what lets the next device run tell "scanner delivered
+// nothing" apart from "scanner delivered packets but no mesh tag".
+export function recordScanSightings(total: number, mesh: number, nonMesh: number, manufacturerSummary: string): void {
+  logEvent('scan', `sightings total=${total} mesh=${mesh} nonmesh=${nonMesh} md=${manufacturerSummary}`);
+  notifyThrottled();
+}
+
 // ------------------------------------------------------------------- peers
 
 export function recordPeerSeen(peerId: string, rssi: number, advertisementHex: string): void {
