@@ -1086,3 +1086,127 @@ describe('BLE drop logging (audit F-P3-5)', () => {
     await port.close();
   });
 });
+
+describe('mesh-scan fix: codegen event subscription', () => {
+  // The delegation mock above has no codegen methods, so the legacy
+  // path stays covered there. These tests add the codegen methods to
+  // the same mocked singleton and remove them afterwards.
+  test('discover uses the codegen method when present, not the legacy emitter', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mgr = require('react-native-ble-manager').default;
+    let captured: ((p: unknown) => void) | null = null;
+    mgr.onDiscoverPeripheral = jest.fn((cb: (p: unknown) => void) => {
+      captured = cb;
+      return { remove: jest.fn() };
+    });
+    try {
+      const deps = defaultBleDeps(async () => true);
+      const seen: { id: string; rssi: number; tag: Uint8Array | null }[] = [];
+      const off = deps.central!.onDiscover((info) => seen.push(info));
+      // The legacy emitter must not receive the subscription.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { NativeEventEmitter } = require('react-native');
+      const emitter = NativeEventEmitter.instances[NativeEventEmitter.instances.length - 1];
+      emitter.emit('BleManagerDiscoverPeripheral', {
+        id: 'aa:bb',
+        rssi: -72,
+        advertising: { manufacturerData: { ffff: { bytes: [1, 2, 3, 4, 5, 6, 7, 8] } } },
+      });
+      expect(seen).toHaveLength(0);
+      captured!({
+        id: 'aa:bb',
+        rssi: -72,
+        advertising: { manufacturerData: { ffff: { bytes: [1, 2, 3, 4, 5, 6, 7, 8] } } },
+      });
+      expect(seen).toHaveLength(1);
+      expect(seen[0].id).toBe('aa:bb');
+      expect(seen[0].rssi).toBe(-72);
+      expect([...seen[0].tag!]).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      off();
+    } finally {
+      delete mgr.onDiscoverPeripheral;
+    }
+  });
+
+  test('notify and disconnect use the codegen methods when present', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mgr = require('react-native-ble-manager').default;
+    let notifyCb: ((e: { peripheral?: unknown; value?: unknown }) => void) | null = null;
+    let disconnectCb: ((e: { peripheral?: unknown }) => void) | null = null;
+    mgr.onDidUpdateValueForCharacteristic = jest.fn((cb) => {
+      notifyCb = cb;
+      return { remove: jest.fn() };
+    });
+    mgr.onDisconnectPeripheral = jest.fn((cb) => {
+      disconnectCb = cb;
+      return { remove: jest.fn() };
+    });
+    try {
+      const deps = defaultBleDeps(async () => true);
+      const notified: { id: string; value: Uint8Array }[] = [];
+      const disconnected: string[] = [];
+      const offN = deps.central!.onNotification((ev) => notified.push(ev));
+      const offD = deps.central!.onDisconnect((id) => disconnected.push(id));
+      notifyCb!({ peripheral: 'dev1', value: [1, 2, 3] });
+      expect(notified).toHaveLength(1);
+      expect(notified[0].id).toBe('dev1');
+      expect([...notified[0].value]).toEqual([1, 2, 3]);
+      disconnectCb!({ peripheral: 'dev2' });
+      expect(disconnected).toEqual(['dev2']);
+      offN();
+      offD();
+    } finally {
+      delete mgr.onDidUpdateValueForCharacteristic;
+      delete mgr.onDisconnectPeripheral;
+    }
+  });
+
+  test('scan sightings flush a summary line after the window elapses', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind: string, detail: string) => lines.push(`${kind}:${detail}`));
+    const nowSpy = jest.spyOn(Date, 'now');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mgr = require('react-native-ble-manager').default;
+    let captured: ((p: unknown) => void) | null = null;
+    mgr.onDiscoverPeripheral = jest.fn((cb: (p: unknown) => void) => {
+      captured = cb;
+      return { remove: jest.fn() };
+    });
+    try {
+      const deps = defaultBleDeps(async () => true);
+      const off = deps.central!.onDiscover(() => {});
+      let now = 1_000_000;
+      nowSpy.mockImplementation(() => now);
+      captured!({ id: 'aa', rssi: -70, advertising: { manufacturerData: { ffff: { bytes: [1, 2, 3, 4, 5, 6, 7, 8] } } } });
+      captured!({ id: 'bb', rssi: -71, advertising: {} });
+      captured!({ id: 'cc', rssi: -72, advertising: { manufacturerData: { '1234': { bytes: [9, 9] } } } });
+      expect(lines.filter((l) => l.includes('sightings'))).toHaveLength(0);
+      now += 61_000;
+      captured!({ id: 'dd', rssi: -73, advertising: {} });
+      const sight = lines.filter((l) => l.includes('sightings'));
+      expect(sight).toHaveLength(1);
+      expect(sight[0]).toContain('total=4');
+      expect(sight[0]).toContain('mesh=1');
+      expect(sight[0]).toContain('nonmesh=3');
+      expect(sight[0]).toContain('1234:2x1');
+      off();
+    } finally {
+      delete mgr.onDiscoverPeripheral;
+      nowSpy.mockRestore();
+      setDiagnosticsLogSink(null);
+      resetDiagnosticsForTests();
+    }
+  });
+});
+
+describe('mesh-scan fix: adapter pre-check', () => {
+  test('scan skips the native call when the adapter reports off', async () => {
+    const { deps, central } = makeDeps();
+    central.adapterState = 'off';
+    const port = new GattBlePort(deps);
+    await expect(port.scan(() => {})).rejects.toThrow('adapter not on, scan skipped');
+    expect(central.scanning).toBe(false);
+    await port.close();
+  });
+});
