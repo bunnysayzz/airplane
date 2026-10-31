@@ -30,7 +30,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus } from './transport';
+import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
@@ -598,5 +598,71 @@ describe('BLE publish targets + mesh status', () => {
     const s = getMeshStatus();
     expect(s.peersNearby).toBe(0);
     expect(s.relayState).toBe('offline');
+  });
+});
+
+describe('mesh-scan fix: scan failure keeps advertising', () => {
+  function grantPermissions(): void {
+    RN.PermissionsAndroid.check.mockReset();
+    RN.PermissionsAndroid.check.mockResolvedValue(true);
+    const granted = (RN.PermissionsAndroid as unknown as { RESULTS?: { GRANTED?: unknown } }).RESULTS?.GRANTED ?? 'granted';
+    RN.PermissionsAndroid.request.mockReset();
+    RN.PermissionsAndroid.request.mockResolvedValue(granted);
+  }
+
+  test('scan failure does not stop advertising and retries with backoff', async () => {
+    grantPermissions();
+    await startTransport();
+    let scanAttempt = 0;
+    const port = {
+      advertise: jest.fn(async () => {}),
+      stopAdvertise: jest.fn(async () => {}),
+      scan: jest.fn(async () => {
+        scanAttempt++;
+        if (scanAttempt === 1) throw new Error('ble: central scan timed out after 10000ms');
+        return () => {};
+      }),
+    };
+    __setBlePortForTests(port as never);
+    try {
+      expect(await retryBleRadio()).toBe(true);
+      expect(getBleRadioState()).toBe('on');
+      expect(port.advertise).toHaveBeenCalledTimes(1);
+      // stopAdvertise ran once for retryBleRadio's pre-bring-up
+      // teardown, not again for the scan failure.
+      expect(port.stopAdvertise).toHaveBeenCalledTimes(1);
+      expect(port.scan).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(2000);
+      expect(port.scan).toHaveBeenCalledTimes(2);
+    } finally {
+      __setBlePortForTests(null);
+    }
+  });
+
+  test('concurrent bring-ups share one advertise call', async () => {
+    grantPermissions();
+    await startTransport();
+    let releaseAdvertise!: () => void;
+    const advertiseGate = new Promise<void>((r) => {
+      releaseAdvertise = r;
+    });
+    const port = {
+      advertise: jest.fn(async () => {
+        await advertiseGate;
+      }),
+      stopAdvertise: jest.fn(async () => {}),
+      scan: jest.fn(async () => () => {}),
+    };
+    __setBlePortForTests(port as never);
+    try {
+      const p1 = retryBleRadio();
+      const p2 = retryBleRadio();
+      releaseAdvertise();
+      await expect(p1).resolves.toBe(true);
+      await expect(p2).resolves.toBe(true);
+      expect(port.advertise).toHaveBeenCalledTimes(1);
+    } finally {
+      __setBlePortForTests(null);
+    }
   });
 });
