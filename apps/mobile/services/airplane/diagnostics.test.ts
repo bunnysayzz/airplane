@@ -19,6 +19,7 @@ import {
   recordPeerResolved,
   recordPeerSeen,
   recordScanFailure,
+  recordScanSightings,
   recordScanStarted,
   recordScanStopped,
   recordTransportFailure,
@@ -293,5 +294,18 @@ describe('diagnostics collector', () => {
     const snap = getDiagnosticsSnapshot();
     expect(snap.permissions?.advertise).toBe('denied');
     expect(snap.permissions?.locationServices).toBe('unavailable');
+  });
+});
+
+describe('scan sighting summary', () => {
+  test('recordScanSightings logs a counts-only summary line', () => {
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind}:${detail}`));
+    try {
+      recordScanSightings(12, 3, 9, 'ffff:8x2,1234:2x1');
+      expect(lines).toEqual(['scan:sightings total=12 mesh=3 nonmesh=9 md=ffff:8x2,1234:2x1']);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
   });
 });
