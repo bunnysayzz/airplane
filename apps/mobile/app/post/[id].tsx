@@ -4,6 +4,7 @@ import Thread from '../../screens/Thread/thread';
 import { getPostCardById } from '../../services/airplane/feed';
 import { toggleStar } from '../../services/airplane/stars';
 import type { PostCardModel } from '../../services/airplane/types';
+import { RouteTracker } from '../../components/RouteTracker/routeTracker';
 
 export default function PostScreen() {
     const { id } = useLocalSearchParams<{ id: string }>();
@@ -51,13 +52,16 @@ export default function PostScreen() {
     // plain view, so a post opens once; star, message and reshare below
     // still work through their own handlers.
     return (
-        <Thread
-            postId={id ?? ''}
-            posts={posts}
-            loading={loading}
-            onBack={goBack}
-            onStar={handleStar}
-            onMessage={authorPubkeyHex => router.push(`/dm/${authorPubkeyHex}`)}
-        />
+        <>
+            <RouteTracker />
+            <Thread
+                postId={id ?? ''}
+                posts={posts}
+                loading={loading}
+                onBack={goBack}
+                onStar={handleStar}
+                onMessage={authorPubkeyHex => router.push(`/dm/${authorPubkeyHex}`)}
+            />
+        </>
     );
 }

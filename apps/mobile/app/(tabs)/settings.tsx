@@ -1,6 +1,7 @@
 import React from 'react';
 import { useRouter } from 'expo-router';
 import Settings from '../../screens/Settings/settings';
+import { RouteTracker } from '../../components/RouteTracker/routeTracker';
 
 export default function SettingsTab() {
     const router = useRouter();
@@ -10,5 +11,10 @@ export default function SettingsTab() {
         if (router.canGoBack()) router.back();
         else router.navigate('/(tabs)/feed');
     };
-    return <Settings onBack={goBack} />;
+    return (
+        <>
+            <RouteTracker />
+            <Settings onBack={goBack} />
+        </>
+    );
 }

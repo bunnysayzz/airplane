@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../../src/theme/themeContext';
 import { makeStyles, dockBottomOffset } from './styles';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
+import { recordUiEvent } from '../../services/airplane/diagnostics';
 
 export type TabIconName = React.ComponentProps<typeof Ionicons>['name'];
 
@@ -41,7 +42,10 @@ export const TabBar: React.FC<TabBarProps> = ({ tabs, activeTab, onTabPress, onC
         return (
             <Pressable
                 key={def.key}
-                onPress={() => onTabPress(def.key)}
+                onPress={() => {
+                    recordUiEvent(`tab:${def.key}`);
+                    onTabPress(def.key);
+                }}
                 accessibilityRole="tab"
                 accessibilityLabel={def.label}
                 accessibilityState={{ selected: active }}
@@ -66,7 +70,10 @@ export const TabBar: React.FC<TabBarProps> = ({ tabs, activeTab, onTabPress, onC
             <BlurView intensity={isDark ? 30 : 60} tint={isDark ? 'dark' : 'light'} style={styles.dock} accessibilityRole="tablist">
                 {tabs.slice(0, middle).map(tab)}
                 <Pressable
-                    onPress={onComposePress}
+                    onPress={() => {
+                        recordUiEvent('compose:open');
+                        onComposePress();
+                    }}
                     accessibilityRole="button"
                     accessibilityLabel={composeLabel}
                     style={({ pressed }) => [styles.compose, pressed && { opacity: 0.85 }]}

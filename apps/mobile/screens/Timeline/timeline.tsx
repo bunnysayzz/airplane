@@ -16,6 +16,7 @@ import { makeStyles } from './styles';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
 import { useI18n } from '../../src/i18n/i18nContext';
 import { NewPostsPill } from './newPostsPill';
+import { recordUiEvent } from '../../services/airplane/diagnostics';
 
 // FlashList keeps the first visible post in place while posts above it get measured, which cut an
 // animated scrollToOffset(0) short after scrolling far. scrollToIndex pauses that correction, jumps
@@ -155,6 +156,7 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
     }, [load]);
 
     const showNewPosts = useCallback(async () => {
+        recordUiEvent('feed:new-posts');
         await load('refresh');
         scrollListToTop(listRef.current);
     }, [load]);
@@ -196,7 +198,7 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
                 <Ionicons name="chatbubble-ellipses-outline" size={40} color={colors.textMuted} />
                 <Text style={styles.emptyText}>{emptyMessage}</Text>
                 {onComposePress ? (
-                    <PillButton label={t('tabs.newPost')} onPress={onComposePress} style={styles.emptyCta} />
+                    <PillButton label={t('tabs.newPost')} onPress={onComposePress} logAction="compose:open" style={styles.emptyCta} />
                 ) : null}
             </View>
         );
@@ -235,7 +237,10 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
                     <Text style={[type.meta, styles.errorText]}>{t('timeline.loadFailed')}</Text>
                     <Pressable
                         style={styles.retryButton}
-                        onPress={() => load('initial')}
+                        onPress={() => {
+                            recordUiEvent('feed:retry');
+                            load('initial');
+                        }}
                         accessibilityRole="button"
                         accessibilityLabel={t('timeline.retry')}
                     >

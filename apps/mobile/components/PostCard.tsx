@@ -14,6 +14,7 @@ import { EyeIcon } from './ui/eyeIcon';
 import { useTheme } from '../src/theme/themeContext';
 import { formatCompact } from '../src/lib/format';
 import { isWithinWindow } from '../src/lib/navGuard';
+import { recordUiEvent } from '../services/airplane/diagnostics';
 
 export interface PostCardModel {
   /** hex event hash (stable key) */
@@ -102,7 +103,10 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
   };
   const handleCardPress = onPress
     ? () => {
-        if (!isWithinWindow(lastActionAt.current, Date.now(), 500)) onPress(post.eventId);
+        if (!isWithinWindow(lastActionAt.current, Date.now(), 500)) {
+            recordUiEvent('post:open', post.eventId);
+            onPress(post.eventId);
+        }
       }
     : undefined;
 
@@ -135,6 +139,7 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
           <Pressable
             onPress={() => {
               markAction();
+              recordUiEvent('dm:open', post.authorPubkeyHex as string);
               onMessage(post.authorPubkeyHex as string);
             }}
             accessibilityRole="button"
@@ -155,6 +160,7 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
             onReshare
               ? () => {
                   markAction();
+                  recordUiEvent('post:reshare', post.eventId);
                   onReshare(post.eventId);
                 }
               : undefined
@@ -180,6 +186,7 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
             onStar
               ? () => {
                   markAction();
+                  recordUiEvent('post:star', post.eventId);
                   onStar(post.eventId);
                 }
               : undefined

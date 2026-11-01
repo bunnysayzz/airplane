@@ -11,6 +11,7 @@ import { tabBarClearance } from '../../components/TabBar/styles';
 import { useI18n } from '../../src/i18n/i18nContext';
 import {
   getDiagnosticsSnapshot,
+  recordUiEvent,
   setDiagnosticsPermissions,
   subscribeDiagnostics,
   type DiagnosticsPeer,
@@ -198,6 +199,7 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
           <Pressable
             style={styles.button}
             onPress={() => {
+              recordUiEvent('diagnostics:refresh');
               refreshPermissions();
               setSnapshot(getDiagnosticsSnapshot());
               setLogStatus(getDiagnosticsLogStatus());
@@ -210,6 +212,7 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
           <Pressable
             style={styles.button}
             onPress={() => {
+              recordUiEvent('diagnostics:share');
               setShareFailed(false);
               setShareError(null);
               void shareDiagnosticsLogFile()
@@ -236,7 +239,10 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
           {anyDenied && (
             <Pressable
               style={styles.button}
-              onPress={() => void Linking.openSettings()}
+              onPress={() => {
+                recordUiEvent('diagnostics:open-settings');
+                void Linking.openSettings();
+              }}
               accessibilityRole="button"
               accessibilityLabel={t('settings.diagnosticsOpenSettings')}
             >
@@ -248,6 +254,7 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
             <Pressable
               style={styles.button}
               onPress={() => {
+                recordUiEvent('diagnostics:retry-ble');
                 // Restart the radio from Diagnostics, not only on next
                 // launch. retryBleRadio is the force path: it tears down
                 // scan and advertise first and brings the radio up again

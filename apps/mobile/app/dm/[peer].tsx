@@ -12,6 +12,8 @@ import type { DmConversationRow, DmThreadRow } from '@airplane/transport';
 import { getDmService, dmPeerLabel, dmUserErrorMessage, sendDm } from '../../services/airplane/dm';
 import { isNearBottom } from '../../src/lib/dmThread';
 import { DmBubble } from '../../components/DmBubble';
+import { recordUiEvent } from '../../services/airplane/diagnostics';
+import { RouteTracker } from '../../components/RouteTracker/routeTracker';
 import { useTheme } from '../../src/theme/themeContext';
 
 export default function DmThreadScreen() {
@@ -111,6 +113,7 @@ export default function DmThreadScreen() {
         const text = draft.trim();
         if (!text || sending) return;
         setSending(true);
+        recordUiEvent('dm:send', peerHex);
         // The draft clears only on success: a failed send used to lose the
         // typed text, leaving the user to retype after the error Alert.
         sendDm(peerHex, text)
@@ -131,6 +134,7 @@ export default function DmThreadScreen() {
     // now stable, which is what makes the DmBubble memo comparison hold.
     const handleRetry = useCallback(
         (messageId: string) => {
+            recordUiEvent('dm:retry-send', peerHex);
             void getDmService()
                 .then(svc => svc.retryMessage(peerHex, messageId))
                 .then(() => getDmService().then(svc => svc.flushOutbox()))
@@ -166,10 +170,12 @@ export default function DmThreadScreen() {
                 {
                     text: 'Delete',
                     style: 'destructive',
-                    onPress: () =>
-                        act(svc => svc.deleteConversationLocalOnly(peerHex)).then(ok => {
+                    onPress: () => {
+                        recordUiEvent('dm:delete', peerHex);
+                        return act(svc => svc.deleteConversationLocalOnly(peerHex)).then(ok => {
                             if (ok) router.back();
-                        }),
+                        });
+                    },
                 },
             ],
         );
@@ -202,6 +208,7 @@ export default function DmThreadScreen() {
     // screen root, so no vertical offset is needed.
     return (
         <KeyboardAvoidingView style={[styles.root, { backgroundColor: colors.background }]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+            <RouteTracker />
             <View style={[styles.header, { borderBottomColor: colors.borderColor, paddingTop: insets.top + 16 }]}>
                 <Pressable onPress={() => router.back()}>
                     <Text style={[type.meta, { color: colors.accentText }]}>Back</Text>
@@ -216,19 +223,28 @@ export default function DmThreadScreen() {
                     <View style={styles.requestRow}>
                         <Pressable
                             style={[styles.actionButton, { backgroundColor: colors.accentColor }]}
-                            onPress={() => act(svc => svc.acceptRequest(peerHex))}
+                            onPress={() => {
+                                recordUiEvent('dm:accept', peerHex);
+                                act(svc => svc.acceptRequest(peerHex));
+                            }}
                         >
                             <Text style={[type.name, { color: colors.buttonTextColor }]}>Accept</Text>
                         </Pressable>
                         <Pressable
                             style={[styles.actionButton, { backgroundColor: colors.dangerColor }]}
-                            onPress={() => act(svc => svc.blockPeer(peerHex))}
+                            onPress={() => {
+                                recordUiEvent('dm:block', peerHex);
+                                act(svc => svc.blockPeer(peerHex));
+                            }}
                         >
                             <Text style={[type.name, { color: colors.buttonTextColor }]}>Block</Text>
                         </Pressable>
                         <Pressable
                             style={[styles.actionButton, styles.actionNeutral, { borderColor: colors.borderColor }]}
-                            onPress={() => act(svc => svc.ignoreRequest(peerHex))}
+                            onPress={() => {
+                                recordUiEvent('dm:ignore', peerHex);
+                                act(svc => svc.ignoreRequest(peerHex));
+                            }}
                         >
                             <Text style={[type.name, { color: colors.textPrimary }]}>Ignore</Text>
                         </Pressable>
@@ -239,13 +255,19 @@ export default function DmThreadScreen() {
             <View style={[styles.actions, { borderBottomColor: colors.borderColor }]}>
                 <Pressable
                     style={[styles.actionButton, { backgroundColor: colors.accentColor }]}
-                    onPress={() => act(svc => svc.mutePeer(peerHex, !(conv?.muted ?? false)))}
+                    onPress={() => {
+                        recordUiEvent(conv?.muted ? 'dm:unmute' : 'dm:mute', peerHex);
+                        act(svc => svc.mutePeer(peerHex, !(conv?.muted ?? false)));
+                    }}
                 >
                     <Text style={[type.name, { color: colors.buttonTextColor }]}>{conv?.muted ? 'Unmute' : 'Mute'}</Text>
                 </Pressable>
                 <Pressable
                     style={[styles.actionButton, { backgroundColor: colors.dangerColor }]}
-                    onPress={() => act(svc => svc.blockPeer(peerHex))}
+                    onPress={() => {
+                        recordUiEvent('dm:block', peerHex);
+                        act(svc => svc.blockPeer(peerHex));
+                    }}
                 >
                     <Text style={[type.name, { color: colors.buttonTextColor }]}>Block</Text>
                 </Pressable>
@@ -260,7 +282,10 @@ export default function DmThreadScreen() {
             {isBlocked ? (
                 <View style={[styles.requestBar, { borderBottomColor: colors.borderColor }]}>
                     <Text style={[type.meta, { color: colors.textMuted }]}>This conversation is blocked.</Text>
-                    <Pressable onPress={() => act(svc => svc.unblockPeer(peerHex))}>
+                    <Pressable onPress={() => {
+                        recordUiEvent('dm:unblock', peerHex);
+                        act(svc => svc.unblockPeer(peerHex));
+                    }}>
                         <Text style={[type.meta, { color: colors.accentText }]}>Unblock</Text>
                     </Pressable>
                 </View>
@@ -271,6 +296,7 @@ export default function DmThreadScreen() {
                     <Text style={[type.meta, { color: colors.textMuted }]}>Could not load conversation.</Text>
                     <Pressable
                         onPress={() => {
+                            recordUiEvent('dm:retry-load', peerHex);
                             void refresh().catch(() => {});
                         }}
                     >

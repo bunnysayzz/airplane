@@ -3,10 +3,14 @@ import { ActivityIndicator, Pressable, StyleProp, StyleSheet, Text, View, ViewSt
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useTheme } from '../../src/theme/themeContext';
 import { hitSlopFor, radii } from '../../src/theme/shape';
+import { recordUiEvent } from '../../services/airplane/diagnostics';
 
 interface PillButtonProps {
     label: string;
     onPress: () => void;
+    // Optional log action: when set, a real press logs it to the
+    // diagnostics log. Pressable disabled (or loading) still blocks.
+    logAction?: string;
     // danger: for destructive choices (delete, block)
     variant?: 'primary' | 'secondary' | 'subtle' | 'ghost' | 'danger';
     size?: 'small' | 'medium';
@@ -21,6 +25,7 @@ const HEIGHTS = { small: 34, medium: 38 } as const;
 export const PillButton: React.FC<PillButtonProps> = ({
     label,
     onPress,
+    logAction,
     variant = 'primary',
     size = 'medium',
     icon,
@@ -42,7 +47,10 @@ export const PillButton: React.FC<PillButtonProps> = ({
 
     return (
         <Pressable
-            onPress={onPress}
+            onPress={() => {
+                if (logAction !== undefined) recordUiEvent(logAction);
+                onPress();
+            }}
             disabled={inactive}
             accessibilityRole="button"
             accessibilityLabel={label}

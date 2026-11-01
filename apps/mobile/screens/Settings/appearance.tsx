@@ -10,6 +10,7 @@ import { SettingsHeader } from './header';
 import { makeAppearanceStyles } from './styles';
 import { tabBarClearance } from '../../components/TabBar/styles';
 import { useI18n } from '../../src/i18n/i18nContext';
+import { recordUiEvent } from '../../services/airplane/diagnostics';
 
 const MODES: ThemeType[] = ['light', 'dark', 'system'];
 
@@ -69,7 +70,10 @@ const Appearance: React.FC<AppearanceProps> = ({ onBack }) => {
                 <SegmentedPill
                     options={modes}
                     value={theme}
-                    onChange={setTheme}
+                    onChange={(value) => {
+                        recordUiEvent(`appearance:mode:${value}`);
+                        setTheme(value);
+                    }}
                     accessibilityLabel={t('appearance.mode')}
                 />
 
@@ -83,7 +87,10 @@ const Appearance: React.FC<AppearanceProps> = ({ onBack }) => {
                         return (
                             <Pressable
                                 key={option.key}
-                                onPress={() => setCoat(option.key)}
+                                onPress={() => {
+                                    recordUiEvent(`appearance:coat:${option.key}`);
+                                    setCoat(option.key);
+                                }}
                                 accessibilityRole="radio"
                                 accessibilityLabel={t(`coats.${option.key}`)}
                                 accessibilityState={{ checked: selected }}
@@ -101,7 +108,7 @@ const Appearance: React.FC<AppearanceProps> = ({ onBack }) => {
                         <Text style={[type.name, styles.tintLabel]}>{t('appearance.tint')}</Text>
                         <Text style={[type.meta, styles.tintDetail]}>{t('appearance.tintHint')}</Text>
                     </View>
-                    <ThemedSwitch value={tint} onValueChange={setTint} accessibilityLabel={t('appearance.tint')} />
+                    <ThemedSwitch value={tint} logAction="appearance:toggle:tint" onValueChange={setTint} accessibilityLabel={t('appearance.tint')} />
                 </Card>
             </ScrollView>
         </>

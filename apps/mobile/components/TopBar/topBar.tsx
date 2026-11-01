@@ -30,7 +30,7 @@ export const TopBar: React.FC<TopBarProps> = ({ onSettingsPress }) => {
                 <View style={styles.rightCluster}>
                     {/* Mesh + relay status lives here: glanceable from every feed tab */}
                     <MeshStatus />
-                    <IconButton icon="options-outline" accessibilityLabel={t('common.settings')} onPress={onSettingsPress} color={colors.textSecondary} size={24} style={styles.settingsButton} />
+                    <IconButton icon="options-outline" accessibilityLabel={t('common.settings')} logAction="topbar:settings" onPress={onSettingsPress} color={colors.textSecondary} size={24} style={styles.settingsButton} />
                 </View>
             </View>
         </SafeAreaView>

@@ -26,6 +26,7 @@ import {
   recordPeerDisconnected,
   recordPeerResolved,
   recordPeerSeen,
+  recordUiEvent,
   resetDiagnosticsForTests,
   type DiagnosticsMessage,
 } from './diagnostics';
@@ -436,5 +437,50 @@ describe('diagnostics log sink wiring and privacy', () => {
     expect(writer.getLines()).toHaveLength(0);
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(writer.getLines().some((l) => l.includes('window test failure'))).toBe(true);
+  });
+});
+
+describe('ui event log lines', () => {
+  beforeEach(() => {
+    resetDiagnosticsForTests();
+  });
+
+  test('ui events reach the file through the sink, truncated and redacted', async () => {
+    const port = memoryPort();
+    const writer = new DiagnosticsLogWriter(port);
+    await writer.load();
+    attachDiagnosticsLogWriter(writer);
+
+    recordUiEvent('tab:feed');
+    recordUiEvent('post:open', 'ab'.repeat(32));
+    recordUiEvent('post:star', 'hello secret post text');
+    await writer.flush();
+
+    const lines = writer.getLines();
+    expect(lines.some((l) => l.includes('ui tap tab:feed'))).toBe(true);
+    expect(lines.some((l) => l.includes('ui tap post:open abababab...'))).toBe(true);
+    expect(lines.some((l) => l.includes('ui tap post:star'))).toBe(true);
+    const joined = lines.join('\n');
+    expect(joined).not.toContain('ab'.repeat(32));
+    expect(joined).not.toContain('secret');
+  });
+
+  test('ui lines land on the trailing window without an explicit flush', async () => {
+    const port = memoryPort();
+    const writer = new DiagnosticsLogWriter(port);
+    await writer.load();
+    attachDiagnosticsLogWriter(writer);
+
+    recordUiEvent('diagnostics:refresh');
+    expect(writer.getLines()).toHaveLength(0);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(writer.getLines().some((l) => l.includes('ui tap diagnostics:refresh'))).toBe(true);
+  });
+
+  test('rotation caps apply to ui lines like any other line', () => {
+    const lines = Array.from({ length: MAX_DIAGNOSTICS_LOG_LINES + 10 }, (_, i) => `ui tap action-${i}`);
+    const kept = rotateDiagnosticsLogLines(lines);
+    expect(kept.length).toBe(MAX_DIAGNOSTICS_LOG_LINES);
+    expect(kept[0]).toBe('ui tap action-10');
   });
 });

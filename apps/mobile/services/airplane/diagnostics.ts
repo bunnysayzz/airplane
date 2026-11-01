@@ -554,6 +554,50 @@ export function subscribeDiagnostics(cb: () => void): () => void {
 }
 
 /** Test seam: clear all collector state. */
+
+// ------------------------------------------------------------ UI events
+// UI interaction log: tap and navigation lines for the shareable file.
+// Privacy by construction: call sites pass action names (constants)
+// and, at most, one id. The id is accepted only when it looks like an
+// id: hex (with an optional tag: prefix) or a mac: address, in which
+// case it is truncated or aliased exactly like peer log labels.
+// Anything else (post text, message text, coordinates, pasted keys,
+// clipboard content) is dropped and the action name alone is logged,
+// so a call site that only has sensitive content available can never
+// leak it. UI events change no snapshot state, so no notify is needed.
+// Lines go through the same sink as every other event, so they
+// survive restart via the writer load path and respect the rotation
+// caps in pushLine exactly like other lines.
+const UI_ACTION_RE = /^[a-z][a-z0-9:_-]{0,63}$/;
+const UI_ID_HEX_RE = /^(tag:)?[0-9a-fA-F]+$/;
+
+function uiTargetLabel(targetId: string): string | null {
+    if (targetId.startsWith('mac:')) return peerLogLabel(targetId);
+    if (UI_ID_HEX_RE.test(targetId)) return peerLogLabel(targetId);
+    return null;
+}
+
+export function recordUiEvent(action: string, targetId?: string): void {
+    if (!UI_ACTION_RE.test(action)) {
+        logEvent('ui', 'tap invalid-action');
+        return;
+    }
+    let detail = `tap ${action}`;
+    if (targetId !== undefined) {
+        const label = uiTargetLabel(targetId);
+        if (label !== null) detail += ` ${label}`;
+    }
+    logEvent('ui', detail);
+}
+
+// No slash: a raw route path must never pass as a screen name.
+const UI_SCREEN_RE = /^[a-zA-Z0-9_()-]{1,64}$/;
+
+export function recordUiNavigation(direction: 'forward' | 'back', screen: string): void {
+    const safe = UI_SCREEN_RE.test(screen) ? screen : 'unknown-screen';
+    logEvent('ui', `nav ${direction} ${safe}`);
+}
+
 export function resetDiagnosticsForTests(): void {
   adapterState = 'unknown';
   advertisingState = 'stopped';

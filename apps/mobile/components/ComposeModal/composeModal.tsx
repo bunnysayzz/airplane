@@ -27,6 +27,7 @@ import { DialogHost } from '../Dialog/dialogHost';
 import { dialog } from '../../src/lib/dialog';
 import { captureError } from '../../src/sentry';
 import { publishPost, LocationError } from '../../services/airplane/composer';
+import { recordUiEvent } from '../../services/airplane/diagnostics';
 import {
     getLocationPermissionStatus,
     requestLocationPermission,
@@ -111,12 +112,14 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
                     text: t('compose.discard'),
                     style: 'destructive',
                     onPress: () => {
+                        recordUiEvent('compose:discard');
                         resetDrag();
                         onClose();
                     },
                 },
             ]);
         } else {
+            recordUiEvent('compose:cancel');
             resetDrag();
             onClose();
         }
@@ -132,12 +135,14 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
                     text: t('compose.discard'),
                     style: 'destructive',
                     onPress: () => {
+                        recordUiEvent('compose:discard');
                         resetDrag();
                         onClose();
                     },
                 },
             ]);
         } else {
+            recordUiEvent('compose:cancel');
             resetDrag();
             onClose();
         }
@@ -176,7 +181,10 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             { text: t('common.cancel'), style: 'cancel' },
             {
                 text: t('common.settings'),
-                onPress: () => Linking.openSettings(),
+                onPress: () => {
+                    recordUiEvent('compose:open-settings');
+                    Linking.openSettings();
+                },
             },
         ]);
     };
@@ -185,6 +193,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
         if (isPublishDisabled || loading || publishingRef.current) return;
         publishingRef.current = true;
         setLoading(true);
+        recordUiEvent('compose:submit');
         try {
             const status = await getLocationPermissionStatus();
             if (status === 'denied') {
@@ -219,6 +228,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
                 }
             }
             const eventId = await publishPost(text, {});
+            recordUiEvent('compose:published', eventId);
             dialog.toast(t('compose.posted'));
             onPublished?.(eventId);
             onClose();
