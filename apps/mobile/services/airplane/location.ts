@@ -310,3 +310,25 @@ export async function getLocationCell(): Promise<string> {
     providerOverride ?? (defaultProvider ??= new ExpoLocationProvider());
   return provider.getCurrentCell();
 }
+
+/**
+ * Warm the location fix ahead of a post (compose-open prefetch). When the
+ * OS foreground grant is already present, this resolves a cell through the
+ * same default provider publishPost uses, so by submit time the cache is
+ * warm or the fix is already in flight and submit awaits that same
+ * attempt through the provider's in-flight sharing. Never throws: a
+ * warm-up failure stays silent here, submit retries and surfaces the
+ * typed error then. When the grant is not already present, warming is
+ * skipped entirely, so the OS permission dialog still only fires through
+ * the composer's priming flow, never from opening the sheet. Nothing
+ * about the fail-loud contract changes: no fake or default location, no
+ * fix older than FIX_MAX_AGE_MS, same timeout and accuracy.
+ */
+export async function warmLocationCell(): Promise<void> {
+  try {
+    if ((await getLocationPermissionStatus()) !== 'granted') return;
+    await getLocationCell();
+  } catch {
+    // Silent by design: submit retries and reports the failure.
+  }
+}
