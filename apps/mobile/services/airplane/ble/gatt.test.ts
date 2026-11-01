@@ -422,6 +422,39 @@ describe('extractTag (native discover shapes)', () => {
     expect(extractTag({})).toBeNull();
     expect(extractTag(null)).toBeNull();
   });
+  // Raw scan record: flags field plus a 0xFF field (company 0xFFFF
+  // little endian, 8-byte tag). Field length counts type plus payload.
+  const meshRecord = [0x02, 0x01, 0x06, 0x0b, 0xff, 0xff, 0xff, 1, 2, 3, 4, 5, 6, 7, 8];
+  test('rawData bytes: 0xFFFF manufacturer field yields the tag', () => {
+    const tag = extractTag({ advertising: { rawData: { bytes: meshRecord } } });
+    expect([...tag!]).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+  test('rawData base64 only (no bytes array) yields the tag', () => {
+    const tag = extractTag({ advertising: { rawData: { data: base64(meshRecord) } } });
+    expect([...tag!]).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+  test('rawData: different company id is skipped, later 0xFFFF field wins', () => {
+    const other = [0x02, 0x01, 0x06, 0x0b, 0xff, 0x4c, 0x00, 9, 9, 9, 9, 9, 9, 9, 9];
+    const tag = extractTag({ advertising: { rawData: { bytes: [...other, ...meshRecord.slice(3)] } } });
+    expect([...tag!]).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(extractTag({ advertising: { rawData: { bytes: other } } })).toBeNull();
+  });
+  test('rawData: truncated record, no 0xFF field, long payload -> null', () => {
+    expect(extractTag({ advertising: { rawData: { bytes: [0x02, 0x01, 0x06, 0x0b, 0xff, 0xff] } } })).toBeNull();
+    expect(extractTag({ advertising: { rawData: { bytes: [0x02, 0x01, 0x06, 0x03, 0x03, 0xaa, 0xbb] } } })).toBeNull();
+    const longPayload = [0x02, 0x01, 0x06, 0x0d, 0xff, 0xff, 0xff, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    expect(extractTag({ advertising: { rawData: { bytes: longPayload } } })).toBeNull();
+    expect(extractTag({ advertising: { rawData: { bytes: [300] } } })).toBeNull();
+  });
+  test('rawData without a tag falls back to the manufacturerData map', () => {
+    const tag = extractTag({
+      advertising: {
+        rawData: { bytes: [0x02, 0x01, 0x06] },
+        manufacturerData: { ffff: { bytes: [1, 2, 3, 4, 5, 6, 7, 8] } },
+      },
+    });
+    expect([...tag!]).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
 });
 
 describe('send/receive over the central role', () => {
@@ -1190,6 +1223,47 @@ describe('mesh-scan fix: codegen event subscription', () => {
       expect(sight[0]).toContain('mesh=1');
       expect(sight[0]).toContain('nonmesh=3');
       expect(sight[0]).toContain('1234:2x1');
+      off();
+    } finally {
+      delete mgr.onDiscoverPeripheral;
+      nowSpy.mockRestore();
+      setDiagnosticsLogSink(null);
+      resetDiagnosticsForTests();
+    }
+  });
+
+  test('scan sightings from rawData show mesh counts and real md classes', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind: string, detail: string) => lines.push(`${kind}:${detail}`));
+    const nowSpy = jest.spyOn(Date, 'now');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mgr = require('react-native-ble-manager').default;
+    let captured: ((p: unknown) => void) | null = null;
+    mgr.onDiscoverPeripheral = jest.fn((cb: (p: unknown) => void) => {
+      captured = cb;
+      return { remove: jest.fn() };
+    });
+    try {
+      const deps = defaultBleDeps(async () => true);
+      const off = deps.central!.onDiscover(() => {});
+      let now = 2_000_000;
+      nowSpy.mockImplementation(() => now);
+      const meshRecord = [0x02, 0x01, 0x06, 0x0b, 0xff, 0xff, 0xff, 1, 2, 3, 4, 5, 6, 7, 8];
+      const appleRecord = [0x02, 0x01, 0x06, 0x0b, 0xff, 0x4c, 0x00, 9, 9, 9, 9, 9, 9, 9, 9];
+      const nordicRecord = [0x02, 0x01, 0x06, 0x07, 0xff, 0x59, 0x00, 7, 7, 7, 7];
+      captured!({ id: 'aa', rssi: -70, advertising: { rawData: { bytes: meshRecord } } });
+      captured!({ id: 'bb', rssi: -71, advertising: { rawData: { bytes: appleRecord } } });
+      expect(lines.filter((l) => l.includes('sightings'))).toHaveLength(0);
+      now += 61_000;
+      captured!({ id: 'cc', rssi: -72, advertising: { rawData: { bytes: nordicRecord } } });
+      const sight = lines.filter((l) => l.includes('sightings'));
+      expect(sight).toHaveLength(1);
+      expect(sight[0]).toContain('total=3');
+      expect(sight[0]).toContain('mesh=1');
+      expect(sight[0]).toContain('nonmesh=2');
+      expect(sight[0]).toContain('004c:8x1');
+      expect(sight[0]).toContain('0059:4x1');
       off();
     } finally {
       delete mgr.onDiscoverPeripheral;

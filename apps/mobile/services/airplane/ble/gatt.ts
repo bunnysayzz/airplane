@@ -1011,19 +1011,95 @@ function uSafe(u: (() => void) | null | undefined): void {
 // Native library loading (lazy; never throws)
 // ---------------------------------------------------------------------------
 
+/** Read the full scan record bytes from a discover event, if present. */
+function rawRecordBytes(peripheral: unknown): Uint8Array | null {
+  try {
+    const raw = (peripheral as { advertising?: { rawData?: { bytes?: unknown; data?: unknown } } })
+      ?.advertising?.rawData;
+    if (!raw || typeof raw !== 'object') return null;
+    if (raw.bytes instanceof Uint8Array) return raw.bytes;
+    if (Array.isArray(raw.bytes)) {
+      const nums = raw.bytes as unknown[];
+      if (
+        nums.length > 0 &&
+        nums.every((n) => typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= 255)
+      ) {
+        return new Uint8Array(nums as number[]);
+      }
+    }
+    if (typeof raw.data === 'string' && raw.data.length > 0) {
+      const decoded = Buffer.from(raw.data, 'base64');
+      if (decoded.length > 0) return new Uint8Array(decoded);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Walk BLE AD structures in a raw scan record and collect manufacturer
+ * specific data fields. Each field is [length, type, payload...] where
+ * length counts the type byte plus payload. Returns one entry per 0xFF
+ * field: the company id (little endian) and the payload after it.
+ * Truncated or malformed input yields no entries, never throws.
+ */
+function manufacturerFields(record: Uint8Array): { companyId: number; payload: Uint8Array }[] {
+  const out: { companyId: number; payload: Uint8Array }[] = [];
+  try {
+    let i = 0;
+    while (i < record.length) {
+      const fieldLen = record[i];
+      if (fieldLen === 0) break;
+      if (i + fieldLen >= record.length) break;
+      const type = record[i + 1];
+      if (type === 0xff) {
+        const payload = record.slice(i + 2, i + 1 + fieldLen);
+        if (payload.length >= 2) {
+          const companyId = payload[0] | (payload[1] << 8);
+          out.push({ companyId, payload: payload.slice(2) });
+        }
+      }
+      i += 1 + fieldLen;
+    }
+  } catch {
+    // ignore, return what was collected
+  }
+  return out;
+}
+
+/** Find our 8-byte mesh tag in a raw scan record, if present. */
+function tagFromRawRecord(record: Uint8Array): Uint8Array | null {
+  for (const field of manufacturerFields(record)) {
+    if (field.companyId === ADVERTISE_COMPANY_ID && field.payload.length === 8) {
+      return new Uint8Array(field.payload);
+    }
+  }
+  return null;
+}
+
 /** Extract the 8-byte mesh tag from a ble-manager discover event. */
 export function extractTag(peripheral: unknown): Uint8Array | null {
   try {
+    // Parse the raw scan record first. On the codegen event path the
+    // native manufacturerData map does not arrive as the keyed map the
+    // lookup below expects (the codegen spec declares that field as an
+    // array), so the map lookup finds nothing even while peers advertise
+    // nearby. The raw record is declared as a single object in the spec
+    // and survives, and it always carries the full advertisement.
+    const record = rawRecordBytes(peripheral);
+    if (record) {
+      const tag = tagFromRawRecord(record);
+      if (tag) return tag;
+    }
     const p = peripheral as {
       advertising?: { manufacturerData?: Record<string, { bytes?: number[]; data?: string }> };
     };
     const md = p?.advertising?.manufacturerData;
     if (!md) return null;
-    // ble-manager 12.6.0 on Android keys manufacturerData by lowercase hex
-    // ("%04x"), NOT by decimal company id: 0xFFFF arrives as "ffff". A
-    // decimal-only lookup silently drops every mesh peer (the two-phone
-    // "0 nearby" failure: discovery never saw a single peer). Try the real
-    // native hex key first, then decimal/numeric for robustness.
+    // Legacy and non-codegen shapes key manufacturerData by lowercase hex
+    // ("%04x"), NOT by decimal company id: 0xFFFF arrives as "ffff".
+    // Try the native hex key first, then decimal/numeric for robustness.
     const hexKey = ADVERTISE_COMPANY_ID.toString(16).padStart(4, '0');
     const entry = md[hexKey] ?? md[String(ADVERTISE_COMPANY_ID)] ?? md[ADVERTISE_COMPANY_ID];
     const bytes = entry?.bytes;
@@ -1063,12 +1139,27 @@ function loadCentralAdapter(): CentralAdapter | null {
     const SIGHTING_WINDOW_MS = 60_000;
     function manufacturerSummary(p: unknown): string[] {
       try {
+        const out: string[] = [];
+        const seen = new Set<string>();
+        const push = (s: string): void => {
+          if (!seen.has(s)) {
+            seen.add(s);
+            out.push(s);
+          }
+        };
+        // Raw record first: real manufacturer classes from AD structures,
+        // so sighting lines show what the scanner actually delivered even
+        // when the keyed manufacturerData map does not survive the event.
+        const record = rawRecordBytes(p);
+        if (record) {
+          for (const field of manufacturerFields(record)) {
+            push(`${field.companyId.toString(16).padStart(4, '0')}:${field.payload.length}`);
+          }
+        }
         const md = (p as { advertising?: { manufacturerData?: Record<string, { bytes?: unknown; data?: unknown }> } })?.advertising
           ?.manufacturerData;
-        if (!md || typeof md !== 'object') return [];
-        return Object.entries(md)
-          .slice(0, 5)
-          .map(([key, entry]) => {
+        if (md && typeof md === 'object') {
+          for (const [key, entry] of Object.entries(md).slice(0, 5)) {
             let len = -1;
             if (Array.isArray((entry as { bytes?: unknown })?.bytes)) len = ((entry as { bytes: unknown[] }).bytes).length;
             else if (typeof (entry as { data?: unknown })?.data === 'string') {
@@ -1078,8 +1169,10 @@ function loadCentralAdapter(): CentralAdapter | null {
                 len = -1;
               }
             }
-            return `${key}:${len}`;
-          });
+            push(`${key}:${len}`);
+          }
+        }
+        return out;
       } catch {
         return [];
       }
