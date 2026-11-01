@@ -16,6 +16,7 @@ import {
 import { makePost, makeSizedEvent } from '../../protocol/src/test-helpers';
 import { decodeEvent } from '@airplane/protocol';
 import { BleTransport, HybridTransport, type IngressSource } from './hybrid';
+import { LanTransport } from './lan';
 
 /** Minimal in-memory TransportPort (loopback between "peers" not needed). */
 class FakeBlePort implements TransportPort {
@@ -659,6 +660,123 @@ describe('HybridTransport lifecycle', () => {
     expect(res.blePeers).toBe(1);
     expect(port.sent).toHaveLength(1);
     expect(seen).toEqual(['local']);
+    await h.stop();
+  });
+});
+
+describe('HybridTransport LAN stage (T15)', () => {
+  /** Minimal in-memory LanPort, mirroring FakeBlePort. */
+  class FakeLanPort {
+    sent: { peerId: string; bytes: Uint8Array }[] = [];
+    private receivers = new Set<(bytes: Uint8Array) => void>();
+
+    async start(): Promise<void> {}
+    async stop(): Promise<void> {}
+    discoveredPeerIds(): string[] {
+      return [];
+    }
+    async send(peerId: string, bytes: Uint8Array): Promise<void> {
+      this.sent.push({ peerId, bytes });
+    }
+    onReceive(cb: (bytes: Uint8Array) => void): () => void {
+      this.receivers.add(cb);
+      return () => {
+        this.receivers.delete(cb);
+      };
+    }
+
+    inject(bytes: Uint8Array): void {
+      for (const cb of this.receivers) cb(bytes);
+    }
+  }
+
+  function makeLanHybrid() {
+    const blePort = new FakeBlePort();
+    const ble = new BleTransport(blePort);
+    const lanPort = new FakeLanPort();
+    const lan = new LanTransport(lanPort);
+    // Nostr with no relays: never online, so the router always reaches LAN/mesh.
+    const h = new HybridTransport(ble, { relays: [] }, undefined, undefined, lan);
+    return { h, blePort, lanPort, lan };
+  }
+
+  test('LAN wire path feeds hybrid ingress once with source lan; relay echo of the same event is dropped', async () => {
+    const { h, lanPort } = makeLanHybrid();
+    await h.start();
+
+    const seen: { id: string; source: IngressSource }[] = [];
+    h.onPost((e, source) => {
+      seen.push({ id: toHex(e.id), source });
+    });
+
+    const event = makePost('lan ingress');
+    const frames = fragment(encodeEvent(event), DEFAULT_TTL, FRAG_WIRE_MAX);
+    for (const frame of frames) lanPort.inject(frame);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].source).toBe('lan');
+
+    expect(h.ingress(event, 'nostr')).toBe(false);
+    expect(seen).toHaveLength(1);
+    await h.stop();
+  });
+
+  test('publish reaches LAN before mesh: LAN win sends nothing over BLE', async () => {
+    const { h, blePort, lanPort } = makeLanHybrid();
+    await h.start();
+
+    const res = await h.publish(makePost('lan wins'), ['ble-peer'], ['lan-peer']);
+    expect(res.transport).toBe('lan');
+    expect(res.status).toBe('sent');
+    expect(res.lanPeers).toBe(1);
+    expect(res.blePeers).toBe(0);
+    expect(lanPort.sent).toHaveLength(1);
+    expect(lanPort.sent[0].peerId).toBe('lan-peer');
+    expect(blePort.sent).toHaveLength(0);
+    await h.stop();
+  });
+
+  test('publish falls through to mesh when every LAN send fails', async () => {
+    const { h, blePort, lanPort } = makeLanHybrid();
+    lanPort.send = async () => {
+      throw new Error('peer left the LAN');
+    };
+    await h.start();
+
+    const res = await h.publish(makePost('lan fails'), ['ble-peer'], ['lan-peer']);
+    expect(res.transport).toBe('mesh');
+    expect(res.status).toBe('sent');
+    expect(res.blePeers).toBe(1);
+    expect(res.lanPeers).toBe(0);
+    expect(blePort.sent).toHaveLength(1);
+    await h.stop();
+  });
+
+  test('publish with no LAN peers reaches mesh, and with no peers at all reports queued', async () => {
+    const { h, blePort } = makeLanHybrid();
+    await h.start();
+
+    const meshRes = await h.publish(makePost('no lan peers'), ['ble-peer'], []);
+    expect(meshRes.transport).toBe('mesh');
+    expect(meshRes.lanPeers).toBe(0);
+    expect(blePort.sent).toHaveLength(1);
+
+    const queuedRes = await h.publish(makePost('no peers'), [], []);
+    expect(queuedRes.transport).toBe('none');
+    expect(queuedRes.status).toBe('queued');
+    expect(queuedRes.lanPeers).toBe(0);
+    await h.stop();
+  });
+
+  test('publish without a LAN transport configured still reaches mesh', async () => {
+    const blePort = new FakeBlePort();
+    const ble = new BleTransport(blePort);
+    const h = new HybridTransport(ble, { relays: [] });
+    await h.start();
+
+    const res = await h.publish(makePost('no lan transport'), ['ble-peer'], ['lan-peer']);
+    expect(res.transport).toBe('mesh');
+    expect(res.blePeers).toBe(1);
+    expect(res.lanPeers).toBe(0);
     await h.stop();
   });
 });

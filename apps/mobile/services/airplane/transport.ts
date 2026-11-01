@@ -20,6 +20,7 @@ import type { NetInfoState } from '@react-native-community/netinfo';
 import {
   HybridTransport,
   BleTransport,
+  LanTransport,
   WorldSync,
   type WorldConfirmStore,
   type RouteResult,
@@ -47,8 +48,11 @@ import {
   recordScanStopped,
   recordTransportFailure,
   setDiagnosticsAdapterState,
+  setDiagnosticsLanPeerCount,
+  setDiagnosticsLanState,
   type DiagnosticsMessageAttempt,
 } from './diagnostics';
+import { makeLanPort, type AppLanPort } from './lan';
 
 /**
  * NetInfo is a native module. If it fails to load (not linked, Expo Go,
@@ -146,6 +150,15 @@ let syncTimer: ReturnType<typeof setInterval> | null = null;
  */
 let lastOnline: boolean | null = null;
 let blePort: { port: TransportPort; close: () => Promise<void> } | null = null;
+/**
+ * T15 Wi-Fi LAN port + transport. Built in startTransport from the
+ * device pubkey; null when the identity is not yet readable or the
+ * transport was never started. Inert on builds without the native
+ * module (the adapter fails closed), never a launch failure.
+ */
+let lanPort: AppLanPort | null = null;
+let lanTransport: LanTransport | null = null;
+let lanPeersUnsub: (() => void) | null = null;
 let bleScanUnsub: (() => void) | null = null;
 /**
  * Scan health and retry (mesh-scan fix). bleScanUp is true only while a
@@ -286,8 +299,8 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
     return;
   }
   // Diagnostics: 'local' is our own publish echo (already logged as
-  // outbound), so only relay and BLE arrivals are logged as inbound.
-  if (source === 'nostr' || source === 'ble') {
+  // outbound), so only relay, BLE, and LAN arrivals are logged as inbound.
+  if (source === 'nostr' || source === 'ble' || source === 'lan') {
     recordMessage({
       id: toHex(event.id),
       sequence: null,
@@ -295,7 +308,7 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
       direction: 'inbound',
       attempts: [
         {
-          transport: source === 'nostr' ? 'relay' : 'ble',
+          transport: source === 'nostr' ? 'relay' : source === 'lan' ? 'lan' : 'ble',
           atMs: Date.now(),
           outcome: 'ok',
           detail: null,
@@ -528,6 +541,21 @@ export async function startTransport(): Promise<void> {
     verify: (event) => verifyEvent(crypto, event),
     onDedupDrop: (peerId) => recordDedupDrop(peerId),
   });
+  // T15: Wi-Fi LAN transport, same verification as BLE. Built from
+  // the device pubkey so NSD can advertise it; any failure here
+  // (identity unreadable, native missing) leaves LAN inert and the
+  // router simply skips the LAN stage, it never blocks launch.
+  try {
+    const publicKey = await getDevicePublicKey();
+    lanPort = makeLanPort(toHex(publicKey));
+    lanTransport = new LanTransport(lanPort, {
+      verify: (event) => verifyEvent(crypto, event),
+      onDedupDrop: (peerId) => recordDedupDrop(peerId),
+    });
+  } catch {
+    lanPort = null;
+    lanTransport = null;
+  }
   // Relay list is user-configurable in Settings > Relays and persisted in
   // AsyncStorage (src/lib/relays.ts). loadRelayUrls() already falls back to
   // the default public relays when nothing is stored — and never throws —
@@ -562,6 +590,7 @@ export async function startTransport(): Promise<void> {
       // socket fact, so builds without NetInfo keep relay working.
       networkValidated: () => lastOnline !== false,
     },
+    lanTransport ?? undefined,
   );
   if (pendingSubscribeCells) {
     hybrid.nostr.setSubscribeCells(pendingSubscribeCells);
@@ -599,11 +628,29 @@ export async function startTransport(): Promise<void> {
     recordTransportFailure('start');
     await blePort?.close();
     blePort = null;
+    lanPeersUnsub?.();
+    lanPeersUnsub = null;
+    lanPort = null;
+    lanTransport = null;
+    setDiagnosticsLanState('off');
+    setDiagnosticsLanPeerCount(0);
     hybrid = null;
     sync = null;
     lastOnline = null;
     throw new Error('transport failed to start; running offline-only');
   }
+
+  // T15: LAN diagnostics state. 'on' means the native module is
+  // present and the transport started; 'unavailable' means the build
+  // has no LAN module (iOS, Expo Go) or the identity was unreadable,
+  // so the router skips the LAN stage. Peer count updates live from
+  // discovery events, so the Diagnostics screen shows real peers.
+  setDiagnosticsLanState(lanPort && lanPort.isActive() ? 'on' : 'unavailable');
+  setDiagnosticsLanPeerCount(lanTransport?.discoveredPeerIds().length ?? 0);
+  lanPeersUnsub =
+    lanPort?.onPeersChanged(() => {
+      setDiagnosticsLanPeerCount(lanTransport?.discoveredPeerIds().length ?? 0);
+    }) ?? null;
 
   // T19: rebuild reshare counts from stored kind-5 events before the feed
   // first renders them. Best-effort and idempotent: a failure just means
@@ -1007,6 +1054,12 @@ export async function stopTransport(): Promise<void> {
   await hybrid?.stop();
   await blePort?.close();
   blePort = null;
+  lanPeersUnsub?.();
+  lanPeersUnsub = null;
+  lanPort = null;
+  lanTransport = null;
+  setDiagnosticsLanState('off');
+  setDiagnosticsLanPeerCount(0);
   hybrid = null;
   sync = null;
   radioWasOn = false;
@@ -1022,7 +1075,11 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
   // call passed no peer ids at all, so local posts NEVER went out over
   // BLE — only Nostr — even with phones connected over GATT.
   const blePeersAtPublish = blePeerIdsForPublish(blePort?.port);
-  const result = await hybrid!.publish(event, blePeersAtPublish);
+  // T15: LAN fan-out targets the peers NSD discovered on this Wi-Fi
+  // network or hotspot. The router tries LAN only after the relay
+  // stage, and only when this list is non-empty.
+  const lanPeersAtPublish = lanTransport?.discoveredPeerIds() ?? [];
+  const result = await hybrid!.publish(event, blePeersAtPublish, lanPeersAtPublish);
   // Relay OK is the confirmation: mark it now instead of waiting for
   // the post to be observed back over a subscription, which left the
   // globe dark and WorldSync re-pushing every minute. The inbound
@@ -1034,9 +1091,9 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
   }
   const nowMs = Date.now();
   // Diagnostics record exactly the stages the router actually ran: a
-  // relay win never touches BLE, a skipped relay stage is marked
-  // skipped (not failed), and a queued result records both stages as
-  // unattempted or failed per the router result.
+  // relay win never touches LAN or BLE, a skipped relay stage is
+  // marked skipped (not failed), and a queued result records each
+  // later stage as unattempted or failed per the router result.
   const attempts: DiagnosticsMessageAttempt[] = [];
   if (result.transport === 'relay') {
     attempts.push({
@@ -1057,6 +1114,31 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
       outcome: result.relayTried ? 'failed' : 'skipped',
       detail: result.relayDetail,
     });
+    // LAN stage runs only after a relay loss. A LAN win never touches
+    // BLE; a LAN loss with discovered peers means every LAN send
+    // failed (the router only attempts LAN when peers exist).
+    if (result.transport === 'lan') {
+      attempts.push({
+        transport: 'lan',
+        atMs: nowMs,
+        outcome: 'ok',
+        detail: `sent to ${result.lanPeers} LAN peers (no peer ack in current transport)`,
+      });
+    } else if (lanPeersAtPublish.length > 0) {
+      attempts.push({
+        transport: 'lan',
+        atMs: nowMs,
+        outcome: 'failed',
+        detail: 'LAN send failed for all discovered peers',
+      });
+    } else {
+      attempts.push({
+        transport: 'lan',
+        atMs: nowMs,
+        outcome: 'skipped',
+        detail: 'no LAN peers discovered',
+      });
+    }
     if (result.transport === 'mesh') {
       attempts.push({
         transport: 'ble',
@@ -1091,9 +1173,11 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
     finalStatus:
       result.transport === 'relay'
         ? 'relayed'
-        : result.transport === 'mesh'
-          ? 'sent over BLE'
-          : 'not delivered to any transport',
+        : result.transport === 'lan'
+          ? 'sent over LAN'
+          : result.transport === 'mesh'
+            ? 'sent over BLE'
+            : 'not delivered to any transport',
   });
   return result;
 }

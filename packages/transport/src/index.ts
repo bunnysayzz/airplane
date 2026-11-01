@@ -24,6 +24,9 @@ export type {
 export { BleTransport, HybridTransport, DEFAULT_RELAY_DEADLINE_MS } from './hybrid';
 export type { HybridTransportOpts, HybridDiagnosticsOpts, IngressSource, RouterOpts, RouterStatus, RouterTransport, RouteResult } from './hybrid';
 
+export { LanTransport, LAN_FRAME_MAX } from './lan';
+export type { LanPort, LanTransportOpts } from './lan';
+
 export { WorldSync } from './sync';
 export type { SyncReport, WorldConfirmStore } from './sync';
 

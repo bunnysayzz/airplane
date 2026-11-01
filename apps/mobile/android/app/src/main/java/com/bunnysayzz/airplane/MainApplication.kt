@@ -23,8 +23,9 @@ class MainApplication : Application(), ReactApplication {
         object : DefaultReactNativeHost(this) {
           override fun getPackages(): List<ReactPackage> {
             val packages = PackageList(this).packages
-            // Packages that cannot be autolinked yet can be added manually here, for example:
-            // packages.add(MyReactNativePackage())
+            // App-code native modules (not autolinked libraries):
+            // T15 Wi-Fi LAN (NSD + TCP server).
+            packages.add(AirplaneLanPackage())
             return packages
           }
 

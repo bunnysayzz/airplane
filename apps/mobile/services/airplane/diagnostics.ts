@@ -29,7 +29,7 @@ export type DiagnosticsAdapterState =
 
 export type DiagnosticsGattState = 'seen' | 'connected' | 'disconnected';
 
-export type DiagnosticsTransportKind = 'relay' | 'ble' | 'mesh';
+export type DiagnosticsTransportKind = 'relay' | 'ble' | 'lan' | 'mesh';
 
 export type DiagnosticsAttemptOutcome = 'ok' | 'failed' | 'queued' | 'skipped';
 
@@ -110,6 +110,11 @@ export interface DiagnosticsSnapshot {
     scanStartsLast30s: number;
   };
   peers: DiagnosticsPeer[];
+  /** T15: Wi-Fi LAN state (peer count only, never peer ids, in the snapshot). */
+  lan: {
+    state: 'off' | 'on' | 'unavailable';
+    peerCount: number;
+  };
   messages: DiagnosticsMessage[];
   permissions: DiagnosticsPermissionReport | null;
   dedupDrops: number;
@@ -150,6 +155,20 @@ function newPeer(peerId: string): DiagnosticsPeer {
     cccdSubscribed: null,
     frames: emptyFrames(),
   };
+}
+
+let lanState: 'off' | 'on' | 'unavailable' = 'off';
+let lanPeerCount = 0;
+
+export function setDiagnosticsLanState(state: 'off' | 'on' | 'unavailable'): void {
+  lanState = state;
+  logEvent('lan', `state ${state}`);
+  notifyThrottled();
+}
+
+export function setDiagnosticsLanPeerCount(count: number): void {
+  lanPeerCount = count;
+  notifyThrottled();
 }
 
 let adapterState: DiagnosticsAdapterState = 'unknown';
@@ -535,6 +554,7 @@ export function getDiagnosticsSnapshot(): DiagnosticsSnapshot {
       scanStartsLast30s: scanStarts.length,
     },
     peers: sortedPeers.map((p) => ({ ...p, frames: { ...p.frames } })),
+    lan: { state: lanState, peerCount: lanPeerCount },
     messages: [...messages].reverse(),
     permissions: permissionReport,
     dedupDrops: dedupDropTotal,
@@ -608,6 +628,8 @@ export function resetDiagnosticsForTests(): void {
   scanningLastFailure = null;
   scanStarts = [];
   peers.clear();
+  lanState = 'off';
+  lanPeerCount = 0;
   messages.length = 0;
   permissionReport = null;
   dedupDropTotal = 0;

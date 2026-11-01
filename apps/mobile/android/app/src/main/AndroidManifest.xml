@@ -1,5 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
   <uses-permission android:name="android.permission.INTERNET"/>
+  <!-- T15 (Wi-Fi LAN): NSD discovery runs on the local network; this
+       normal permission (no runtime prompt) lets the app read network
+       state for LAN diagnostics. Mirrored in app.json
+       android.permissions. No Google services involved. -->
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
   <!-- T14 (in-app update, preparatory only): the permission an in-app
        ACTION_INSTALL_PACKAGE flow needs. Mirrored in app.json
        android.permissions. Declaring it installs nothing on its own; the

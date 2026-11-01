@@ -353,6 +353,16 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
           </Text>
         </Card>
 
+        <SectionLabel style={styles.sectionLabel}>{t('settings.diagnosticsLan')}</SectionLabel>
+        <Card style={styles.group}>
+          <Text style={[type.body, styles.kvValue]}>
+            {t('settings.diagnosticsLanState')}: {snapshot.lan.state}
+          </Text>
+          <Text style={[type.body, styles.kvValue]}>
+            {t('settings.diagnosticsLanPeers')}: {snapshot.lan.peerCount}
+          </Text>
+        </Card>
+
         <SectionLabel style={styles.sectionLabel}>{t('settings.diagnosticsPermissions')}</SectionLabel>
         <Card style={styles.group}>
           {permissionRows.length === 0 ? (

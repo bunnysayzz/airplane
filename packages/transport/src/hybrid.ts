@@ -22,9 +22,10 @@ import {
   type TransportPort,
 } from '@airplane/protocol';
 import { NostrTransport, type NostrTransportOpts } from './nostr';
+import type { LanTransport } from './lan';
 
 /** Where an inbound post arrived from. */
-export type IngressSource = 'ble' | 'nostr' | 'local';
+export type IngressSource = 'ble' | 'nostr' | 'lan' | 'local';
 
 /**
  * BLE-side transport. Wraps a TransportPort (real GATT on device,
@@ -191,17 +192,19 @@ export interface HybridDiagnosticsOpts {
 export type RouterStatus = 'queued' | 'sent' | 'relayed';
 
 /** Which stage won a routed publish, or none when nothing could send. */
-export type RouterTransport = 'relay' | 'mesh' | 'none';
+export type RouterTransport = 'relay' | 'lan' | 'mesh' | 'none';
 
 /**
  * Result of one routed publish. blePeers and relays keep their old
  * meaning for callers: blePeers is the count of BLE peers sent to,
- * relays is the list of relay URLs that sent an accepted OK.
+ * relays is the list of relay URLs that sent an accepted OK, and
+ * lanPeers is the count of LAN peers sent to (T15).
  */
 export interface RouteResult {
   transport: RouterTransport;
   status: RouterStatus;
   blePeers: number;
+  lanPeers: number;
   relays: string[];
   /** True when the relay stage was actually attempted. */
   relayTried: boolean;
@@ -253,6 +256,7 @@ export class HybridTransport {
   private readonly handlers = new Set<(event: SignedEvent, source: IngressSource) => void>();
   private readonly bleUnsubs: (() => void)[] = [];
   readonly nostr: NostrTransport;
+  private readonly lan: LanTransport | undefined;
   private readonly diagnosticsOpts: HybridDiagnosticsOpts | undefined;
   private readonly relayDeadlineMs: number;
   private readonly networkValidated: (() => boolean) | undefined;
@@ -262,8 +266,10 @@ export class HybridTransport {
     nostrOpts?: NostrTransportOpts,
     diagnosticsOpts?: HybridDiagnosticsOpts,
     routerOpts?: RouterOpts,
+    lan?: LanTransport,
   ) {
     this.nostr = new NostrTransport(nostrOpts);
+    this.lan = lan;
     this.diagnosticsOpts = diagnosticsOpts;
     this.relayDeadlineMs = routerOpts?.relayDeadlineMs ?? DEFAULT_RELAY_DEADLINE_MS;
     this.networkValidated = routerOpts?.networkValidated;
@@ -272,16 +278,21 @@ export class HybridTransport {
   async start(): Promise<void> {
     await this.ble.start();
     await this.nostr.start();
+    if (this.lan) await this.lan.start();
     this.bleUnsubs.push(
       this.ble.onReceive((event, peerId) => this.ingress(event, 'ble', peerId)),
       this.nostr.onReceive((event) => this.ingress(event, 'nostr')),
     );
+    if (this.lan) {
+      this.bleUnsubs.push(this.lan.onReceive((event, peerId) => this.ingress(event, 'lan', peerId)));
+    }
   }
 
   async stop(): Promise<void> {
     for (const u of this.bleUnsubs.splice(0)) u();
     await this.ble.stop();
     await this.nostr.stop();
+    if (this.lan) await this.lan.stop();
   }
 
   /**
@@ -322,15 +333,18 @@ export class HybridTransport {
 
   /**
    * Publish a locally-created event through the ordered router.
-   * Stage order is fixed: relay first, mesh fallback, queued when
-   * neither can send. A future LAN stage slots in between relay and
-   * mesh: it must run after the relay stage, never before it, so the
-   * relay-first order and D1 hold for every transport added later.
-   * Marks the id seen (so the echo is not re-emitted), then emits
-   * locally so the feed store sees our own post through the same path
-   * as remote ones.
+   * Stage order is fixed: relay first, LAN next (T15), mesh fallback
+   * last, queued when nothing can send. The LAN stage runs after the
+   * relay stage, never before it, so the relay-first order and D1
+   * hold for every transport. Marks the id seen (so the echo is not
+   * re-emitted), then emits locally so the feed store sees our own
+   * post through the same path as remote ones.
    */
-  async publish(event: SignedEvent, blePeerIds: string[] = []): Promise<RouteResult> {
+  async publish(
+    event: SignedEvent,
+    blePeerIds: string[] = [],
+    lanPeerIds: string[] = [],
+  ): Promise<RouteResult> {
     const idHex = toHex(event.id);
     this.seen.add(idHex);
     const relay = await this.attemptRelay(event);
@@ -340,12 +354,26 @@ export class HybridTransport {
         transport: 'relay',
         status: 'relayed',
         blePeers: 0,
+        lanPeers: 0,
         relays: relay.ok,
         relayTried: true,
         relayDetail: null,
       };
     } else {
-      result = await this.attemptMesh(event, blePeerIds, relay);
+      const lan = await this.attemptLan(event, lanPeerIds);
+      if (lan.sent > 0) {
+        result = {
+          transport: 'lan',
+          status: 'sent',
+          blePeers: 0,
+          lanPeers: lan.sent,
+          relays: [],
+          relayTried: relay.tried,
+          relayDetail: relay.detail,
+        };
+      } else {
+        result = await this.attemptMesh(event, blePeerIds, relay);
+      }
     }
     for (const h of this.handlers) {
       try {
@@ -385,6 +413,21 @@ export class HybridTransport {
   }
 
   /**
+   * LAN stage (T15). Broadcasts to the given LAN peers, or reports
+   * zero sent when there is no LAN transport, no peer to send to,
+   * or every send failed. A LAN win never touches BLE; a LAN loss
+   * falls through to mesh exactly like a relay loss.
+   */
+  private async attemptLan(
+    event: SignedEvent,
+    lanPeerIds: string[],
+  ): Promise<{ sent: number }> {
+    if (!this.lan || lanPeerIds.length === 0) return { sent: 0 };
+    const sent = await this.lan.broadcast(event, lanPeerIds);
+    return { sent };
+  }
+
+  /**
    * Mesh stage. Broadcasts to the given peers, or reports queued when
    * there is no peer to send to. Queued is a report, not storage: the
    * durable outbox (R5) owns persistence, retry, and drain.
@@ -399,6 +442,7 @@ export class HybridTransport {
         transport: 'none',
         status: 'queued',
         blePeers: 0,
+        lanPeers: 0,
         relays: [],
         relayTried: relay.tried,
         relayDetail: relay.detail,
@@ -410,6 +454,7 @@ export class HybridTransport {
         transport: 'none',
         status: 'queued',
         blePeers: 0,
+        lanPeers: 0,
         relays: [],
         relayTried: relay.tried,
         relayDetail: relay.detail,
@@ -419,6 +464,7 @@ export class HybridTransport {
       transport: 'mesh',
       status: 'sent',
       blePeers: sent,
+      lanPeers: 0,
       relays: [],
       relayTried: relay.tried,
       relayDetail: relay.detail,

@@ -219,6 +219,7 @@ describe('transport manager', () => {
       transport: 'relay',
       status: 'relayed',
       blePeers: 0,
+      lanPeers: 0,
       relays: ['wss://test.relay'],
       relayTried: true,
       relayDetail: null,

@@ -466,6 +466,9 @@ export const en = {
     diagnosticsOpenSettingsNote:
       'Use system settings when Android no longer prompts for a permission.',
     diagnosticsRadio: 'Radio',
+    diagnosticsLan: 'Wi-Fi LAN',
+    diagnosticsLanState: 'LAN state',
+    diagnosticsLanPeers: 'LAN peers discovered',
     diagnosticsAdapter: 'Adapter state',
     diagnosticsAdvertising: 'Advertising',
     diagnosticsScanning: 'Scanning',
