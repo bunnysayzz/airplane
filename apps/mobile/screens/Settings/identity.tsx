@@ -17,6 +17,7 @@ import {
   rotateDeviceKey,
 } from '../../services/airplane/identity';
 import { authorLabelFor } from '../../services/airplane/names';
+import { recordUiEvent } from '../../services/airplane/diagnostics';
 
 interface IdentityProps {
   onBack: () => void;
@@ -64,6 +65,7 @@ const Identity: React.FC<IdentityProps> = ({ onBack }) => {
   // long-press copy still works even if the module call ever fails.
   const handleCopy = () => {
     if (pubkeyHex === null) return;
+    recordUiEvent('identity:copy-code');
     setCopied(false);
     setCopyFailed(false);
     Clipboard.setStringAsync(pubkeyHex)
@@ -78,6 +80,7 @@ const Identity: React.FC<IdentityProps> = ({ onBack }) => {
         text: t('identity.burnConfirm'),
         style: 'destructive',
         onPress: () => {
+          recordUiEvent('identity:burn');
           setBurning(true);
           setBurnError(false);
           rotateDeviceKey()

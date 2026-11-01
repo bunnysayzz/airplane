@@ -10,6 +10,7 @@ import { SettingsHeader } from './header';
 import { makeRelayStyles } from './styles';
 import { tabBarClearance } from '../../components/TabBar/styles';
 import { useI18n } from '../../src/i18n/i18nContext';
+import { recordUiEvent } from '../../services/airplane/diagnostics';
 
 interface RelaysProps {
     onBack: () => void;
@@ -37,6 +38,7 @@ const Relays: React.FC<RelaysProps> = ({ onBack }) => {
         } catch {
             ok = false;
         }
+        recordUiEvent('settings:relay-add');
         if (ok) {
             setDraft('');
             setError(null);
@@ -46,6 +48,7 @@ const Relays: React.FC<RelaysProps> = ({ onBack }) => {
     };
 
     const handleRemove = async (url: string) => {
+        recordUiEvent('settings:relay-remove');
         let ok = false;
         try {
             ok = await removeRelay(url);
@@ -56,6 +59,7 @@ const Relays: React.FC<RelaysProps> = ({ onBack }) => {
     };
 
     const handleReset = async () => {
+        recordUiEvent('settings:relay-reset');
         let ok = false;
         try {
             ok = await resetRelays();

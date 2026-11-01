@@ -23,6 +23,8 @@ import {
   recordScanStarted,
   recordScanStopped,
   recordTransportFailure,
+  recordUiEvent,
+  recordUiNavigation,
   resetDiagnosticsForTests,
   setDiagnosticsAdapterState,
   setDiagnosticsLogSink,
@@ -304,6 +306,97 @@ describe('scan sighting summary', () => {
     try {
       recordScanSightings(12, 3, 9, 'ffff:8x2,1234:2x1');
       expect(lines).toEqual(['scan:sightings total=12 mesh=3 nonmesh=9 md=ffff:8x2,1234:2x1']);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+});
+
+describe('ui event logging', () => {
+  beforeEach(() => {
+    resetDiagnosticsForTests();
+  });
+
+  function uiLines(): string[] {
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => {
+      lines.push(`${kind} ${detail}`);
+    });
+    return lines;
+  }
+
+  test('logs action names only, with no snapshot change', () => {
+    const lines = uiLines();
+    try {
+      recordUiEvent('tab:feed');
+      expect(lines).toEqual(['ui tap tab:feed']);
+      const snap = getDiagnosticsSnapshot();
+      expect(snap.peers).toEqual([]);
+      expect(snap.messages).toEqual([]);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
+  test('a full peer id target is truncated, never emitted whole', () => {
+    const lines = uiLines();
+    const fullId = 'ab'.repeat(32);
+    try {
+      recordUiEvent('post:open', fullId);
+      expect(lines).toEqual(['ui tap post:open abababab...']);
+      expect(lines.join('\n')).not.toContain(fullId);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
+  test('post text, coordinates, and pasted non-id text are dropped', () => {
+    const lines = uiLines();
+    try {
+      recordUiEvent('post:star', 'hello secret post text');
+      recordUiEvent('dm:open', '12.345678,-98.765432');
+      recordUiEvent('dm:start-paste', 'not a key at all');
+      expect(lines).toEqual(['ui tap post:star', 'ui tap dm:open', 'ui tap dm:start-paste']);
+      const joined = lines.join('\n');
+      expect(joined).not.toContain('secret');
+      expect(joined).not.toContain('12.345678');
+      expect(joined).not.toContain('not a key');
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
+  test('a mac target is aliased, never emitted raw', () => {
+    const lines = uiLines();
+    try {
+      recordUiEvent('dm:open', 'mac:AA:BB:CC:DD:EE:FF');
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/^ui tap dm:open mac-peer-\d+$/);
+      expect(lines.join('\n')).not.toContain('AA:BB');
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
+  test('an invalid action logs no payload at all', () => {
+    const lines = uiLines();
+    const fullId = 'ab'.repeat(32);
+    try {
+      recordUiEvent('tap!', fullId);
+      expect(lines).toEqual(['ui tap invalid-action']);
+      expect(lines.join('\n')).not.toContain(fullId);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
+  test('navigation lines carry direction and a static screen name', () => {
+    const lines = uiLines();
+    try {
+      recordUiNavigation('forward', 'post');
+      recordUiNavigation('back', 'feed');
+      recordUiNavigation('forward', '/post/abc123def456');
+      expect(lines).toEqual(['ui nav forward post', 'ui nav back feed', 'ui nav forward unknown-screen']);
     } finally {
       setDiagnosticsLogSink(null);
     }

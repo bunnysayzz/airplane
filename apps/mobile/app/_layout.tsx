@@ -11,6 +11,7 @@ import { revalidateBleRadio } from '../services/airplane/transport';
 import { flushDmOutboxIfStarted } from '../services/airplane/dm';
 import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
 import { friendlyErrorMessage } from '../src/lib/errorCopy';
+import { recordUiEvent } from '../services/airplane/diagnostics';
 import {
   recordDiagnosticsLogAppState,
   startDiagnosticsLogFile,
@@ -31,7 +32,10 @@ export function ErrorBoundary({ error, retry }: { error: Error; retry: () => voi
         <View style={fallbackStyles.center}>
             <Text style={fallbackStyles.title}>Something broke</Text>
             <Text style={fallbackStyles.muted}>{friendlyErrorMessage(error)}</Text>
-            <Pressable style={fallbackStyles.button} onPress={retry}>
+            <Pressable style={fallbackStyles.button} onPress={() => {
+                recordUiEvent('app:retry');
+                retry();
+            }}>
                 <Text style={fallbackStyles.buttonText}>Try again</Text>
             </Pressable>
         </View>

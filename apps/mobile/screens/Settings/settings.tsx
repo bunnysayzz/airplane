@@ -18,6 +18,7 @@ import { SettingsHeader } from './header';
 import { makeStyles } from './styles';
 import { useI18n } from '../../src/i18n/i18nContext';
 import { tabBarClearance } from '../../components/TabBar/styles';
+import { recordUiEvent } from '../../services/airplane/diagnostics';
 import { EXPLAINER_CARDS, ExplainerCard } from '../Setup/explainerCard';
 
 // Deliberately opened in-app instead of a browser link: Airplane is an offline-first,
@@ -88,7 +89,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   if (page === 'appearance') {
     return (
       <SafeAreaView style={styles.safeArea}>
-        <Appearance onBack={() => setPage('main')} />
+        <Appearance onBack={() => {
+          recordUiEvent('settings:back:appearance');
+          setPage('main');
+        }} />
       </SafeAreaView>
     );
   }
@@ -96,7 +100,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   if (page === 'relays') {
     return (
       <SafeAreaView style={styles.safeArea}>
-        <Relays onBack={() => setPage('main')} />
+        <Relays onBack={() => {
+          recordUiEvent('settings:back:relays');
+          setPage('main');
+        }} />
       </SafeAreaView>
     );
   }
@@ -104,7 +111,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   if (page === 'identity') {
     return (
       <SafeAreaView style={styles.safeArea}>
-        <Identity onBack={() => setPage('main')} />
+        <Identity onBack={() => {
+          recordUiEvent('settings:back:identity');
+          setPage('main');
+        }} />
       </SafeAreaView>
     );
   }
@@ -112,7 +122,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   if (page === 'diagnostics') {
     return (
       <SafeAreaView style={styles.safeArea}>
-        <Diagnostics onBack={() => setPage('main')} />
+        <Diagnostics onBack={() => {
+          recordUiEvent('settings:back:diagnostics');
+          setPage('main');
+        }} />
       </SafeAreaView>
     );
   }
@@ -122,7 +135,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       <SafeAreaView style={styles.safeArea}>
         <SettingsHeader
           title={t('settings.privacy')}
-          onBack={() => setPage('main')}
+          onBack={() => {
+            recordUiEvent('settings:back:privacy');
+            setPage('main');
+          }}
           backLabel={t('appearance.back')}
         />
         <ScrollView
@@ -138,11 +154,12 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           </Card>
           <Pressable
             style={styles.fullPolicyRow}
-            onPress={() =>
+            onPress={() => {
+              recordUiEvent('settings:privacy-link');
               Linking.openURL(PRIVACY_URL).catch((error) =>
                 console.error('Failed to open privacy policy:', error),
               )
-            }
+            }}
             accessibilityRole="link"
           >
             <Text style={[type.name, styles.fullPolicyText]}>
@@ -172,7 +189,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
         <Card style={styles.group}>
           <Pressable
             style={styles.row}
-            onPress={() => setPage('appearance')}
+            onPress={() => {
+              recordUiEvent('settings:row:appearance');
+              setPage('appearance');
+            }}
             accessibilityRole="button"
             accessibilityLabel={t('settings.appearanceLabel', { coat: coatName })}
             accessibilityHint={t('settings.appearanceHint')}
@@ -188,7 +208,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           <View style={styles.divider} />
           <Pressable
             style={styles.row}
-            onPress={() => setPage('relays')}
+            onPress={() => {
+              recordUiEvent('settings:row:relays');
+              setPage('relays');
+            }}
             accessibilityRole="button"
             accessibilityLabel={t('settings.relaysTitle')}
             accessibilityHint={t('settings.relaysHint')}
@@ -200,7 +223,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           <View style={styles.divider} />
           <Pressable
             style={styles.row}
-            onPress={() => setPage('identity')}
+            onPress={() => {
+              recordUiEvent('settings:row:identity');
+              setPage('identity');
+            }}
             accessibilityRole="button"
             accessibilityLabel={t('settings.identityTitle')}
             accessibilityHint={t('settings.identityHint')}
@@ -212,7 +238,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           <View style={styles.divider} />
           <Pressable
             style={styles.row}
-            onPress={() => setPage('diagnostics')}
+            onPress={() => {
+              recordUiEvent('settings:row:diagnostics');
+              setPage('diagnostics');
+            }}
             accessibilityRole="button"
             accessibilityLabel={t('settings.diagnosticsTitle')}
             accessibilityHint={t('settings.diagnosticsHint')}
@@ -227,6 +256,7 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
             <Text style={[labelStyle, styles.rowText]}>{t('settings.compactMode')}</Text>
             <ThemedSwitch
               value={compactMode}
+              logAction="settings:toggle:compact"
               onValueChange={setCompactMode}
               accessibilityLabel={t('settings.compactMode')}
             />
@@ -245,7 +275,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
               <View style={styles.divider} />
               <Pressable
                 style={styles.row}
-                onPress={onCheckForUpdates}
+                onPress={() => {
+                  recordUiEvent('settings:update-check');
+                  onCheckForUpdates();
+                }}
                 accessibilityRole="button"
                 accessibilityLabel={t('settings.updateCheck')}
               >
@@ -262,7 +295,10 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           <View style={styles.divider} />
           <Pressable
             style={styles.row}
-            onPress={() => setPage('privacy')}
+            onPress={() => {
+              recordUiEvent('settings:row:privacy');
+              setPage('privacy');
+            }}
             accessibilityRole="button"
             accessibilityLabel={t('settings.privacy')}
             accessibilityHint={t('settings.privacyHint')}

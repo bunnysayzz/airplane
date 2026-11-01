@@ -10,6 +10,7 @@ import { resolveFeedCells } from '../../services/airplane/feedCells';
 import { setRelaySubscribeCells } from '../../services/airplane/transport';
 import { subscribeFeed } from '../../services/airplane/feed';
 import { isDoublePush } from '../../src/lib/navGuard';
+import { RouteTracker } from '../../components/RouteTracker/routeTracker';
 
 export default function FeedTab() {
     const router = useRouter();
@@ -87,6 +88,7 @@ export default function FeedTab() {
         <View style={[styles.root, { backgroundColor: colors.background }]}>
             {/* One-time BLE permission priming (renders nothing itself) */}
             <BlePrime />
+            <RouteTracker />
             <TopBar onSettingsPress={() => router.navigate('/(tabs)/settings')} />
             <Timeline
                 cells={cells}

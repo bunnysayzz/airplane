@@ -10,6 +10,8 @@ import type { DmConversationRow } from '@airplane/transport';
 import { DM_UNDECRYPTABLE_PLACEHOLDER } from '@airplane/transport';
 import { getDmService, dmPeerLabel, dmUserErrorMessage } from '../../services/airplane/dm';
 import { useTheme } from '../../src/theme/themeContext';
+import { recordUiEvent } from '../../services/airplane/diagnostics';
+import { RouteTracker } from '../../components/RouteTracker/routeTracker';
 
 export default function MessagesTab() {
     const router = useRouter();
@@ -85,7 +87,10 @@ export default function MessagesTab() {
     const row = (c: DmConversationRow) => (
         <Pressable
             key={c.peerHex}
-            onPress={() => open(c.peerHex)}
+            onPress={() => {
+                recordUiEvent('dm:open', c.peerHex);
+                open(c.peerHex);
+            }}
             style={[styles.row, { borderBottomColor: colors.borderColor }]}
             accessibilityRole="button"
             accessibilityLabel={`Conversation with ${dmPeerLabel(c.peerHex)}`}
@@ -102,7 +107,9 @@ export default function MessagesTab() {
     );
 
     return (
-        <ScrollView
+        <>
+            <RouteTracker />
+            <ScrollView
             style={[styles.root, { backgroundColor: colors.background }]}
             contentContainerStyle={[styles.content, { paddingTop: insets.top + 16 }]}
         >
@@ -120,7 +127,10 @@ export default function MessagesTab() {
                     autoCorrect={false}
                     style={[styles.input, { color: colors.textPrimary, borderColor: colors.borderColor }]}
                 />
-                <Pressable onPress={startFromPaste} style={[styles.go, { backgroundColor: colors.accentColor }]}>
+                <Pressable onPress={() => {
+                    recordUiEvent('dm:start-paste');
+                    startFromPaste();
+                }} style={[styles.go, { backgroundColor: colors.accentColor }]}>
                     <Text style={{ color: colors.buttonTextColor }}>Go</Text>
                 </Pressable>
             </View>
@@ -128,7 +138,10 @@ export default function MessagesTab() {
             {refreshError ? (
                 <View style={styles.retryRow}>
                     <Text style={[type.meta, { color: colors.textMuted }]}>Could not refresh conversations.</Text>
-                    <Pressable onPress={refresh} accessibilityRole="button" accessibilityLabel="Retry loading conversations">
+                    <Pressable onPress={() => {
+                        recordUiEvent('dm:retry-load');
+                        refresh();
+                    }} accessibilityRole="button" accessibilityLabel="Retry loading conversations">
                         <Text style={[type.meta, { color: colors.accentText }]}>Retry</Text>
                     </Pressable>
                 </View>
@@ -152,12 +165,13 @@ export default function MessagesTab() {
                         <View key={c.peerHex} style={[styles.row, { borderBottomColor: colors.borderColor }]}>
                             <Text style={[type.name, { color: colors.textPrimary }]}>{dmPeerLabel(c.peerHex)}</Text>
                             <Pressable
-                                onPress={() =>
+                                onPress={() => {
+                                    recordUiEvent('dm:unblock', c.peerHex);
                                     void getDmService()
                                         .then(svc => svc.unblockPeer(c.peerHex))
                                         .then(refresh)
                                         .catch((e: unknown) => Alert.alert('Action failed', dmUserErrorMessage(e)))
-                                }
+                                }}
                             >
                                 <Text style={[type.meta, { color: colors.accentText }]}>Unblock</Text>
                             </Pressable>
@@ -165,7 +179,8 @@ export default function MessagesTab() {
                     ))}
                 </>
             ) : null}
-        </ScrollView>
+            </ScrollView>
+        </>
     );
 }
 
