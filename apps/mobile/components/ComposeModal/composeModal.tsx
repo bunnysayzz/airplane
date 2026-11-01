@@ -30,6 +30,7 @@ import { publishPost, LocationError } from '../../services/airplane/composer';
 import {
     getLocationPermissionStatus,
     requestLocationPermission,
+    warmLocationCell,
 } from '../../services/airplane/location';
 
 // Airplane's post length: the protocol normalizes and caps bodies at 280 chars
@@ -148,6 +149,10 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             setText('');
             setLoading(false);
             initialText.current = '';
+            // Warm the location fix while the user types, so submit usually
+            // finds a warm cache or an in-flight fix instead of starting a
+            // cold 15 second race. Silent: failures surface at submit.
+            void warmLocationCell();
             const focus = setTimeout(() => inputRef.current?.focus(), 350);
             return () => clearTimeout(focus);
         }
