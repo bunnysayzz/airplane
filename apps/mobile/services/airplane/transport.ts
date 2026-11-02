@@ -25,7 +25,7 @@ import {
   type RouteResult,
 } from '@airplane/transport';
 import type { SignedEvent, TransportPort, Hex64 } from '@airplane/protocol';
-import { encodeEvent, toHex, verifyEvent } from '@airplane/protocol';
+import { encodeEvent, toHex, verifyEvent, MeshIngressLimiter } from '@airplane/protocol';
 import { getStore } from './store';
 import { EVENT_KIND_POST, EVENT_KIND_RECEIPT, EVENT_KIND_RESHARE, EVENT_KIND_STAR, reshareTargetId } from '@airplane/protocol';
 import { applyIncomingStar, markStarPostKnown } from './stars';
@@ -260,7 +260,33 @@ function scheduleFeedNotify(): void {
   }, 250);
 }
 
+/**
+ * BLE ingress throttle (T20, MeshIngressLimiter): one module-level
+ * limiter for the app lifetime, so a flooding peer cannot refill its
+ * budget by reconnecting. Relay ingress is deliberately NOT limited
+ * here (a replay burst is history, and dropping it would lose posts);
+ * the limiter itself documents that scope. Local echoes bypass it:
+ * our own publish must never be throttled by our own limiter.
+ */
+let meshIngressLimiter = new MeshIngressLimiter();
+
+/** Test seam: reset the BLE ingress limiter between tests (same pattern
+ *  as __resetNetInfoForTests). Production never calls this: the limiter
+ *  intentionally lives for the app lifetime. */
+export function __resetMeshIngressLimiterForTests(): void {
+  meshIngressLimiter = new MeshIngressLimiter();
+}
+
 async function handleIncoming(event: SignedEvent, source: string): Promise<void> {
+  if (source === 'ble' && !meshIngressLimiter.allow(event)) {
+    // Dropped before any counter, store, or feed notify: a flood must
+    // cost nothing downstream. A breadcrumb (id prefix only, never
+    // post text) keeps the drop visible in Diagnostics' trail.
+    addBreadcrumb('transport: ble ingress rate-limited', {
+      id: toHex(event.id).slice(0, 16),
+    });
+    return;
+  }
   // STAR MVP: kind-4 events never reach the events table — its schema
   // CHECKs kind IN (1,2,3). They go to the in-memory star counter instead
   // (same BLE + Nostr ingress path, same event-id dedup upstream).

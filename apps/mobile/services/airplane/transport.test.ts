@@ -30,7 +30,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
+import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, __resetNetInfoForTests, __resetPulledPostsForTests, __resetMeshIngressLimiterForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
@@ -99,6 +99,7 @@ describe('transport manager', () => {
     __resetNetInfoForTests();
     __resetResharesForTests();
     __resetPulledPostsForTests();
+    __resetMeshIngressLimiterForTests();
     __resetDeviceKeypairForTests();
     AsyncStorageMock.__clear();
     jest.useFakeTimers();
@@ -469,6 +470,27 @@ describe('transport manager', () => {
     expect(await getStore().getEvent(postId)).not.toBeNull();
   });
 
+  test('BLE ingress throttles a 6th rapid post from one sender (T20)', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    // Same sender, distinct ids and distinct texts: the per-sender
+    // bucket (5 burst) is what binds, not the per-text bucket.
+    for (let i = 0; i < 6; i++) {
+      const event = makeSignedEvent();
+      event.id = new Uint8Array(32).fill(20 + i);
+      event.content = `throttle post ${i}`;
+      hybrid!.ingress(event, 'ble');
+      for (let j = 0; j < 10; j++) await Promise.resolve();
+    }
+    for (let i = 0; i < 5; i++) {
+      const idHex = (20 + i).toString(16).padStart(2, '0').repeat(32);
+      expect(await store.getEvent(idHex)).not.toBeNull();
+    }
+    expect(await store.getEvent('19'.repeat(32))).toBeNull();
+  });
+
   test('an offline pull does not block retry: pulled is marked only on query success', async () => {
     await startTransport();
     const hybrid = __getHybridForTests();
@@ -618,6 +640,7 @@ describe('mesh-scan fix: scan failure keeps advertising', () => {
     __resetNetInfoForTests();
     __resetResharesForTests();
     __resetPulledPostsForTests();
+    __resetMeshIngressLimiterForTests();
     __resetDeviceKeypairForTests();
     AsyncStorageMock.__clear();
     jest.useFakeTimers();

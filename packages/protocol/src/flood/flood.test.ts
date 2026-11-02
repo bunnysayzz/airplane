@@ -111,6 +111,33 @@ describe('flood engine', () => {
     expect(seen.has('id-1')).toBe(true);
   });
 
+  test('SeenCache entries expire after the TTL (T20)', () => {
+    let now = 0;
+    const seen = new SeenCache({ ttlMs: 1000, nowMs: () => now });
+    seen.add(idHex());
+    const id = idHex();
+    seen.add(id);
+    expect(seen.has(id)).toBe(true);
+    now = 999;
+    expect(seen.has(id)).toBe(true);
+    now = 1000;
+    expect(seen.has(id)).toBe(false);
+    // Re-adding after expiry sees it fresh again; the other expired
+    // entry is purged by the size count, so only the fresh one remains.
+    seen.add(id);
+    expect(seen.has(id)).toBe(true);
+    expect(seen.size).toBe(1);
+  });
+
+  test('SeenCache size counts live entries only (T20)', () => {
+    let now = 0;
+    const seen = new SeenCache({ ttlMs: 1000, nowMs: () => now });
+    seen.add('id-a');
+    seen.add('id-b');
+    now = 5000;
+    expect(seen.size).toBe(0);
+  });
+
   test('jitter stays within [50, 500] ms', () => {
     expect(sampleJitterMs(() => 0)).toBe(FLOOD_JITTER_MS_MIN);
     expect(sampleJitterMs(() => 1)).toBe(FLOOD_JITTER_MS_MAX);

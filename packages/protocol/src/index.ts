@@ -11,6 +11,7 @@ export * from './stars/counter';
 export * from './payloads/reshares';
 export * from './reshares/counting';
 export * from './flood/engine';
+export * from './flood/rateLimit';
 export * from './flood/fragment';
 export * from './transport';
 export * from './ranking/score';

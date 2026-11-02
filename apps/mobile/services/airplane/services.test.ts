@@ -290,6 +290,28 @@ describe('listFeedPosts', () => {
     expect(page2.nextCursor).toBeNull();
   });
 
+  it('bounds the ranked set to rankSetMax (T20)', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const store = getStore();
+    for (let i = 0; i < 6; i++) {
+      await store.saveEvent(makePost({ created_at: nowSec - i }));
+    }
+    const page1 = await listFeedPage({ cells: ['tdr1v'], limit: 2, rankSetMax: 4 });
+    expect(page1.cards).toHaveLength(2);
+    expect(page1.nextCursor).not.toBeNull();
+    const page2 = await listFeedPage({
+      cells: ['tdr1v'],
+      limit: 2,
+      rankSetMax: 4,
+      cursor: page1.nextCursor,
+    });
+    expect(page2.cards).toHaveLength(2);
+    expect(page2.nextCursor).toBeNull();
+    // Only the 4 newest rows are ever ranked, so paging past them ends.
+    const seen = [...page1.cards, ...page2.cards].map((c) => c.eventId);
+    expect(new Set(seen).size).toBe(4);
+  });
+
   it('marks confirmed cards via the batched lookup', async () => {
     const post = await publishPost('confirmed post', { geohash5: 'tdr1v' });
     const store = getStore();

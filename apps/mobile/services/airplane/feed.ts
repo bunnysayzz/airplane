@@ -58,6 +58,15 @@ const DEFAULT_LIMIT = 50;
  *  function itself must not build an unbounded SQL IN list or page. */
 export const FEED_LIMIT_MAX = 100;
 export const FEED_CELLS_MAX = 32;
+/**
+ * Rank-set cap (T20): listFeedPage ranks over at most this many newest
+ * matching rows instead of the whole 24 h x 9-cell set. The ranked order
+ * is therefore the top of the newest 500, not a global rank over an
+ * unbounded set; a cell dense enough to exceed 500 rows in 24 h ranks
+ * its newest 500. This bounds every page load to a fixed number of
+ * store pages (500 / limit) and a fixed card-mapping cost.
+ */
+export const FEED_RANK_SET_MAX = 500;
 
 /**
  * Anonymous author display names: "<adjective> <noun>·<4 hex>", e.g.
@@ -116,41 +125,50 @@ export function toPostCardModel(
 /** Options for {@link listFeedPage}: a feed query plus an offset cursor. */
 export interface FeedPageOpts extends FeedQueryOpts {
   cursor?: FeedPageCursor | null;
+  /**
+   * Rank-set cap override (T20). Default FEED_RANK_SET_MAX. Tests use a
+   * small value to prove the bound without inserting 500 rows.
+   */
+  rankSetMax?: number;
 }
 
 /**
  * List one feed page for the given cells, ranked highest-score first
- * over the FULL matching set, not just the newest page.
+ * over the matching set, not just the newest page.
  *
  * The old shape ranked only the store's newest page (LIMIT applied in
  * newest-first order before the score sort), so a high-view older post
  * past the first page could never surface. This function instead walks
- * the store in tuple-cursor pages, ranks everything it finds, and then
- * slices one page out of that ranked order. Cost: one full matching-set
- * fetch per page load, bounded by the 24 h retention window and the
- * cell scope; that is the price of a globally ranked feed, and it is
- * stated here rather than hidden behind a LIMIT.
+ * the store in tuple-cursor pages, ranks what it finds, and then slices
+ * one page out of that ranked order. Cost (T20): the walk is capped at
+ * FEED_RANK_SET_MAX newest rows, and cells/limit are capped like
+ * listFeedPosts, so a page load is bounded even in a dense cell; the
+ * ranked set is the newest 500, not a global rank over an unbounded
+ * set. That bound is stated here rather than hidden behind a LIMIT.
  *
  * Equal scores keep insertion order (Array.prototype.sort is stable).
  * Pass the returned `nextCursor` back as `cursor` for the next page;
  * a refresh restarts from offset 0 with a fresh fetch and rank.
  */
 export async function listFeedPage(opts: FeedPageOpts): Promise<FeedPage> {
-  const limit = opts.limit ?? DEFAULT_LIMIT;
+  const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, FEED_LIMIT_MAX);
+  const cells = opts.cells.slice(0, FEED_CELLS_MAX);
+  const rankSetMax = opts.rankSetMax ?? FEED_RANK_SET_MAX;
   const offset = opts.cursor?.offset ?? 0;
   const store = getStore();
   const posts: FeedPost[] = [];
-  if (limit > 0) {
+  if (limit > 0 && rankSetMax > 0) {
     let before: number | undefined;
     let beforeId: Hex64 | undefined;
     for (;;) {
       const page: FeedPost[] = await store.listFeed({
-        cells: opts.cells,
-        limit,
+        cells,
+        limit: Math.min(limit, Math.max(rankSetMax - posts.length, 1)),
         before,
         beforeId,
       });
       posts.push(...page);
+      if (posts.length >= rankSetMax) break;
       if (page.length < limit) break;
       const lastPageRow = page[page.length - 1];
       before = lastPageRow.event.created_at;

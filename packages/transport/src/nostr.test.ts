@@ -682,6 +682,55 @@ describe('NostrTransport inbound edge cases', () => {
     await t.stop();
   });
 
+  test('publish caps at 3 relays by default (T20)', async () => {
+    const { t, sockets } = makeTransport([
+      'wss://a.relay',
+      'wss://b.relay',
+      'wss://c.relay',
+      'wss://d.relay',
+    ]);
+    await t.start();
+    await tick(20);
+    const urls = await t.publish(makePost('capped publish'));
+    expect(urls).toHaveLength(3);
+    expect(sockets.filter((s) => s.sent.some((m) => m.includes('"EVENT"')))).toHaveLength(3);
+    await t.stop();
+  });
+
+  test('a rejected OK deprioritises that relay below the publish cap (T20)', async () => {
+    const { t, sockets } = makeTransport([
+      'wss://a.relay',
+      'wss://b.relay',
+      'wss://c.relay',
+      'wss://d.relay',
+    ]);
+    await t.start();
+    await tick(20);
+    // First publish goes to 3 of the 4 relays (cap 3, health order).
+    // Reject from one sent relay, accept from another.
+    const ackPromise = t.publishWithAck(makePost('health probe'), 5000);
+    const sentSockets = sockets.filter((s) => s.sent.some((m) => m.includes('"EVENT"')));
+    expect(sentSockets).toHaveLength(3);
+    const rejected = sentSockets[0];
+    const accepted = sentSockets[1];
+    const eventMsg = JSON.parse(rejected.sent.find((s) => s.includes('"EVENT"'))!);
+    const envelopeId = eventMsg[1].id as string;
+    rejected.receive(['OK', envelopeId, false, 'rejected']);
+    accepted.receive(['OK', envelopeId, true, '']);
+    const ack = await ackPromise;
+    expect(ack.ok).toEqual([accepted.url]);
+    expect(t.relayHealth().find((h) => h.url === rejected.url)!.failures).toBe(1);
+    // Second publish must skip the failed-but-open relay, using the other 3.
+    const urls = await t.publish(makePost('after failure'));
+    expect(urls).not.toContain(rejected.url);
+    expect(urls.sort()).toEqual(
+      ['wss://a.relay', 'wss://b.relay', 'wss://c.relay', 'wss://d.relay']
+        .filter((u) => u !== rejected.url)
+        .sort(),
+    );
+    await t.stop();
+  });
+
   test('getRelayState is closed for unknown relays', async () => {
     const { t } = makeTransport();
     expect(t.getRelayState('wss://never.relay')).toBe('closed');

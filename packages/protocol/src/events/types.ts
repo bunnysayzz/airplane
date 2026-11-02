@@ -24,6 +24,17 @@ export const FLOOD_JITTER_MS_MAX = 500;
 /** Seen-cache LRU capacity (event ids). */
 export const SEEN_LRU_CAP = 10000;
 
+/**
+ * Seen-cache entry lifetime, milliseconds (T20). A seen id older than
+ * this no longer suppresses a redelivery: the cache is a loop-suppression
+ * window, not a permanent dedup store (permanent dedup lives in the
+ * SQLite tables, which already dedup on save). 5 minutes matches the
+ * research starting value; a duplicate arriving after the window is
+ * re-delivered once and then seen again, it is never double-counted
+ * (star/reshare counters key on (pubkey, post) as well as event id).
+ */
+export const SEEN_TTL_MS = 5 * 60 * 1000;
+
 /** Max post content length, in Unicode characters (after NFC normalization). */
 export const MAX_CONTENT_CHARS = 280;
 

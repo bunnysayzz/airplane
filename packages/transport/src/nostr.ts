@@ -231,6 +231,15 @@ export interface NostrTransportOpts {
    * its Settings list, which the user added explicitly.
    */
   allowPrivateRelays?: boolean;
+  /**
+   * Max relays a publish is sent to (T20). Default 3: relays are
+   * redundant stores, so publishing to all 4 defaults buys a fourth
+   * copy of every event for no availability gain, at N x bandwidth
+   * and battery. The healthiest relays go first (see relayHealth);
+   * subscribes and one-shot queries still use every relay, so
+   * coverage for reads is unchanged.
+   */
+  maxPublishRelays?: number;
 }
 
 /** Connection state per relay. */
@@ -298,6 +307,17 @@ export class NostrTransport {
   private timers = new Set<ReturnType<typeof setTimeout>>();
   /** Consecutive failed connect attempts per relay; reset on open. */
   private reconnectAttempts = new Map<string, number>();
+  /**
+   * Publish-health failures per relay (T20): closes and rejected OKs
+   * increment, a successful open or an accepted OK resets. This is the
+   * deprioritisation signal for publish ordering: a relay that keeps
+   * failing is tried last (and, past the publish cap, not at all),
+   * instead of every publish paying for it first. It is NOT a ban:
+   * the count resets on the next success, and reads still use it.
+   */
+  private relayFailures = new Map<string, number>();
+  /** Max relays a publish is sent to. Default 3 (see NostrTransportOpts). */
+  private readonly maxPublishRelays: number;
   /** In-flight relay OK waiters, indexed by Nostr envelope id. */
   private okWaiters = new Map<string, Set<OkWaiter>>();
   private allOkWaiters = new Set<OkWaiter>();
@@ -329,6 +349,7 @@ export class NostrTransport {
       });
     this.keys = opts.keys ?? generateNostrKeypair();
     this.reconnectMs = opts.reconnectMs ?? 5000;
+    this.maxPublishRelays = Math.max(1, opts.maxPublishRelays ?? 3);
     this.reconnectMaxMs = opts.reconnectMaxMs ?? 60000;
     this.silenceTimeoutMs = opts.silenceTimeoutMs ?? 90000;
     this.onRelayNotice = opts.onRelayNotice;
@@ -354,6 +375,40 @@ export class NostrTransport {
     return this.states.get(url) ?? 'closed';
   }
 
+  /**
+   * Publish-health snapshot per relay, in configured order (T20):
+   * consecutive publish-health failures and last inbound frame time.
+   * Used by publish ordering and exposed for diagnostics; a failure
+   * count here is a deprioritisation signal, never a ban.
+   */
+  relayHealth(): Array<{ url: string; failures: number; lastFrameAtMs: number }> {
+    return this.relays.map((url) => ({
+      url,
+      failures: this.relayFailures.get(url) ?? 0,
+      lastFrameAtMs: this.lastFrameAtMs.get(url) ?? 0,
+    }));
+  }
+
+  /**
+   * Relays ordered for a publish: fewest health failures first, then
+   * most recently active first; configured order breaks remaining ties
+   * (Array.sort is stable). Callers cap the send loop at
+   * maxPublishRelays, so the healthiest relays carry the publish.
+   */
+  private orderedPublishRelays(): string[] {
+    const health = this.relayHealth();
+    const index = new Map(health.map((h, i) => [h.url, i]));
+    return [...this.relays].sort((a, b) => {
+      const fa = this.relayFailures.get(a) ?? 0;
+      const fb = this.relayFailures.get(b) ?? 0;
+      if (fa !== fb) return fa - fb;
+      const la = this.lastFrameAtMs.get(a) ?? 0;
+      const lb = this.lastFrameAtMs.get(b) ?? 0;
+      if (la !== lb) return lb - la;
+      return (index.get(a) ?? 0) - (index.get(b) ?? 0);
+    });
+  }
+
   /** True when at least one relay is open. */
   get online(): boolean {
     for (const s of this.states.values()) if (s === 'open') return true;
@@ -377,6 +432,7 @@ export class NostrTransport {
     this.silencePinged.clear();
     this.mainSubIds.clear();
     this.reconnectAttempts.clear();
+    this.relayFailures.clear();
     // A stop must never leave a publish hanging on an OK that can no
     // longer arrive: resolve every waiter with no OK.
     for (const w of this.allOkWaiters) {
@@ -423,6 +479,7 @@ export class NostrTransport {
       // A successful connection resets the backoff - the next drop starts
       // again from the base delay.
       this.reconnectAttempts.delete(url);
+      this.relayFailures.delete(url);
       this.resubscribe(ws);
       // Owed query CLOSEs for this relay (its close timer fired while it
       // was down): send them on the fresh socket, then drop them.
@@ -512,6 +569,7 @@ export class NostrTransport {
     this.silencePinged.delete(url);
     this.sockets.delete(url);
     this.states.set(url, 'closed');
+    this.relayFailures.set(url, (this.relayFailures.get(url) ?? 0) + 1);
     this.noteRelayGone(url);
     this.scheduleReconnect(url);
   }
@@ -553,19 +611,26 @@ export class NostrTransport {
     }
   }
 
-  /** Publish one event to all open relays. Returns URLs the envelope was sent to (no acceptance waited for); use publishWithAck when acceptance matters. */
+  /**
+   * Publish one event to the healthiest open relays, capped at
+   * maxPublishRelays (T20). Returns URLs the envelope was sent to (no
+   * acceptance waited for); use publishWithAck when acceptance matters.
+   * Reads (subscribe, queryByIds) still use every relay.
+   */
   async publish(event: SignedEvent): Promise<string[]> {
     const envelope = wrapEvent(event, this.keys);
     const msg: ClientMsg = ['EVENT', envelope];
     const ok: string[] = [];
-    for (const url of this.relays) {
+    for (const url of this.orderedPublishRelays()) {
+      if (ok.length >= this.maxPublishRelays) break;
       if (this.sendMsg(url, msg)) ok.push(url);
     }
     return ok;
   }
 
   /**
-   * Publish one event to all open relays and wait for the first accepted
+   * Publish one event to the healthiest open relays (capped at
+   * maxPublishRelays, T20) and wait for the first accepted
    * relay OK, up to deadlineMs. First accepted OK resolves immediately;
    * all relays rejecting, all relays dropping, or the deadline expiring
    * resolves with an empty ok list. When no relay socket is open, this
@@ -578,7 +643,8 @@ export class NostrTransport {
     const envelope = wrapEvent(event, this.keys);
     const msg: ClientMsg = ['EVENT', envelope];
     const sent: string[] = [];
-    for (const url of this.relays) {
+    for (const url of this.orderedPublishRelays()) {
+      if (sent.length >= this.maxPublishRelays) break;
       if (this.sendMsg(url, msg)) sent.push(url);
     }
     if (sent.length === 0) return { ok: [], rejected: [], timedOut: false, cancelled: false };
@@ -638,6 +704,10 @@ export class NostrTransport {
   /** Route one relay OK message to every waiter for that envelope id. */
   private handleOk(relayUrl: string, envelopeId: unknown, accepted: unknown): void {
     if (typeof envelopeId !== 'string' || typeof accepted !== 'boolean') return;
+    // Publish-health signal (T20): an accepted OK clears the failure
+    // count, a rejected OK counts as a failure, regardless of waiters.
+    if (accepted) this.relayFailures.delete(relayUrl);
+    else this.relayFailures.set(relayUrl, (this.relayFailures.get(relayUrl) ?? 0) + 1);
     const waiters = this.okWaiters.get(envelopeId);
     if (!waiters) return;
     for (const waiter of [...waiters]) {
