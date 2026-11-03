@@ -15,12 +15,17 @@ import { useTheme } from '../src/theme/themeContext';
 import { formatCompact } from '../src/lib/format';
 import { isWithinWindow } from '../src/lib/navGuard';
 import { recordUiEvent } from '../services/airplane/diagnostics';
+import { nameWithoutSuffix } from '../services/airplane/names';
+import { avatarGradientFor } from '../services/airplane/displayNames';
 
 export interface PostCardModel {
   /** hex event hash (stable key) */
   eventId: string;
   /** e.g. "quiet fox·a3f9" - short pseudonym, NEVER a real name/handle */
   authorLabel: string;
+  /** Clean author display string, no hex suffix (display name or memorable
+   * name). Cards render this; authorLabel stays for details/debug. */
+  authorName?: string;
   /** post text */
   body: string;
   /** epoch ms, for relative time */
@@ -101,6 +106,11 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
   const markAction = () => {
     lastActionAt.current = Date.now();
   };
+  // Feed and thread headers show the clean name: display name or
+  // memorable name, no hex suffix. The suffix appears only on a name
+  // collision (applied upstream in feed mapping) or on detail screens.
+  const displayedName = post.authorName ?? nameWithoutSuffix(post.authorLabel);
+  const avatarGradient = post.authorPubkeyHex ? avatarGradientFor(post.authorPubkeyHex) : null;
   const handleCardPress = onPress
     ? () => {
         if (!isWithinWindow(lastActionAt.current, Date.now(), 500)) {
@@ -113,13 +123,14 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
   return (
     <Post
       onPress={handleCardPress}
-      accessibilityLabel={`Post by ${post.authorLabel}, ${post.views} views, ${post.reshares} reshares`}
+      accessibilityLabel={`Post by ${displayedName}, ${post.views} views, ${post.reshares} reshares`}
     >
       <Post.Header>
         <Post.Author
-          name={post.authorLabel}
+          name={displayedName}
           handle={`#${post.geohash}`}
           timestamp={timeAgo(post.createdAtMs)}
+          avatarGradient={avatarGradient}
         />
         {post.worldConfirmed ? (
           <Post.Action>
@@ -143,7 +154,7 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
               onMessage(post.authorPubkeyHex as string);
             }}
             accessibilityRole="button"
-            accessibilityLabel={`Message ${post.authorLabel}`}
+            accessibilityLabel={`Message ${displayedName}`}
           >
             <Text style={[type.meta, { color: colors.accentText }]}>Message</Text>
           </Pressable>
@@ -173,7 +184,7 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
         />
         {post.latestResharerLabel ? (
           <Text style={[type.meta, { fontSize: 10, opacity: 0.6 }]}>
-            ↻ {post.latestResharerLabel}
+            ↻ {nameWithoutSuffix(post.latestResharerLabel)}
           </Text>
         ) : null}
         {/* --- RESHARE (delimited end) --- */}

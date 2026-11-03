@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { IconButton } from '../../components/ui';
 import { space } from '../../src/theme/shape';
 import type { PostCardModel } from '../../services/airplane/types';
+import { nameWithoutSuffix } from '../../services/airplane/names';
 import { toggleReshare } from '../../services/airplane/reshares';
 import { PostCard } from '../../components/PostCard';
 import { useTheme } from '../../src/theme/themeContext';
@@ -64,7 +65,7 @@ export default function Thread({ postId, posts, loading = false, refreshing = fa
 
                 <View style={styles.headerTitle} accessible accessibilityRole="header">
                     <Text style={[type.name, { color: colors.textPrimary }]} numberOfLines={1}>
-                        {mainPost ? t('thread.titleBy', { name: mainPost.authorLabel }) : t('thread.title')}
+                        {mainPost ? t('thread.titleBy', { name: mainPost.authorName ?? nameWithoutSuffix(mainPost.authorLabel) }) : t('thread.title')}
                     </Text>
                 </View>
 

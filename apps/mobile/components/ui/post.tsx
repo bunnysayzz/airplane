@@ -79,6 +79,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { View } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { ThemeColors, useTheme } from '../../src/theme/themeContext';
 import { useThemedStyles } from '../../src/theme/useThemedStyles';
 import { radii, space } from '../../src/theme/shape';
@@ -315,6 +316,11 @@ export interface PostAuthorProps extends Omit<ViewProps, 'children' | 'style'> {
   /** Origin tag, e.g. "#tdr1v". Shown under the name in `feed`. */
   handle?: string;
   avatar?: ImageSourcePropType;
+  /** Deterministic two-stop gradient for the initials avatar, derived from
+   * the author's pubkey (see displayNames avatarGradientFor). When set,
+   * the initials circle renders on this gradient instead of the flat
+   * accent color, so peers are distinct even when initials collide. */
+  avatarGradient?: [string, string] | null;
   /** Initials behind a missing or broken avatar. */
   fallback?: string;
   /** "3m" - whatever the caller wants to call the time. */
@@ -325,7 +331,7 @@ export interface PostAuthorProps extends Omit<ViewProps, 'children' | 'style'> {
 /** Who posted it. Anonymous by product: no verification rosette exists here. */
 const PostAuthor = forwardRef<View, PostAuthorProps>(
   (
-    { style, name, handle, avatar, fallback, timestamp, children, ...props },
+    { style, name, handle, avatar, avatarGradient, fallback, timestamp, children, ...props },
     ref
   ) => {
     const styles = usePostStyles();
@@ -339,6 +345,10 @@ const PostAuthor = forwardRef<View, PostAuthorProps>(
       <View ref={ref} style={styles.authorRow} {...props}>
         {avatar ? (
           <Image source={avatar} style={styles.avatarImage} />
+        ) : avatarGradient ? (
+          <LinearGradient colors={avatarGradient} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.avatar}>
+            <RNText style={[styles.avatarText, { color: '#ffffff' }]}>{fallback ?? initials(name)}</RNText>
+          </LinearGradient>
         ) : (
           <View style={styles.avatar}>
             <RNText style={styles.avatarText}>{fallback ?? initials(name)}</RNText>
