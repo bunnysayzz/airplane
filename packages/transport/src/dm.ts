@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// DM P1 — sealed relay direct messages (plan: dm-plan.md §4–§8).
+// DM P1 - sealed relay direct messages (plan: dm-plan.md §4-§8).
 //
-// DESIGN — read before touching the crypto:
+// DESIGN - read before touching the crypto:
 // * Airplane identities are Ed25519 mesh keys; there is NO published secp256k1
 //   DM address per author (the Nostr envelope key is ephemeral per transport
 //   instance, and post events carry only the mesh pubkey). So a post author's
@@ -11,7 +11,7 @@
 //   envelope shape follows NIP-17 (ephemeral-key gift wrap, kind-1059-style
 //   wrapper, kind-14 rumor) and the payload follows NIP-44 v2 (version 0x02,
 //   32-byte nonce, HKDF-SHA256, ChaCha20, HMAC-SHA256 over nonce||ciphertext,
-//   base64 [version|nonce|ciphertext|mac], NIP-44 padding shape) — but the
+//   base64 [version|nonce|ciphertext|mac], NIP-44 padding shape) - but the
 //   ECDH curve is X25519, NOT secp256k1, so payloads are NOT byte-compatible
 //   with standard Nostr clients. A future protocol change that publishes a
 //   secp256k1 DM address per author would make this fully NIP-17/NIP-44.
@@ -25,9 +25,24 @@
 //   out of scope per plan §8).
 // * NO read receipts (orders + plan §9 decision 1): nothing here sends or
 //   requests a receipt. TEXT-ONLY v1, 4 KiB cap (plan §9 decision 6: "some
-//   KB" — decided here as 4096 bytes).
-// * Delivery states are exactly Sending / Sent / Failed (orders). Sent means
-//   a relay accepted the sealed envelope, nothing more — never "Delivered".
+//   KB" - decided here as 4096 bytes).
+// * Delivery states live in dmService.ts, not here. The rule they follow:
+//   a relay OK or a BLE notify is a radio handoff, never delivery. Only a
+//   peer ack proves delivery (see the ack proof below), so a message that
+//   reached a relay but no peer is Relayed, and one that reached a BLE
+//   radio but no peer app is MeshSent. Neither state ever reads Delivered.
+// * Delivery acks are NOT read receipts: an ack is sent when the peer app
+//   stores the message, whether or not the user ever opens the thread.
+//   An ack rumor is sealed to the original sender and carries a proof the
+//   sender can check without any secret: proof = HMAC-SHA256 over the
+//   delivery id, keyed by the message conversation key. The sender stored
+//   that proof at send time; the recipient recomputes it from the message
+//   ephemeral pubkey plus its own secret. A mesh bystander that overheard
+//   the delivery id cannot forge the proof, because it holds neither the
+//   sender ephemeral secret nor the recipient secret. Acks travel only on
+//   ack channels (the relay ack kind, BLE ack frames), never by sniffing
+//   message text: a 1059 message whose text happens to look like ack JSON
+//   is still just a message.
 // * RETRY POLICY (actual, not the 1s/2s/5s/15s/30s/60s ladder sometimes
 //   quoted: that ladder exists nowhere): the outbox retries on
 //   DM_BACKOFF_MS = [0, 1000, 5000, 30000, 120000] ms with a
@@ -130,7 +145,7 @@ function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// ChaCha20 (RFC 8439) — @noble/ciphers is not a dependency, so this is local.
+// ChaCha20 (RFC 8439) - @noble/ciphers is not a dependency, so this is local.
 // Counter starts at 0; the 12-byte nonce occupies the last three state words.
 // ---------------------------------------------------------------------------
 
@@ -352,20 +367,29 @@ export function nip44Decrypt(payloadB64: string, conversationKey: Uint8Array): s
 
 export interface DmRumor {
   kind: 14;
-  pubkey: string; // sender mesh pubkey hex (a claim, not a proof — see header)
+  pubkey: string; // sender mesh pubkey hex (a claim, not a proof - see header)
   created_at: number;
   tags: string[][]; // [['p', recipientHex]]
   content: string; // plaintext DM text
 }
 
 export interface DmEnvelope {
-  /** Ephemeral X25519 pubkey hex — the recipient derives the shared secret from it. */
+  /** Ephemeral X25519 pubkey hex - the recipient derives the shared secret from it. */
   ephemeralPubkeyHex: string;
   /** Recipient mesh pubkey hex (the `p` tag value a relay filters on). */
   recipientHex: string;
   /** NIP-44-style sealed rumor JSON. */
   sealed: string;
   createdAt: number; // epoch seconds
+  /**
+   * Stable delivery id for this send (32 lowercase hex chars, random per
+   * send). Cross-transport dedup key: the same envelope delivered via relay
+   * and via BLE carries the same id, so the second copy is dropped. Also
+   * the id a delivery ack references. Absent on envelopes from installs
+   * that predate this field; those fall back to relay-event-id dedup and
+   * cannot be acked (the sender never stored a proof for them).
+   */
+  deliveryId?: string;
   /**
    * Nostr event id of the relay delivery carrying this envelope, set by the
    * relay layer. The inbound dedup key: repeat deliveries of the same event
@@ -382,6 +406,33 @@ export function sealDm(
   recipientMeshHex: string,
   createdAtSec?: number,
 ): DmEnvelope {
+  return sealDmInternal(text, senderMeshHex, recipientMeshHex, createdAtSec).envelope;
+}
+
+/**
+ * Seal a DM and return the ack proof for it, alongside the envelope. The
+ * ephemeral secret is used here to derive the proof and then dropped: it
+ * is never returned and never stored, so a stored proof cannot decrypt
+ * the message the way the secret could. The proof is a one-way HMAC
+ * output, safe to persist next to the sealed row.
+ */
+export function sealDmWithAckProof(
+  text: string,
+  senderMeshHex: string,
+  recipientMeshHex: string,
+  createdAtSec?: number,
+): { envelope: DmEnvelope; ackProof: string } {
+  const { envelope, convKey } = sealDmInternal(text, senderMeshHex, recipientMeshHex, createdAtSec);
+  const deliveryId = envelope.deliveryId as string;
+  return { envelope, ackProof: dmAckProof(convKey, deliveryId) };
+}
+
+function sealDmInternal(
+  text: string,
+  senderMeshHex: string,
+  recipientMeshHex: string,
+  createdAtSec?: number,
+): { envelope: DmEnvelope; convKey: Uint8Array } {
   // Normalize case at the seal boundary: the service rejects uppercase
   // hex, but the hex parser accepts it, so an uppercase recipient used to
   // seal an envelope no lowercase subscribe check would ever match.
@@ -402,18 +453,66 @@ export function sealDm(
     tags: [['p', recipientHex]],
     content: text,
   };
-  return {
+  const envelope: DmEnvelope = {
     ephemeralPubkeyHex: dmToHex(ephemeralPubkey),
     recipientHex: recipientHex,
     sealed: nip44Encrypt(JSON.stringify(rumor), convKey),
     createdAt: rumor.created_at,
+    deliveryId: dmToHex(x25519.utils.randomSecretKey().slice(0, 16)),
   };
+  return { envelope, convKey };
+}
+
+/** Delivery id shape: 32 lowercase hex chars (16 random bytes). */
+export function isDeliveryId(s: unknown): s is string {
+  return typeof s === 'string' && /^[0-9a-f]{32}$/.test(s);
+}
+
+/** Ack proof: HMAC-SHA256 over the delivery id, keyed by the conversation key. */
+export function dmAckProof(conversationKey: Uint8Array, deliveryId: string): string {
+  return dmToHex(hmac(sha256, conversationKey, new TextEncoder().encode(deliveryId)));
+}
+
+/**
+ * Recompute the ack proof for a received message envelope, from this
+ * device's secret plus the envelope ephemeral pubkey. Null when the
+ * envelope header is malformed: a proof for a bad envelope is meaningless.
+ */
+export function dmAckProofForEnvelope(
+  ownSecret: Uint8Array,
+  envelope: DmEnvelope,
+  deliveryId: string,
+): string | null {
+  const ephemeral = dmFromHex(envelope.ephemeralPubkeyHex);
+  if (!ephemeral || ephemeral.length !== 32) return null;
+  return dmAckProof(dmConversationKeyX(ownSecret, ephemeral), deliveryId);
+}
+
+/** Parsed ack rumor content: the delivery id being acked, plus its proof. */
+export interface DmAckContent {
+  dmAckFor: string;
+  proof: string;
+}
+
+/**
+ * Parse ack rumor content. Strict shape only: anything else is not an ack
+ * (callers route acks by channel, so this never sniffs message text).
+ */
+export function parseDmAckContent(text: string): DmAckContent | null {
+  try {
+    const parsed = JSON.parse(text) as { dmAckFor?: unknown; proof?: unknown };
+    if (!isDeliveryId(parsed.dmAckFor)) return null;
+    if (typeof parsed.proof !== 'string' || !/^[0-9a-f]{64}$/.test(parsed.proof)) return null;
+    return { dmAckFor: parsed.dmAckFor, proof: parsed.proof };
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Unseal an envelope addressed to this device. Returns the rumor, or null
  * when the envelope is not for us, corrupt, or tampered with (relay view and
- * any third party get null — gibberish, never plaintext).
+ * any third party get null - gibberish, never plaintext).
  * When `expectedRecipientHex` is given, the rumor tags must contain the
  * matching p tag, or the rumor is rejected. Content over DM_TEXT_MAX_BYTES
  * is always rejected: the cap was previously sender-side only, so ingress

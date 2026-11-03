@@ -38,6 +38,7 @@ export {
   dmToHex,
   dmFromHex,
   isHex64,
+  isDeliveryId,
   dmToBase64,
   dmFromBase64,
   chacha20,
@@ -45,18 +46,26 @@ export {
   dmKeypairFromDeviceSecret,
   dmConversationKey,
   dmConversationKeyX,
+  dmAckProof,
+  dmAckProofForEnvelope,
+  parseDmAckContent,
   nip44Encrypt,
   nip44Decrypt,
   sealDm,
+  sealDmWithAckProof,
   unsealDm,
 } from './dm';
-export type { DmKeypair, DmRumor, DmEnvelope } from './dm';
+export type { DmKeypair, DmRumor, DmEnvelope, DmAckContent } from './dm';
 
 export {
   DmService,
   MemoryDmStore,
   MemoryDmRelay,
   FailingDmRelay,
+  DM_MAX_MESSAGES_PER_CONVERSATION,
+  DM_MESH_RETRY_MS,
+  DM_MESH_MAX_ATTEMPTS,
+  DM_BACKFILL_OVERLAP_SEC,
 } from './dmService';
 export type {
   DmDelivery,
@@ -66,8 +75,21 @@ export type {
   DmThreadRow,
   DmStorePort,
   DmRelayPort,
+  DmRelayPublishResult,
+  DmRelaySubscribeOpts,
+  DmMeshPort,
   DmServiceOpts,
 } from './dmService';
 
-export { WsDmRelay, dmEnvelopeToNostrEvent, nostrEventToDmEnvelope } from './dmRelay';
+export {
+  WsDmRelay,
+  DM_EVENT_KIND,
+  DM_ACK_EVENT_KIND,
+  dmEnvelopeToNostrEvent,
+  dmAckEnvelopeToNostrEvent,
+  nostrEventToDmEnvelope,
+  nostrEventToDmAckEnvelope,
+} from './dmRelay';
 export type { WsDmRelayOpts } from './dmRelay';
+
+export { DmBleTransport, DM_BLE_MAX_FRAME_BYTES } from './dmBle';
