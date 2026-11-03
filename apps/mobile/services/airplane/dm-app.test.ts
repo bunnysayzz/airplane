@@ -4,13 +4,29 @@
 
 import { MemoryKeyStore } from '@airplane/crypto';
 
+// DM wiring builds a SqliteDmStore over the app SQLite port, whose real
+// executor is the native op-sqlite module (unloadable in Jest). Mock the
+// port factory at the seam: the test only exercises singleton/rejection
+// behaviour, never a real DM operation, and SqliteDmStore migrates
+// lazily, so a stub port is enough.
+jest.mock('./sqlite', () => ({
+  createSqliteDatabasePort: () => ({
+    exec: async () => {},
+    query: async () => [],
+    close: async () => {},
+  }),
+}));
+
 jest.mock('@airplane/transport', () => {
   const actual = jest.requireActual('@airplane/transport') as Record<string, unknown>;
   return {
     ...actual,
     WsDmRelay: class {
-      async publish(): Promise<boolean> {
-        return false;
+      async publish(): Promise<{ accepted: boolean; rejected: boolean }> {
+        return { accepted: false, rejected: false };
+      }
+      async publishAck(): Promise<{ accepted: boolean; rejected: boolean }> {
+        return { accepted: false, rejected: false };
       }
       subscribe(): () => void {
         return () => {};
