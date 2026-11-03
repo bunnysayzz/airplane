@@ -21,7 +21,9 @@ import {
   FailingDmRelay,
   MemoryDmRelay,
   MemoryDmStore,
+  type DmMeshPort,
   type DmRelayPort,
+  type DmRelayPublishResult,
 } from './dmService';
 
 const tick = () => new Promise<void>(r => setTimeout(r, 10));
@@ -33,18 +35,70 @@ interface Persona {
   store: MemoryDmStore;
 }
 
-function makePersona(relay: DmRelayPort, nowRef: { now: number }): Persona {
+function makePersona(relay: DmRelayPort, nowRef: { now: number }, mesh?: DmMeshPort): Persona {
   const secret = ed25519.utils.randomSecretKey();
   const meshHex = dmToHex(ed25519.getPublicKey(secret));
   const store = new MemoryDmStore();
   const service = new DmService({
     store,
     relay,
+    mesh,
     ownKeys: () => dmKeypairFromDeviceSecret(secret),
     ownMeshHex: () => meshHex,
     now: () => nowRef.now,
   });
   return { secret, meshHex, service, store };
+}
+
+/** Relay whose acceptance flips, for queue-drain tests. */
+class TogglingRelay implements DmRelayPort {
+  accept = false;
+  async publish(): Promise<DmRelayPublishResult> {
+    return { accepted: this.accept, rejected: false };
+  }
+  async publishAck(): Promise<DmRelayPublishResult> {
+    return { accepted: false, rejected: false };
+  }
+  subscribe(): () => void {
+    return () => {};
+  }
+}
+
+/** Relay that explicitly rejects every envelope (relay policy, not offline). */
+class RejectingRelay implements DmRelayPort {
+  async publish(): Promise<DmRelayPublishResult> {
+    return { accepted: false, rejected: true };
+  }
+  async publishAck(): Promise<DmRelayPublishResult> {
+    return { accepted: false, rejected: false };
+  }
+  subscribe(): () => void {
+    return () => {};
+  }
+}
+
+/** Loopback mesh endpoint pair for BLE-path tests (direct peers only). */
+class LoopMesh implements DmMeshPort {
+  peer: LoopMesh | null = null;
+  private onEnv: ((e: import('./dm').DmEnvelope) => void) | null = null;
+  private onAck: ((e: import('./dm').DmEnvelope) => void) | null = null;
+  async publish(envelope: import('./dm').DmEnvelope, kind: 'dm' | 'ack'): Promise<number> {
+    if (!this.peer) return 0;
+    if (kind === 'dm') this.peer.onEnv?.(envelope);
+    else this.peer.onAck?.(envelope);
+    return 1;
+  }
+  subscribe(
+    onEnvelope: (e: import('./dm').DmEnvelope) => void,
+    onAck: (e: import('./dm').DmEnvelope) => void,
+  ): () => void {
+    this.onEnv = onEnvelope;
+    this.onAck = onAck;
+    return () => {
+      this.onEnv = null;
+      this.onAck = null;
+    };
+  }
 }
 
 describe('DM crypto', () => {
@@ -253,11 +307,30 @@ describe('DmService routing + outbox', () => {
     expect((await alice.service.getThread(bob.meshHex)).length).toBe(1);
   });
 
-  test('outbox retry with backoff ends in Failed after the cap, never dropped', async () => {
+  test('outbox with no transport ends in Queued, never Failed, and is not dropped', async () => {
     const relay = new FailingDmRelay();
     const nowRef = { now: 10_000_000 };
     const alice = makePersona(relay, nowRef);
     await alice.service.sendMessage('b'.repeat(64), 'offline msg');
+    // Attempt 1 at t, then backoffs 1s / 5s / 30s / 120s, then repeats at
+    // the 120 s cap: unreachable transports never end in Failed, so a
+    // long offline stretch still drains when a transport returns.
+    const steps = [0, 1000, 5000, 30000, 120000, 120000, 120000];
+    for (const step of steps) {
+      nowRef.now += step;
+      await alice.service.flushOutbox();
+    }
+    const thread = await alice.service.getThread('b'.repeat(64));
+    expect(thread).toHaveLength(1);
+    expect(thread[0].status).toBe('Queued');
+    expect(DM_MAX_ATTEMPTS).toBe(5);
+  });
+
+  test('outbox with explicit relay rejection ends in Failed after the cap, with tap-to-retry', async () => {
+    const relay = new RejectingRelay();
+    const nowRef = { now: 11_000_000 };
+    const alice = makePersona(relay, nowRef);
+    await alice.service.sendMessage('b'.repeat(64), 'rejected msg');
     // Attempt 1 at t, then backoffs 1s / 5s / 30s / 120s -> 5 attempts total.
     const steps = [0, 1000, 5000, 30000, 120000];
     for (const step of steps) {
@@ -271,7 +344,6 @@ describe('DmService routing + outbox', () => {
     await alice.service.retryMessage('b'.repeat(64), thread[0].id);
     const retried = await alice.service.getThread('b'.repeat(64));
     expect(retried[0].status).toBe('Sending');
-    expect(DM_MAX_ATTEMPTS).toBe(5);
   });
 
   test('per-conversation FIFO: a failed head blocks its conversation only', async () => {
@@ -285,13 +357,16 @@ describe('DmService routing + outbox', () => {
     await alice.service.sendMessage(peerB, 'b-only');
     await alice.service.flushOutbox();
     // All three failed once; FIFO means a-second was never attempted while
-    // a-first was the failing head — observable via attempts on the rows.
+    // a-first was the failing head - observable via attempts on the rows.
     const rowsA = await alice.store.listMessages(peerA);
     const rowsB = await alice.store.listMessages(peerB);
     expect(rowsA.find(m => m.direction === 'out' && m.createdAtMs === rowsA[0].createdAtMs)).toBeDefined();
     expect(rowsA).toHaveLength(2);
     expect(rowsB).toHaveLength(1);
-    // The second message in conversation A is still queued (Sending, 0 attempts).
+    // The first message in conversation A failed once (no transport, so
+    // Queued); the second is still untouched (Sending, 0 attempts).
+    expect(rowsA[0].status).toBe('Queued');
+    expect(rowsA[0].attempts).toBe(1);
     const second = rowsA[1];
     expect(second.status).toBe('Sending');
     expect(second.attempts).toBe(0);
@@ -312,8 +387,10 @@ describe('DmService routing + outbox', () => {
     await tick();
     const thread = await bob.service.getThread(alice.meshHex);
     expect(thread.map(t => t.text)).toEqual(['one', 'two', 'three']);
+    // Sender rows left Sending/Queued/Failed nowhere: each is Relayed, or
+    // already Delivered if the peer ack round-tripped during the tick.
     const sent = await alice.service.getThread(bob.meshHex);
-    expect(sent.map(t => t.status)).toEqual(['Sent', 'Sent', 'Sent']);
+    expect(sent.map(t => t.status).every(s => s === 'Relayed' || s === 'Delivered')).toBe(true);
   });
 
   test('flushOutbox runs conversations concurrently but keeps per-conversation order', async () => {
@@ -322,10 +399,13 @@ describe('DmService routing + outbox', () => {
     // (conversation A has 2 messages in order, B has 1 alongside).
     const published: string[] = [];
     const slowRelay = {
-      async publish(envelope: { recipientHex: string }): Promise<boolean> {
+      async publish(envelope: { recipientHex: string }): Promise<DmRelayPublishResult> {
         await new Promise<void>(r => setTimeout(r, 100));
         published.push(envelope.recipientHex);
-        return true;
+        return { accepted: true, rejected: false };
+      },
+      async publishAck(): Promise<DmRelayPublishResult> {
+        return { accepted: false, rejected: false };
       },
       subscribe(): () => void {
         return () => {};
@@ -345,7 +425,7 @@ describe('DmService routing + outbox', () => {
     expect(published).toHaveLength(3);
     expect(published.filter(p => p === peerA)).toEqual([peerA, peerA]);
     const sent = await alice.service.getThread(peerA);
-    expect(sent.map(t => t.status)).toEqual(['Sent', 'Sent']);
+    expect(sent.map(t => t.status)).toEqual(['Relayed', 'Relayed']);
   });
 
   test('validation: bad peer hex, self-DM, empty and over-cap text are rejected', async () => {
@@ -447,10 +527,13 @@ describe('DmService routing + outbox', () => {
   test('F14-retry: concurrent flushes share one run and publish once', async () => {
     class DelayedCountingRelay implements DmRelayPort {
       calls = 0;
-      async publish(): Promise<boolean> {
+      async publish(): Promise<DmRelayPublishResult> {
         this.calls += 1;
         await new Promise(r => setTimeout(r, 30));
-        return true;
+        return { accepted: true, rejected: false };
+      }
+      async publishAck(): Promise<DmRelayPublishResult> {
+        return { accepted: false, rejected: false };
       }
       subscribe(): () => void {
         return () => {};
@@ -463,20 +546,21 @@ describe('DmService routing + outbox', () => {
     await Promise.all([alice.service.flushOutbox(), alice.service.flushOutbox()]);
     expect(relay.calls).toBe(1);
     const rows = await alice.store.listMessages('a'.repeat(64));
-    expect(rows[0].status).toBe('Sent');
+    expect(rows[0].status).toBe('Relayed');
     alice.service.stop();
   });
 
-  test('F15: missing-envelope rows fail fast instead of head-blocking the queue', async () => {
-    const relay = new FailingDmRelay();
+  test('F15: restart keeps the outbox sendable (envelope persisted) and the queue moving', async () => {
+    const relay = new TogglingRelay();
     const nowRef = { now: 110_000_000 };
     const alice = makePersona(relay, nowRef);
     const peer = 'b'.repeat(64);
     await alice.service.sendMessage(peer, 'first after restart');
     await alice.service.sendMessage(peer, 'second after restart');
     alice.service.stop();
-    // A fresh service over the same store simulates a restart: the
-    // in-memory outbox envelopes are gone, but the rows survive here.
+    // A fresh service over the same store simulates a restart: rows now
+    // carry their persisted envelope, so the flush attempts them (no
+    // transport here, so Queued) instead of failing them outright.
     const restarted = new DmService({
       store: alice.store,
       relay,
@@ -485,9 +569,65 @@ describe('DmService routing + outbox', () => {
       now: () => nowRef.now,
     });
     await restarted.flushOutbox();
-    const rows = await alice.store.listMessages(peer);
-    expect(rows.map(r => r.status)).toEqual(['Failed', 'Failed']);
+    let rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Queued');
+    expect(rows[1].status).toBe('Sending'); // FIFO: head blocked the second row
+    // The transport returns: a forced flush drains both, in order.
+    relay.accept = true;
+    await restarted.flushOutbox(true);
+    rows = await alice.store.listMessages(peer);
+    expect(rows.map(r => r.status)).toEqual(['Relayed', 'Relayed']);
     restarted.stop();
+  });
+
+  test('F15b: a row with neither envelope nor plaintext fails fast, queue continues past it', async () => {
+    const relay = new TogglingRelay();
+    relay.accept = true;
+    const nowRef = { now: 111_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const peer = 'b'.repeat(64);
+    await alice.store.addMessage({
+      id: 'dead-row',
+      peerHex: peer,
+      direction: 'out',
+      sealed: 'stale',
+      createdAtMs: nowRef.now,
+      status: 'Sending',
+      attempts: 0,
+      nextAttemptAtMs: nowRef.now,
+    });
+    await alice.service.sendMessage(peer, 'alive after dead');
+    await alice.service.flushOutbox();
+    const rows = await alice.store.listMessages(peer);
+    expect(rows.map(r => r.status)).toEqual(['Failed', 'Relayed']);
+  });
+
+  test('F15c: a row with plaintext but no envelope re-seals and sends', async () => {
+    const relay = new TogglingRelay();
+    relay.accept = true;
+    const nowRef = { now: 112_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const peer = 'b'.repeat(64);
+    // Flush iterates conversations, so the conversation row must exist
+    // for a hand-built outbox row to be flushed at all.
+    await alice.service.startConversation(peer);
+    await alice.store.addMessage({
+      id: 'reseal-row',
+      peerHex: peer,
+      direction: 'out',
+      sealed: 'stale',
+      plainText: 'resealed text',
+      createdAtMs: nowRef.now,
+      status: 'Sending',
+      attempts: 0,
+      nextAttemptAtMs: nowRef.now,
+    });
+    await alice.service.flushOutbox();
+    const rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Relayed');
+    expect(rows[0].envelope).toBeDefined();
+    expect(rows[0].deliveryId).toBeDefined();
+    expect(rows[0].ackProof).toBeDefined();
   });
 
   test('F16: per-conversation message lists cap with oldest eviction', async () => {
@@ -500,7 +640,7 @@ describe('DmService routing + outbox', () => {
         direction: 'in',
         sealed: 'sealed',
         createdAtMs: i,
-        status: 'Sent',
+        status: 'Delivered',
         attempts: 0,
         nextAttemptAtMs: i,
       });
@@ -560,7 +700,7 @@ describe('DmService routing + outbox', () => {
       await microtasks();
       let rows = await alice.store.listMessages('e'.repeat(64));
       expect(rows[0].attempts).toBe(1);
-      expect(rows[0].status).toBe('Sending');
+      expect(rows[0].status).toBe('Queued');
       // Move the fake clock past the 1000ms backoff and fire the re-armed timer.
       nowRef.now += 1000;
       await jest.advanceTimersByTimeAsync(1000);
@@ -571,5 +711,190 @@ describe('DmService routing + outbox', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('DM transport parity: honest states, acks, mesh, restart', () => {
+  test('relay OK lands in Relayed, and the peer ack upgrades it to Delivered', async () => {
+    const nowRef = { now: 200_000_000 };
+    // Relayed with no peer ack possible: the recipient never started, so
+    // no ack can come back. (Asserting Relayed after a started peer
+    // would race the ack round-trip, which upgrades it mid-test.)
+    const soloRelay = new MemoryDmRelay();
+    const solo = makePersona(soloRelay, nowRef);
+    await solo.service.sendMessage('b'.repeat(64), 'relayed only');
+    await solo.service.flushOutbox();
+    expect((await solo.service.getThread('b'.repeat(64)))[0].status).toBe('Relayed');
+    // With both sides started, the peer stores it and acks back through
+    // the same relay, upgrading the row to Delivered.
+    const relay = new MemoryDmRelay();
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    alice.service.start();
+    bob.service.start();
+    await alice.service.sendMessage(bob.meshHex, 'ack me please');
+    await alice.service.flushOutbox();
+    await tick();
+    await tick();
+    const sent = await alice.service.getThread(bob.meshHex);
+    expect(sent[0].status).toBe('Delivered');
+    expect((await bob.service.getThread(alice.meshHex)).map(t => t.text)).toEqual(['ack me please']);
+  });
+
+  test('a forged ack (wrong proof) is ignored; only the true proof delivers', async () => {
+    const relay = new FailingDmRelay();
+    const nowRef = { now: 210_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const peer = 'b'.repeat(64);
+    await alice.service.sendMessage(peer, 'prove it');
+    await alice.service.flushOutbox();
+    const rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Queued');
+    const deliveryId = rows[0].deliveryId as string;
+    // Forged: sealed to alice, but the proof is made up.
+    const forged = sealDm(JSON.stringify({ dmAckFor: deliveryId, proof: '0'.repeat(64) }), peer, alice.meshHex);
+    expect(await alice.service.receiveAck(forged)).toBe('ignored');
+    expect((await alice.store.listMessages(peer))[0].status).toBe('Queued');
+    // True proof (the one stored at send time) delivers.
+    const valid = sealDm(
+      JSON.stringify({ dmAckFor: deliveryId, proof: rows[0].ackProof }),
+      peer,
+      alice.meshHex,
+    );
+    expect(await alice.service.receiveAck(valid)).toBe('delivered');
+    expect((await alice.store.listMessages(peer))[0].status).toBe('Delivered');
+  });
+
+  test('cross-transport duplicate (BLE copy plus relay copy) renders once', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 220_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    const envelope = sealDm('one copy only', alice.meshHex, bob.meshHex);
+    expect(await bob.service.receiveEnvelope(envelope)).toBe('request');
+    // Same send arriving again over the other transport (now carrying a
+    // relay event id) is the same delivery id, so it is dropped.
+    expect(await bob.service.receiveEnvelope({ ...envelope, relayEventId: 'relay-event-9' })).toBe('ignored');
+    const thread = await bob.service.getThread(alice.meshHex);
+    expect(thread).toHaveLength(1);
+    expect((await bob.service.listRequests())[0].unread).toBe(1);
+  });
+
+  test('restart keeps thread text and sender order (persisted envelope + timestamps)', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 230_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    const late = sealDm('sent later', alice.meshHex, bob.meshHex, 2000);
+    const early = sealDm('sent earlier', alice.meshHex, bob.meshHex, 1000);
+    await bob.service.receiveEnvelope(late);
+    await bob.service.receiveEnvelope(early);
+    // Own sent text survives restart too (persisted plaintext column in
+    // the SQLite store; here the row itself carries it).
+    await alice.service.sendMessage(bob.meshHex, 'my own words');
+    const restartedBob = new DmService({
+      store: bob.store,
+      relay,
+      ownKeys: () => dmKeypairFromDeviceSecret(bob.secret),
+      ownMeshHex: () => bob.meshHex,
+      now: () => nowRef.now,
+    });
+    const restartedAlice = new DmService({
+      store: alice.store,
+      relay,
+      ownKeys: () => dmKeypairFromDeviceSecret(alice.secret),
+      ownMeshHex: () => alice.meshHex,
+      now: () => nowRef.now,
+    });
+    expect((await restartedBob.getThread(alice.meshHex)).map(t => t.text)).toEqual([
+      'sent earlier',
+      'sent later',
+    ]);
+    const own = await restartedAlice.getThread(bob.meshHex);
+    expect(own).toHaveLength(1);
+    expect(own[0].text).toBe('my own words');
+  });
+
+  test('force flush drains Queued rows early; a plain flush respects the backoff', async () => {
+    const relay = new TogglingRelay();
+    const nowRef = { now: 240_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const peer = 'b'.repeat(64);
+    await alice.service.sendMessage(peer, 'drain me');
+    await alice.service.flushOutbox();
+    let rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Queued');
+    expect(rows[0].nextAttemptAtMs).toBeGreaterThan(nowRef.now);
+    // Transport returns, but the backoff has not elapsed: a plain flush
+    // must not attempt yet.
+    relay.accept = true;
+    await alice.service.flushOutbox();
+    rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Queued');
+    // A forced flush (foreground, connectivity return, peer arrival)
+    // drains it now.
+    await alice.service.flushOutbox(true);
+    rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Relayed');
+  });
+
+  test('mesh-only offline: BLE handoff lands in MeshSent, peer ack delivers', async () => {
+    const relay = new FailingDmRelay();
+    const nowRef = { now: 250_000_000 };
+    const aliceMesh = new LoopMesh();
+    const bobMesh = new LoopMesh();
+    aliceMesh.peer = bobMesh;
+    bobMesh.peer = aliceMesh;
+    const alice = makePersona(relay, nowRef, aliceMesh);
+    const bob = makePersona(relay, nowRef, bobMesh);
+    alice.service.start();
+    bob.service.start();
+    await alice.service.sendMessage(bob.meshHex, 'over ble only');
+    await alice.service.flushOutbox();
+    await tick();
+    await tick();
+    // The mesh notify went out, and the peer ack came back over mesh:
+    // Delivered, with MeshSent as the honest interim (visible if the
+    // ack had not arrived yet).
+    const sent = await alice.service.getThread(bob.meshHex);
+    expect(sent[0].status).toBe('Delivered');
+    expect((await bob.service.getThread(alice.meshHex)).map(t => t.text)).toEqual(['over ble only']);
+  });
+
+  test('mesh handoff without an ack ends in Failed after the cap, but a late ack still delivers', async () => {
+    const relay = new FailingDmRelay();
+    const nowRef = { now: 260_000_000 };
+    // A mesh that claims a peer took the frames but never acks: use a
+    // one-way stub (publish returns 1, subscribe never delivers).
+    const oneWay: DmMeshPort = {
+      async publish(): Promise<number> {
+        return 1;
+      },
+      subscribe(): () => void {
+        return () => {};
+      },
+    };
+    const alice2 = makePersona(relay, nowRef, oneWay);
+    await alice2.service.sendMessage('b'.repeat(64), 'into the void');
+    await alice2.service.flushOutbox();
+    let rows = await alice2.store.listMessages('b'.repeat(64));
+    expect(rows[0].status).toBe('MeshSent');
+    // Five mesh sends with no ack: force the cap by marking the count,
+    // then flush (due now) to terminal Failed.
+    rows[0].meshAttempts = 5;
+    rows[0].nextAttemptAtMs = nowRef.now;
+    await alice2.store.updateMessage(rows[0]);
+    await alice2.service.flushOutbox();
+    rows = await alice2.store.listMessages('b'.repeat(64));
+    expect(rows[0].status).toBe('Failed');
+    // A late ack from the peer still corrects Failed to Delivered.
+    const valid = sealDm(
+      JSON.stringify({ dmAckFor: rows[0].deliveryId, proof: rows[0].ackProof }),
+      'b'.repeat(64),
+      alice2.meshHex,
+    );
+    expect(await alice2.service.receiveAck(valid)).toBe('delivered');
+    rows = await alice2.store.listMessages('b'.repeat(64));
+    expect(rows[0].status).toBe('Delivered');
   });
 });

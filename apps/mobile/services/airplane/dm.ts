@@ -3,22 +3,29 @@
 // Keys come from the existing device identity (identity.ts): the DM keypair
 // is derived from the device Ed25519 secret, no new key material.
 // T8 HONEST EXCEPTION: this derivation CANNOT go behind the
-// KeyStorePort.sign() seam — deriving an X25519 keypair from the Ed25519
+// KeyStorePort.sign() seam - deriving an X25519 keypair from the Ed25519
 // secret needs the secret itself, not a signature over a message. So dm.ts
 // remains, with identity.ts's custody owner, the only app module that
-// receives the secret — and only to derive (never to store or log) the DM
+// receives the secret - and only to derive (never to store or log) the DM
 // keys. Consequence of T8 rotation: the DM address changes with the mesh
 // identity (same derivation, new secret), so old DM peers cannot reach the
 // new identity; the rotation screen says so, and rotation resets this
 // singleton so the next DM derives from the new key.
-// PERSISTENCE NOTE (P1 follow-up): the store below is MemoryDmStore —
-// conversations survive only for the app session. A SQLite DmStore on
-// SEPARATE dm_* tables (same DmStorePort) is the follow-up; the service,
-// routing, outbox and UI do not change when it lands.
+// PERSISTENCE: the store below is SqliteDmStore (SEPARATE dm_* tables in
+// the app database, see dmSqlite.ts), so conversations, the outbox, and
+// delivery state survive app restarts. The service, routing, outbox, and
+// UI all talk DmStorePort, so the store change does not touch them.
+// TRANSPORT: relay first (pooled WsDmRelay with ack kind), BLE mesh
+// alongside it (DmBleTransport over the transport manager's BLE port,
+// registered after the radio starts; a service created before that picks
+// the port up from the pending registration). Delivery states stay honest:
+// relay OK lands in Relayed and BLE notify in MeshSent, and only a
+// verified peer ack lands in Delivered.
 
+import type { TransportPort } from '@airplane/protocol';
 import {
+  DmBleTransport,
   DmService,
-  MemoryDmStore,
   WsDmRelay,
   dmFromHex,
   dmKeypairFromDeviceSecret,
@@ -27,9 +34,19 @@ import {
 import { getDeviceKeypair, onIdentityChange } from './identity';
 import { loadRelayUrls } from '../../src/lib/relays';
 import { authorLabelFor } from './names';
+import { SqliteDmStore } from './dmSqlite';
+import { createSqliteDatabasePort } from './sqlite';
 
 let service: DmService | null = null;
 let servicePromise: Promise<DmService> | null = null;
+/**
+ * BLE port owned by the transport manager, registered here when the radio
+ * starts (and re-registered when the port is recreated). Kept apart from
+ * the service so the transport manager never imports the DM singleton
+ * lifecycle: it registers a port, and the next service creation (or the
+ * live service, via attach below) picks it up.
+ */
+let pendingBlePort: TransportPort | null = null;
 
 /** Drop the singleton (T8 rotation: the next DM derives from the new key). */
 export function resetDmService(): void {
@@ -49,10 +66,11 @@ export async function getDmService(): Promise<DmService> {
     const kp = await getDeviceKeypair();
     const ownHex = dmToHex(kp.publicKey);
     const svc = new DmService({
-      store: new MemoryDmStore(),
+      store: new SqliteDmStore(createSqliteDatabasePort()),
       // Same configured list as the post path: DMs must not silently
       // keep using package defaults the user removed in Settings.
       relay: new WsDmRelay({ relays: await loadRelayUrls(), allowPrivateRelays: true }),
+      mesh: pendingBlePort ? new DmBleTransport(pendingBlePort) : undefined,
       ownKeys: () => dmKeypairFromDeviceSecret(kp.secretKey),
       ownMeshHex: () => ownHex,
     });
@@ -101,22 +119,57 @@ export function dmUserErrorMessage(e: unknown): string {
   return 'Something went wrong. Try again.';
 }
 
-/** Send a DM and immediately attempt delivery (outbox retries on failure). */
-export async function sendDm(peerHex: string, text: string): Promise<void> {
-  const svc = await getDmService();
-  await svc.sendMessage(peerHex, text);
-  await svc.flushOutbox();
+/**
+ * Register the BLE port for DM mesh transport. Called by the transport
+ * manager when the radio starts (and when the port is recreated). A live
+ * service re-attaches at once (the old port subscription is dropped, so
+ * a recreated radio never leaves a stale port listening); a service
+ * created later picks the port up from the pending registration.
+ */
+export function registerDmBlePort(port: TransportPort | null): void {
+  pendingBlePort = port;
+  if (service) service.attachMesh(port ? new DmBleTransport(port) : null);
 }
 
 /**
- * Foreground flush for the outbox scheduler (P1-09): drains Sending rows
- * when the app returns to foreground, since timers do not reliably fire
- * while backgrounded. Deliberately a no-op when the service was never
- * started, so a foreground event never eagerly creates DM subscriptions
- * for a user who never opened Messages.
+ * Send a DM. Optimistic UI: the row is stored (status Sending) and
+ * returned at once, so the thread shows it immediately; the outbox flush
+ * then runs in the background and the service emit refreshes the thread
+ * when the status moves. Previously this awaited the flush, so the
+ * message appeared only after the relay round-trip (up to 40 s on the
+ * old sequential relay path) and the Send button stayed disabled that
+ * whole time: the "stuck on Sending" feel from the field test.
  */
-export async function flushDmOutboxIfStarted(): Promise<void> {
-  if (service) await service.flushOutbox();
+export async function sendDm(peerHex: string, text: string): Promise<void> {
+  const svc = await getDmService();
+  await svc.sendMessage(peerHex, text);
+  // Background flush: a store failure here must not unreject the send
+  // (the row is already stored as Sending and retries on the next flush).
+  void svc.flushOutbox().catch(() => {
+    /* status stays Sending; next flush retries */
+  });
+}
+
+/**
+ * Foreground flush for the outbox scheduler (P1-09): drains Sending and
+ * Queued rows when the app returns to foreground, since timers do not
+ * reliably fire while backgrounded. Forced, so rows queued with a future
+ * backoff time still drain now that the user is back. Deliberately a
+ * no-op when the service was never started, so a foreground event never
+ * eagerly creates DM subscriptions for a user who never opened Messages.
+ */
+export async function flushDmOutboxIfStarted(force = false): Promise<void> {
+  if (service) await service.flushOutbox(force);
+}
+
+/**
+ * Foreground subscription refresh: re-issues the relay subscription with
+ * a backfill from the stored watermark, so messages and acks that arrived
+ * while the app was backgrounded (or while a socket sat half-open) replay
+ * instead of staying silently missed. Same no-op guard as the flush.
+ */
+export async function refreshDmSubscriptionIfStarted(): Promise<void> {
+  if (service) await service.resubscribe();
 }
 
 /** Test seam: drop the singleton so tests get a fresh service. */

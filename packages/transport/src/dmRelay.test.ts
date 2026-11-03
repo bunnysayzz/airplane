@@ -9,7 +9,10 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { dmToHex, sealDm, type DmEnvelope } from './dm';
 import {
   WsDmRelay,
+  DM_ACK_EVENT_KIND,
+  dmAckEnvelopeToNostrEvent,
   dmEnvelopeToNostrEvent,
+  nostrEventToDmAckEnvelope,
   nostrEventToDmEnvelope,
 } from './dmRelay';
 import type { WebSocketLike } from './nostr';
@@ -61,6 +64,13 @@ function makeRelay(sockets: FakeSocket[], opts: { publishTimeoutMs?: number } = 
   });
 }
 
+/**
+ * Let pooled-publish microtasks land: a publish to a connecting socket
+ * sends on the microtask after its open wait resolves, so tests that open
+ * a socket and then read what it sent must yield once first.
+ */
+const tick = () => new Promise<void>(r => setTimeout(r, 0));
+
 describe('WsDmRelay', () => {
   test('subscribe uses the configured relay list, not package defaults', () => {
     const sockets: FakeSocket[] = [];
@@ -92,6 +102,7 @@ describe('WsDmRelay', () => {
     sockets[0].open();
     const req = sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
     expect(req).toBeDefined();
+    expect(req[2].kinds).toEqual([1059, 1060]);
     expect(req[2]['#p']).toEqual(['bb'.repeat(32)]);
     expect(req[2].since as number).toBeGreaterThanOrEqual(before - 86400 - 5);
     expect(req[2].since as number).toBeLessThanOrEqual(before);
@@ -136,7 +147,7 @@ describe('WsDmRelay.subscribe reconnect (P1-10)', () => {
     }
   });
 
-  test('unsubscribe stops retries: a later drop opens nothing', async () => {
+  test('unsubscribe stops retries but keeps the pooled socket for publish', async () => {
     jest.useFakeTimers();
     try {
       const sockets: FakeSocket[] = [];
@@ -144,7 +155,8 @@ describe('WsDmRelay.subscribe reconnect (P1-10)', () => {
       const unsub = relay.subscribe('b'.repeat(64), () => {});
       sockets[0].open();
       unsub();
-      expect(sockets[0].closed).toBe(true);
+      // Pooled sockets stay open for publish; only EVENT routing stops.
+      expect(sockets[0].closed).toBe(false);
       const count = sockets.length;
       // A close arriving after unsubscribe must not schedule a reconnect.
       if (sockets[0].onclose) sockets[0].onclose({});
@@ -157,28 +169,42 @@ describe('WsDmRelay.subscribe reconnect (P1-10)', () => {
 });
 
 describe('WsDmRelay.publish socket paths (P1-11)', () => {
-  test('a close without OK resolves false immediately, not at the timeout', async () => {
+  test('a close without OK resolves failed immediately, not at the timeout', async () => {
     const sockets: FakeSocket[] = [];
     const relay = makeRelay(sockets, { publishTimeoutMs: 60000 });
     const envelope = sealDm('close me', 'd'.repeat(64), 'e'.repeat(64));
     const result = relay.publish(envelope);
     sockets[0].open();
     sockets[0].close();
-    await expect(result).resolves.toBe(false);
+    await expect(result).resolves.toEqual({ accepted: false, rejected: false });
   });
 
-  test('an error resolves false and closes the socket (no leak)', async () => {
+  test('an error resolves failed and closes the socket (no leak)', async () => {
     const sockets: FakeSocket[] = [];
     const relay = makeRelay(sockets);
     const envelope = sealDm('error me', 'd'.repeat(64), 'e'.repeat(64));
     const result = relay.publish(envelope);
     sockets[0].open();
     sockets[0].fail();
-    await expect(result).resolves.toBe(false);
+    await expect(result).resolves.toEqual({ accepted: false, rejected: false });
     expect(sockets[0].closed).toBe(true);
   });
 
-  test('a send throw resolves false and closes the socket', async () => {
+  test('an explicit relay rejection settles at once as rejected, not at the timeout', async () => {
+    const sockets: FakeSocket[] = [];
+    const relay = makeRelay(sockets, { publishTimeoutMs: 60000 });
+    const envelope = sealDm('reject me', 'd'.repeat(64), 'e'.repeat(64));
+    const result = relay.publish(envelope);
+    sockets[0].open();
+    await tick();
+    const sent = JSON.parse(sockets[0].sent[0]) as unknown[];
+    const event = sent[1] as { id: string };
+    // The old code ignored OK=false and burned the full timeout here.
+    sockets[0].receive(['OK', event.id, false, 'restricted: kind not allowed']);
+    await expect(result).resolves.toEqual({ accepted: false, rejected: true });
+  });
+
+  test('a send throw resolves failed; the pooled socket stays open', async () => {
     class ThrowingSocket extends FakeSocket {
       override send(): void {
         throw new Error('send boom');
@@ -197,41 +223,124 @@ describe('WsDmRelay.publish socket paths (P1-11)', () => {
     const envelope = sealDm('throw me', 'd'.repeat(64), 'e'.repeat(64));
     const result = relay.publish(envelope);
     sockets[0].open();
-    await expect(result).resolves.toBe(false);
-    expect(sockets[0].closed).toBe(true);
+    await expect(result).resolves.toEqual({ accepted: false, rejected: false });
+    // Pooled sockets are shared with the subscription: one bad send
+    // must not kill them. The socket closes only on error/close.
+    expect(sockets[0].closed).toBe(false);
   });
 
-  test('sequential first-OK-wins order is unchanged: an OK still resolves true', async () => {
+  test('parallel first-OK-wins: an OK resolves true and the socket stays pooled', async () => {
     const sockets: FakeSocket[] = [];
     const relay = makeRelay(sockets);
     const envelope = sealDm('ok me', 'd'.repeat(64), 'e'.repeat(64));
     const result = relay.publish(envelope);
     sockets[0].open();
+    await tick();
     const sent = JSON.parse(sockets[0].sent[0]) as unknown[];
     const event = sent[1] as { id: string };
     sockets[0].receive(['OK', event.id, true]);
-    await expect(result).resolves.toBe(true);
-    expect(sockets[0].closed).toBe(true);
+    await expect(result).resolves.toEqual({ accepted: true, rejected: false });
+    expect(sockets[0].closed).toBe(false);
+  });
+
+  test('parallel first-OK-wins: a slow second relay never blocks the first OK', async () => {
+    const sockets: FakeSocket[] = [];
+    const relay = new WsDmRelay({
+      relays: ['wss://fast.relay', 'wss://slow.relay'],
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        return s;
+      },
+      publishTimeoutMs: 60000,
+    });
+    const envelope = sealDm('race me', 'd'.repeat(64), 'e'.repeat(64));
+    const result = relay.publish(envelope);
+    sockets[0].open();
+    sockets[1].open();
+    await tick();
+    const sent = JSON.parse(sockets[0].sent[0]) as unknown[];
+    const event = sent[1] as { id: string };
+    // The slow relay never answers at all: the first OK still wins now,
+    // without waiting out the deadline.
+    sockets[0].receive(['OK', event.id, true]);
+    await expect(result).resolves.toEqual({ accepted: true, rejected: false });
   });
 });
 
 describe('WsDmRelay.publish event reuse on retry (F14-retry)', () => {
-  test('publishing the same envelope twice sends the same event id', async () => {
+  test('publishing the same envelope twice sends the same event id over the pooled socket', async () => {
     const sockets: FakeSocket[] = [];
     const relay = makeRelay(sockets);
     const envelope = sealDm('retry me', 'd'.repeat(64), 'e'.repeat(64));
     const first = relay.publish(envelope);
     sockets[0].open();
+    await tick();
     const firstEvent = JSON.parse(sockets[0].sent[0]) as unknown[];
     const firstId = (firstEvent[1] as { id: string }).id;
     sockets[0].receive(['OK', firstId, true]);
-    await expect(first).resolves.toBe(true);
+    await expect(first).resolves.toEqual({ accepted: true, rejected: false });
+    // Pooled: the second publish reuses the same socket, no new socket.
     const second = relay.publish(envelope);
-    sockets[1].open();
-    const secondEvent = JSON.parse(sockets[1].sent[0]) as unknown[];
+    expect(sockets).toHaveLength(1);
+    const secondEvent = JSON.parse(sockets[0].sent[1]) as unknown[];
     expect((secondEvent[1] as { id: string }).id).toBe(firstId);
-    sockets[1].receive(['OK', firstId, true]);
-    await expect(second).resolves.toBe(true);
+    sockets[0].receive(['OK', firstId, true]);
+    await expect(second).resolves.toEqual({ accepted: true, rejected: false });
+  });
+});
+
+describe('WsDmRelay ack kind (delivery acks)', () => {
+  test('ack events publish under the ack kind and route to the ack callback only', async () => {
+    const sockets: FakeSocket[] = [];
+    const relay = makeRelay(sockets);
+    const ownHex = 'a'.repeat(64);
+    const received: DmEnvelope[] = [];
+    const acks: DmEnvelope[] = [];
+    const unsub = relay.subscribe(
+      ownHex,
+      e => {
+        received.push(e);
+      },
+      e => {
+        acks.push(e);
+      },
+    );
+    sockets[0].open();
+    const req = JSON.parse(sockets[0].sent[0]) as unknown[];
+    const sender = ed25519.utils.randomSecretKey();
+    const envelope = sealDm('ack me', dmToHex(ed25519.getPublicKey(sender)), ownHex);
+    const ackEvent = dmAckEnvelopeToNostrEvent(envelope);
+    expect(ackEvent.kind).toBe(DM_ACK_EVENT_KIND);
+    sockets[0].receive(['EVENT', req[1], ackEvent]);
+    expect(acks).toHaveLength(1);
+    expect(received).toHaveLength(0);
+    unsub();
+  });
+
+  test('publishAck sends the ack kind and resolves on OK', async () => {
+    const sockets: FakeSocket[] = [];
+    const relay = makeRelay(sockets);
+    const envelope = sealDm('ack out', 'd'.repeat(64), 'e'.repeat(64));
+    const result = relay.publishAck(envelope);
+    sockets[0].open();
+    await tick();
+    const sent = JSON.parse(sockets[0].sent[0]) as unknown[];
+    const event = sent[1] as { id: string; kind: number };
+    expect(event.kind).toBe(DM_ACK_EVENT_KIND);
+    sockets[0].receive(['OK', event.id, true]);
+    await expect(result).resolves.toEqual({ accepted: true, rejected: false });
+  });
+
+  test('ack parsing rejects wrong-kind events and forged signatures', () => {
+    const sender = ed25519.utils.randomSecretKey();
+    const envelope = sealDm('ack real', dmToHex(ed25519.getPublicKey(sender)), 'c'.repeat(64));
+    const ackEvent = dmAckEnvelopeToNostrEvent(envelope);
+    expect(nostrEventToDmAckEnvelope(ackEvent)).not.toBeNull();
+    // A 1059 message event is not an ack, even with a valid signature.
+    expect(nostrEventToDmAckEnvelope(dmEnvelopeToNostrEvent(envelope))).toBeNull();
+    const badSig = { ...ackEvent, sig: ackEvent.sig.slice(0, -1) + (ackEvent.sig.endsWith('0') ? '1' : '0') };
+    expect(nostrEventToDmAckEnvelope(badSig)).toBeNull();
   });
 });
 

@@ -36,6 +36,7 @@ import {
 } from './reshares';
 import { notifyFeedListeners } from './feed';
 import { getDevicePublicKey, crypto } from './identity';
+import { registerDmBlePort, flushDmOutboxIfStarted, refreshDmSubscriptionIfStarted } from './dm';
 import { loadRelayUrls } from '../../src/lib/relays';
 import { addBreadcrumb } from '../../src/sentry';
 import { GattBlePort, defaultBleDeps, type BleNativeDeps } from './ble/gatt';
@@ -52,7 +53,7 @@ import {
 
 /**
  * NetInfo is a native module. If it fails to load (not linked, Expo Go,
- * etc.), the app must still launch — transport just runs offline-only.
+ * etc.), the app must still launch - transport just runs offline-only.
  * We load it lazily so a broken native module can't crash the app at import.
  */
 let NetInfoModule: {
@@ -261,7 +262,7 @@ function scheduleFeedNotify(): void {
 }
 
 async function handleIncoming(event: SignedEvent, source: string): Promise<void> {
-  // STAR MVP: kind-4 events never reach the events table — its schema
+  // STAR MVP: kind-4 events never reach the events table - its schema
   // CHECKs kind IN (1,2,3). They go to the in-memory star counter instead
   // (same BLE + Nostr ingress path, same event-id dedup upstream).
   if (event.kind === EVENT_KIND_STAR) {
@@ -522,6 +523,10 @@ export async function startTransport(): Promise<void> {
 
   blePort = makeBlePort();
   registerAdapterStateListener();
+  // DM mesh transport rides this same port (flags-1 DM frames, separate
+  // from feed frames). Registration is idempotent: a later service
+  // creation picks the port up, and a live service re-attaches at once.
+  registerDmBlePort(blePort.port);
   // BLE ingress verifies signatures, matching the Nostr path (T11 §23.6):
   // an unsigned/tampered event from a mesh peer never reaches the store.
   const ble = new BleTransport(blePort.port, {
@@ -530,7 +535,7 @@ export async function startTransport(): Promise<void> {
   });
   // Relay list is user-configurable in Settings > Relays and persisted in
   // AsyncStorage (src/lib/relays.ts). loadRelayUrls() already falls back to
-  // the default public relays when nothing is stored — and never throws —
+  // the default public relays when nothing is stored - and never throws -
   // so a storage failure here just means the defaults, never a dead uplink.
   hybrid = new HybridTransport(
     ble,
@@ -599,6 +604,7 @@ export async function startTransport(): Promise<void> {
     recordTransportFailure('start');
     await blePort?.close();
     blePort = null;
+    registerDmBlePort(null);
     hybrid = null;
     sync = null;
     lastOnline = null;
@@ -618,7 +624,7 @@ export async function startTransport(): Promise<void> {
   // Bring up the BLE radio only when the OS grants are already in place.
   // The OS permission dialog NEVER fires here: permission priming (the app's
   // own rationale UI first, OS request only on the user's action) is owned
-  // by the BlePrime UI. A missing grant just leaves the radio down — the
+  // by the BlePrime UI. A missing grant just leaves the radio down - the
   // mesh runs Nostr-only, exactly like the old no-op port behaved.
   if (await checkBlePermissions().catch(() => false)) {
     try {
@@ -773,7 +779,7 @@ export function blePeerIdsForPublish(port: TransportPort | null | undefined): st
 
 /** Mesh pill state: linked neighbours + what the app is actually syncing over. */
 export interface MeshStatusSnapshot {
-  /** Established BLE connections (linked neighbours — not merely heard ads). */
+  /** Established BLE connections (linked neighbours - not merely heard ads). */
   peersNearby: number;
   /** 'mesh' = BLE radio only, 'online' = internet up (World visible), 'offline' = neither. */
   relayState: 'mesh' | 'online' | 'offline';
@@ -821,10 +827,22 @@ export function getMeshStatus(): MeshStatusSnapshot {
  * change; the port emits no connect/disconnect events, so polling is the
  * honest mechanism (not a second event system). Returns unsubscribe.
  */
+/** Connected-peer count at the last mesh-status poll (peer-arrival edge). */
+let prevMeshPeers = 0;
+
 export function subscribeMeshStatus(cb: () => void): () => void {
   const timer = setInterval(() => {
     const before = meshSnapshot;
-    if (getMeshStatus() !== before) cb();
+    const next = getMeshStatus();
+    if (next !== before) cb();
+    // BLE peer arrival is a transport return for the DM outbox: a queued
+    // DM drains over mesh now, not when its backoff timer would fire.
+    // Edge-triggered (0 to N) so a steady peer set does not re-flush
+    // every poll and burn outbox attempts.
+    if (prevMeshPeers === 0 && next.peersNearby > 0) {
+      void flushDmOutboxIfStarted(true).catch(() => {});
+    }
+    prevMeshPeers = next.peersNearby;
   }, 2000);
   return () => clearInterval(timer);
 }
@@ -871,6 +889,7 @@ export async function retryBleRadio(): Promise<boolean> {
     if (!blePort) {
       blePort = makeBlePort();
       registerAdapterStateListener();
+      registerDmBlePort(blePort.port);
     }
     await tearDownBleRadio();
     if (!(await requestBlePermissions())) {
@@ -927,13 +946,13 @@ export function setRelaySubscribeCells(cells: string[]): void {
  * the NetInfo listener and the initial fetch, so both paths behave the
  * same: online (re)starts the relay sockets, runs a WorldSync pass, and
  * starts the periodic sync timer; offline stops the sockets and timer.
- * BLE always runs (mesh works offline — that is the point of the app);
+ * BLE always runs (mesh works offline - that is the point of the app);
  * only the Nostr/World side follows connectivity.
  *
  * The shared funnel matters: NetInfo reports isInternetReachable: null
  * until its reachability check lands, so the listener can fire offline
  * first and the fetch resolve online after. Before this funnel the fetch
- * path never restarted Nostr — it only ran sync + timer — so after that
+ * path never restarted Nostr - it only ran sync + timer - so after that
  * race the silent WorldSync uplink stayed dead until the next
  * connectivity flap. Transitions only: duplicates are no-ops.
  */
@@ -946,6 +965,10 @@ function applyConnectivity(online: boolean): void {
     void runSync();
     // Periodic sync while online.
     startSyncTimer();
+    // A transport returning drains the DM queue and replays missed DMs
+    // and acks: both are no-ops when the DM service was never started.
+    void flushDmOutboxIfStarted(true).catch(() => {});
+    void refreshDmSubscriptionIfStarted().catch(() => {});
   } else {
     addBreadcrumb('transport: connectivity offline');
     void hybrid?.nostr.stop();
@@ -961,7 +984,7 @@ function applyConnectivity(online: boolean): void {
 function wireConnectivity(): void {
   const netInfo = getNetInfo();
   if (!netInfo) {
-    // No connectivity module — run offline-only (BLE stub). Nostr stays
+    // No connectivity module - run offline-only (BLE stub). Nostr stays
     // stopped; the feed works fine without it.
     return;
   }
@@ -1007,6 +1030,7 @@ export async function stopTransport(): Promise<void> {
   await hybrid?.stop();
   await blePort?.close();
   blePort = null;
+  registerDmBlePort(null);
   hybrid = null;
   sync = null;
   radioWasOn = false;
@@ -1020,7 +1044,7 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
   if (!hybrid) await startTransport();
   // BLE fan-out targets the currently connected peers. Previously this
   // call passed no peer ids at all, so local posts NEVER went out over
-  // BLE — only Nostr — even with phones connected over GATT.
+  // BLE - only Nostr - even with phones connected over GATT.
   const blePeersAtPublish = blePeerIdsForPublish(blePort?.port);
   const result = await hybrid!.publish(event, blePeersAtPublish);
   // Relay OK is the confirmation: mark it now instead of waiting for

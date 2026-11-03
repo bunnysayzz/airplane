@@ -1,13 +1,48 @@
 // SPDX-License-Identifier: Apache-2.0
-// DM P1 service: conversations, requests folder, block/mute, delete-local-only,
-// persistent-shaped outbox with backoff + per-conversation FIFO.
+// DM service: conversations, requests folder, block/mute, delete-local-only,
+// persistent-shaped outbox with backoff + per-conversation FIFO, BLE mesh
+// transport alongside relay, and honest delivery states.
 //
-// SEPARATE DM STORE (plan §8): nothing here touches the public post store.
-// Messages are stored SEALED; thread views decrypt on read only and never
-// persist plaintext. Deleting a conversation removes its rows from this store
-// only — relay envelopes and the recipient's copy are untouched (local only).
-// Read receipts: none sent, none requested (orders).
-// Delivery states: Sending / Sent / Failed only (orders).
+// SEPARATE DM STORE (plan section 8): nothing here touches the public post
+// store. Incoming messages are stored SEALED; thread views decrypt on read
+// only. Outgoing rows additionally persist their sendable envelope (the
+// ephemeral pubkey header, which the sealed payload alone does not carry)
+// so a retry after a restart re-sends the identical bytes, and their own
+// plaintext so the sender thread still renders after a restart. Incoming
+// plaintext is never persisted: it is produced by decrypt-on-read from the
+// persisted envelope. Deleting a conversation removes its rows from this
+// store only: relay envelopes and the recipient's copy are untouched
+// (local only). Read receipts: none sent, none requested (orders).
+//
+// DELIVERY STATES (honest, see dm.ts for the ack proof):
+//   Sending   an attempt is in flight, or a hard failure is being retried
+//             inside the attempt cap. Never a final state.
+//   Queued    the last attempt found no transport at all (relays
+//             unreachable and no BLE peers). Retried on the backoff timer
+//             and on every force flush (foreground, connectivity return,
+//             BLE peer arrival), without an attempt cap: offline for hours
+//             still drains when a transport returns, it does not Failed.
+//   Relayed   a relay accepted the envelope (OK). The relay holds it; the
+//             peer fetches it on subscribe/backfill. Not delivery: no peer
+//             has acked yet. Never retried (re-publishing the same event id
+//             is a no-op at the relay) and never Failed.
+//   MeshSent  a BLE notify went out to at least one connected peer, but no
+//             peer app has acked yet. A notify resolving is a radio
+//             handoff, not delivery: the peer central may not have been
+//             subscribed yet, so the frame may never have reached the peer
+//             app. Re-attempted when due (30 s) or on force flush; relay
+//             success upgrades it to Relayed; five mesh sends with no ack
+//             end in Failed, and a late ack still upgrades any state to
+//             Delivered.
+//   Delivered the peer app stored the message and returned a verified ack
+//             (proof matches the proof stored at send time). This is the
+//             only state that claims the peer has the message.
+//   Failed    hard failures exhausted (every relay explicitly rejected the
+//             envelope, or BLE sends threw) after DM_MAX_ATTEMPTS attempts,
+//             or mesh sends exhausted without an ack. Tap-to-retry re-queues.
+// A row in Relayed or MeshSent is a handoff, not a trap: it stays visible
+// with its "not delivered yet" label until an ack arrives, and an ack that
+// arrives after Failed still corrects the row to Delivered.
 
 import { x25519 } from '@noble/curves/ed25519.js';
 import {
@@ -15,9 +50,13 @@ import {
   DM_MAX_ATTEMPTS,
   DM_TEXT_MAX_BYTES,
   DM_UNDECRYPTABLE_PLACEHOLDER,
+  dmAckProofForEnvelope,
   dmToHex,
+  isDeliveryId,
   isHex64,
+  parseDmAckContent,
   sealDm,
+  sealDmWithAckProof,
   unsealDm,
   type DmEnvelope,
   type DmKeypair,
@@ -27,7 +66,7 @@ import {
 // Re-export the placeholder for UI layers.
 export { DM_UNDECRYPTABLE_PLACEHOLDER };
 
-export type DmDelivery = 'Sending' | 'Sent' | 'Failed';
+export type DmDelivery = 'Sending' | 'Queued' | 'Relayed' | 'MeshSent' | 'Delivered' | 'Failed';
 export type DmConversationState = 'inbox' | 'request' | 'blocked';
 
 export interface DmMessageRow {
@@ -36,16 +75,33 @@ export interface DmMessageRow {
   direction: 'out' | 'in';
   /** Sealed NIP-44-style payload (outgoing: sealed to the peer; incoming: as received). */
   sealed: string;
+  /**
+   * Full sendable envelope (ephemeral pubkey header + sealed payload).
+   * Persisted by the SQLite store next to `sealed`, so an outbox retry
+   * after a restart re-sends the identical bytes and an incoming row
+   * decrypts on read after a restart. Never contains plaintext.
+   */
+  envelope?: DmEnvelope;
+  /**
+   * Outgoing plaintext, persisted for outgoing rows only so the sender
+   * thread renders after a restart. Never set on incoming rows: their
+   * plaintext is produced by decrypt-on-read and never written to disk.
+   */
+  plainText?: string;
+  /** Stable delivery id from the envelope (see dm.ts). Absent on pre-change rows. */
+  deliveryId?: string;
+  /** Expected ack proof for this send (outgoing rows only). One-way HMAC output, not a secret. */
+  ackProof?: string;
   createdAtMs: number;
   status: DmDelivery;
   attempts: number;
+  /** Mesh sends without an ack yet (MeshSent rows only). */
+  meshAttempts?: number;
   nextAttemptAtMs: number;
   /**
-   * Sender timestamp in epoch seconds (envelope.createdAt), set on
-   * incoming rows only. Orders messages within one conversation; never
-   * trusted globally, since a sender clock can lie. NOTE: this field is
-   * in-memory only today and MUST persist when the SQLite DM store lands,
-   * or ordering regresses to receive time on restart.
+   * Sender timestamp in epoch seconds (envelope.createdAt). Orders messages
+   * within one conversation; never trusted globally, since a sender clock
+   * can lie. Persisted by the SQLite store, so ordering survives restart.
    */
   senderCreatedAtSec?: number;
 }
@@ -62,9 +118,7 @@ export interface DmConversationRow {
   lastDirection: 'out' | 'in' | null;
   /**
    * Conversation state before blockPeer, restored by unblockPeer. Null
-   * (or absent on old rows) means inbox. NOTE: in-memory only today and
-   * MUST persist when the SQLite DM store lands, or unblock after a
-   * restart restores every request straight to inbox again.
+   * (or absent on old rows) means inbox. Persisted by the SQLite store.
    */
   priorState?: 'inbox' | 'request' | null;
 }
@@ -89,11 +143,20 @@ export interface DmStorePort {
   updateMessage(m: DmMessageRow): Promise<void>;
   listMessages(peerHex: string): Promise<DmMessageRow[]>;
   deleteMessages(peerHex: string): Promise<void>;
+  /** Latest inbound sender timestamp, or null when no inbound row exists. Drives restart backfill. */
+  lastInboundCreatedAtSec(): Promise<number | null>;
+  /** True when this delivery id was already stored (cross-restart dedup). */
+  hasSeenDelivery(deliveryId: string): Promise<boolean>;
+  /** Record a delivery id as stored. Kept across conversation delete, so a relay replay cannot resurrect deleted history. */
+  markSeenDelivery(deliveryId: string, peerHex: string): Promise<void>;
+  /** Outgoing row by delivery id, across conversations, or null. */
+  findMessageByDeliveryId(deliveryId: string): Promise<DmMessageRow | null>;
 }
 
 export class MemoryDmStore implements DmStorePort {
   private readonly conversations = new Map<string, DmConversationRow>();
   private readonly messages = new Map<string, DmMessageRow[]>();
+  private readonly seenDelivery = new Set<string>();
 
   async upsertConversation(c: DmConversationRow): Promise<void> {
     this.conversations.set(c.peerHex, { ...c });
@@ -137,28 +200,91 @@ export class MemoryDmStore implements DmStorePort {
   async deleteMessages(peerHex: string): Promise<void> {
     this.messages.delete(peerHex);
   }
+
+  async lastInboundCreatedAtSec(): Promise<number | null> {
+    let latest: number | null = null;
+    for (const list of this.messages.values()) {
+      for (const m of list) {
+        if (m.direction !== 'in' || m.senderCreatedAtSec === undefined) continue;
+        if (latest === null || m.senderCreatedAtSec > latest) latest = m.senderCreatedAtSec;
+      }
+    }
+    return latest;
+  }
+
+  async hasSeenDelivery(deliveryId: string): Promise<boolean> {
+    return this.seenDelivery.has(deliveryId);
+  }
+
+  async markSeenDelivery(deliveryId: string): Promise<void> {
+    this.seenDelivery.add(deliveryId);
+  }
+
+  async findMessageByDeliveryId(deliveryId: string): Promise<DmMessageRow | null> {
+    for (const list of this.messages.values()) {
+      const found = list.find(m => m.direction === 'out' && m.deliveryId === deliveryId);
+      if (found) return { ...found };
+    }
+    return null;
+  }
 }
 
-/** Relay seam. publish() resolves true only when a relay accepted the envelope. */
+/** Result of one relay publish attempt. `accepted` is a relay OK; `rejected`
+ *  is an explicit relay OK=false (policy, size, malformed event). Neither
+ *  flag means the peer received anything: both are relay-side facts only. */
+export interface DmRelayPublishResult {
+  accepted: boolean;
+  rejected: boolean;
+}
+
+/** Options for a relay subscription. `backfillSinceSec` overrides the
+ *  default 24 h replay window (used on restart with the stored watermark). */
+export interface DmRelaySubscribeOpts {
+  backfillSinceSec?: number;
+}
+
+/** Relay seam. publish() resolves with the relay-side outcome; acks travel
+ *  on publishAck()/the ack callback, never on the message channel. */
 export interface DmRelayPort {
-  publish(envelope: DmEnvelope): Promise<boolean>;
-  subscribe(ownMeshHex: string, onEnvelope: (e: DmEnvelope) => void): () => void;
+  publish(envelope: DmEnvelope): Promise<DmRelayPublishResult>;
+  publishAck(envelope: DmEnvelope): Promise<DmRelayPublishResult>;
+  subscribe(
+    ownMeshHex: string,
+    onEnvelope: (e: DmEnvelope) => void,
+    onAck?: (e: DmEnvelope) => void,
+    opts?: DmRelaySubscribeOpts,
+  ): () => void;
 }
 
 /** In-process relay for tests/dev: delivers to every registered subscriber
  *  whose address matches the envelope recipient. Never inspects content. */
 export class MemoryDmRelay implements DmRelayPort {
-  private readonly subs = new Set<{ ownHex: string; cb: (e: DmEnvelope) => void }>();
+  private readonly subs = new Set<{
+    ownHex: string;
+    cb: (e: DmEnvelope) => void;
+    ackCb?: (e: DmEnvelope) => void;
+  }>();
 
-  async publish(envelope: DmEnvelope): Promise<boolean> {
+  async publish(envelope: DmEnvelope): Promise<DmRelayPublishResult> {
     for (const s of [...this.subs]) {
       if (s.ownHex === envelope.recipientHex) s.cb(envelope);
     }
-    return true;
+    return { accepted: true, rejected: false };
   }
 
-  subscribe(ownMeshHex: string, onEnvelope: (e: DmEnvelope) => void): () => void {
-    const entry = { ownHex: ownMeshHex, cb: onEnvelope };
+  async publishAck(envelope: DmEnvelope): Promise<DmRelayPublishResult> {
+    for (const s of [...this.subs]) {
+      if (s.ownHex === envelope.recipientHex && s.ackCb) s.ackCb(envelope);
+    }
+    return { accepted: true, rejected: false };
+  }
+
+  subscribe(
+    ownMeshHex: string,
+    onEnvelope: (e: DmEnvelope) => void,
+    onAck?: (e: DmEnvelope) => void,
+  ): () => void {
+    const entry = { ownHex: ownMeshHex, cb: onEnvelope, ackCb: onAck };
     this.subs.add(entry);
     return () => {
       this.subs.delete(entry);
@@ -166,21 +292,43 @@ export class MemoryDmRelay implements DmRelayPort {
   }
 }
 
+/** BLE mesh seam for DMs. publish() returns how many connected peers the
+ *  frames went out to (a radio handoff count, never a delivery count);
+ *  subscribe() delivers message frames and ack frames on separate
+ *  callbacks. The transport never decrypts: only the service unseals. */
+export interface DmMeshPort {
+  publish(envelope: DmEnvelope, kind: 'dm' | 'ack'): Promise<number>;
+  subscribe(onEnvelope: (e: DmEnvelope) => void, onAck: (e: DmEnvelope) => void): () => void;
+}
+
 /**
- * Inbound memory caps. History is ephemeral in-memory today, so capping
- * drops nothing durable: the oldest messages in a conversation fall away
- * past the per-conversation cap, and the service maps evict their oldest
- * entries past the map cap. The SQLite DM store, when it lands, owns
- * durable history and must apply its own retention there.
+ * Inbound memory caps. For the memory store, history is ephemeral, so
+ * capping drops nothing durable: the oldest messages in a conversation
+ * fall away past the per-conversation cap, and the service maps evict
+ * their oldest entries past the map cap. The SQLite DM store owns
+ * durable history and applies the same per-conversation retention in
+ * its tables.
  */
 export const DM_MAX_MESSAGES_PER_CONVERSATION = 1000;
 export const DM_MAX_SEEN_EVENT_IDS_PER_CONVERSATION = 5000;
 export const DM_MAX_DM_MAP_ENTRIES = 5000;
 
+/** Re-attempt delay for MeshSent rows awaiting an ack, ms. */
+export const DM_MESH_RETRY_MS = 30000;
+/** Mesh sends without an ack before a MeshSent row ends in Failed. */
+export const DM_MESH_MAX_ATTEMPTS = 5;
+/** Backfill overlap on resubscribe, seconds: covers clock skew and relay
+ *  event-time vs envelope-time drift. Dedup makes the replay safe. */
+export const DM_BACKFILL_OVERLAP_SEC = 300;
+
 /** Relay that always refuses (offline / relay down): outbox must queue, never drop. */
 export class FailingDmRelay implements DmRelayPort {
-  async publish(): Promise<boolean> {
-    return false;
+  async publish(): Promise<DmRelayPublishResult> {
+    return { accepted: false, rejected: false };
+  }
+
+  async publishAck(): Promise<DmRelayPublishResult> {
+    return { accepted: false, rejected: false };
   }
 
   subscribe(): () => void {
@@ -191,6 +339,8 @@ export class FailingDmRelay implements DmRelayPort {
 export interface DmServiceOpts {
   store: DmStorePort;
   relay: DmRelayPort;
+  /** BLE mesh port, when the app has wired one (absent in package-level tests). */
+  mesh?: DmMeshPort;
   /** This device's DM keypair (derived from the device Ed25519 secret). */
   ownKeys: () => DmKeypair;
   /** This device's mesh pubkey hex (the DM address others write to). */
@@ -219,11 +369,13 @@ function assertPeerHex(peerHex: string, method: string): void {
 export class DmService {
   private readonly store: DmStorePort;
   private readonly relay: DmRelayPort;
+  private mesh: DmMeshPort | null;
   private readonly ownKeys: () => DmKeypair;
   private readonly ownMeshHex: () => string;
   private readonly now: () => number;
   private readonly listeners = new Set<() => void>();
-  private unsub: (() => void) | null = null;
+  private relayUnsub: (() => void) | null = null;
+  private meshUnsub: (() => void) | null = null;
   /** Single outbox flush timer, armed for the earliest next attempt (P1-09). */
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   /** In-flight flush: concurrent flushOutbox calls share one run (F14-retry). */
@@ -232,6 +384,7 @@ export class DmService {
   constructor(opts: DmServiceOpts) {
     this.store = opts.store;
     this.relay = opts.relay;
+    this.mesh = opts.mesh ?? null;
     this.ownKeys = opts.ownKeys;
     this.ownMeshHex = opts.ownMeshHex;
     this.now = opts.now ?? (() => Date.now());
@@ -248,14 +401,94 @@ export class DmService {
     for (const cb of [...this.listeners]) cb();
   }
 
+  /**
+   * Attach (or detach, with null) the BLE mesh port. Safe before start():
+   * start() subscribes whatever port is attached then. Re-attaching
+   * replaces the previous subscription, so a recreated radio never leaves
+   * a stale port listening. Does not flush: callers that attach on a
+   * peer-arrival event flush explicitly.
+   */
+  attachMesh(port: DmMeshPort | null): void {
+    if (this.meshUnsub) {
+      this.meshUnsub();
+      this.meshUnsub = null;
+    }
+    this.mesh = port;
+    if (port && this.relayUnsub) {
+      this.meshUnsub = port.subscribe(
+        envelope => {
+          void this.receiveEnvelope(envelope);
+        },
+        envelope => {
+          void this.receiveAck(envelope);
+        },
+      );
+    }
+  }
+
   /** Start listening for incoming sealed envelopes addressed to this device. */
   start(): void {
-    if (this.unsub) return;
-    this.unsub = this.relay.subscribe(this.ownMeshHex(), envelope => {
-      void this.receiveEnvelope(envelope);
-    });
-    // Flush once on start: a failed DM must not wait for the next user action.
-    void this.flushOutbox().catch(() => {});
+    if (this.relayUnsub) return;
+    this.relayUnsub = this.relay.subscribe(
+      this.ownMeshHex(),
+      envelope => {
+        void this.receiveEnvelope(envelope);
+      },
+      envelope => {
+        void this.receiveAck(envelope);
+      },
+    );
+    if (this.mesh && !this.meshUnsub) {
+      this.meshUnsub = this.mesh.subscribe(
+        envelope => {
+          void this.receiveEnvelope(envelope);
+        },
+        envelope => {
+          void this.receiveAck(envelope);
+        },
+      );
+    }
+    // Flush once on start, forced: rows queued before a restart must drain
+    // now, not when their backoff timer would have fired.
+    void this.flushOutbox(true).catch(() => {});
+    // Backfill refinement, after the default subscribe above is live: when
+    // the stored watermark is older than the relay default 24 h window,
+    // re-subscribe from the watermark so a long absence still replays.
+    // The default subscribe already covers the last 24 h, so this only
+    // extends the window, never narrows it, and dedup makes replay safe.
+    void this.refineBackfillOnStart().catch(() => {});
+  }
+
+  private async refineBackfillOnStart(): Promise<void> {
+    const watermark = await this.store.lastInboundCreatedAtSec();
+    if (watermark === null) return;
+    const windowStart = Math.floor(this.now() / 1000) - 86400;
+    if (watermark >= windowStart) return;
+    await this.resubscribe();
+  }
+
+  /**
+   * Re-issue the relay subscription with a backfill from the stored
+   * watermark (minus overlap), so messages and acks that arrived while
+   * the app was backgrounded, or the sockets were half-open, replay
+   * instead of staying silently missed. No-op before start(): a service
+   * that was never started must not create subscriptions on a foreground
+   * event for a user who never opened Messages.
+   */
+  async resubscribe(): Promise<void> {
+    if (!this.relayUnsub) return;
+    const watermark = await this.store.lastInboundCreatedAtSec();
+    this.relayUnsub();
+    this.relayUnsub = this.relay.subscribe(
+      this.ownMeshHex(),
+      envelope => {
+        void this.receiveEnvelope(envelope);
+      },
+      envelope => {
+        void this.receiveAck(envelope);
+      },
+      watermark === null ? undefined : { backfillSinceSec: watermark - DM_BACKFILL_OVERLAP_SEC },
+    );
   }
 
   stop(): void {
@@ -263,21 +496,25 @@ export class DmService {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    if (this.unsub) {
-      this.unsub();
-      this.unsub = null;
+    if (this.relayUnsub) {
+      this.relayUnsub();
+      this.relayUnsub = null;
+    }
+    if (this.meshUnsub) {
+      this.meshUnsub();
+      this.meshUnsub = null;
     }
   }
 
   /**
    * One flush scheduler: a single timer for the earliest nextAttemptAtMs
-   * across Sending rows, re-armed when the outbox changes (send, retry,
-   * delete) or when a flush attempts a row. Clearing before and after
-   * the store reads keeps exactly one timer live even when schedule
-   * calls overlap. Blocked conversations are skipped, matching
-   * flushOutbox. Timers do not reliably fire while backgrounded, so the
-   * app layer also flushes on foreground (see the AppState hook in
-   * _layout, which flushes only if the service exists).
+   * across Sending, Queued, and MeshSent rows, re-armed when the outbox
+   * changes (send, retry, delete) or when a flush attempts a row.
+   * Clearing before and after the store reads keeps exactly one timer
+   * live even when schedule calls overlap. Blocked conversations are
+   * skipped, matching flushOutbox. Timers do not reliably fire while
+   * backgrounded, so the app layer also flushes on foreground (see the
+   * AppState hook in _layout, which flushes only if the service exists).
    */
   private async scheduleFlush(): Promise<void> {
     if (this.flushTimer) {
@@ -291,7 +528,8 @@ export class DmService {
       if (conv.state === 'blocked') continue;
       const messages = await this.store.listMessages(conv.peerHex);
       for (const m of messages) {
-        if (m.direction !== 'out' || m.status !== 'Sending') continue;
+        if (m.direction !== 'out') continue;
+        if (m.status !== 'Sending' && m.status !== 'Queued' && m.status !== 'MeshSent') continue;
         if (earliest === null || m.nextAttemptAtMs < earliest) earliest = m.nextAttemptAtMs;
       }
     }
@@ -351,22 +589,26 @@ export class DmService {
     const conv = await this.startConversation(peerHex);
     if (conv.state === 'blocked') throw new Error('sendMessage: peer is blocked');
     const nowMs = this.now();
-    const envelope = sealDm(text, this.ownMeshHex(), peerHex, Math.floor(nowMs / 1000));
+    const { envelope, ackProof } = sealDmWithAckProof(text, this.ownMeshHex(), peerHex, Math.floor(nowMs / 1000));
     const row: DmMessageRow = {
       id: newId(),
       peerHex,
       direction: 'out',
       sealed: envelope.sealed,
+      envelope,
+      plainText: text,
+      deliveryId: envelope.deliveryId,
+      ackProof,
       createdAtMs: nowMs,
       status: 'Sending',
       attempts: 0,
+      meshAttempts: 0,
       nextAttemptAtMs: nowMs,
+      senderCreatedAtSec: envelope.createdAt,
     };
-    // The row's `sealed` is sealed to the PEER, so the sender's own thread
-    // view cannot decrypt it back: the plaintext lives only in the
-    // memory-only cache below (never on disk), and the full envelope (with
-    // its ephemeral pubkey, which the row does not carry) lives in the
-    // memory-only outbox map so retries can re-send the identical bytes.
+    // Memory-only fallbacks for rows the store hands back without their
+    // persisted envelope (legacy in-memory rows in tests). The persisted
+    // row is authoritative; these maps only cover the gap.
     this.outboxEnvelopes.set(row.id, envelope);
     this.outgoingPlaintext.set(row.id, text);
     capMapEntries(this.outboxEnvelopes);
@@ -381,17 +623,21 @@ export class DmService {
   /**
    * Flush the outbox. Per-conversation FIFO: within one conversation the
    * oldest due message goes first and a failure stops that conversation's
-    * queue (other conversations are unaffected). Conversations are
-    * independent, so they flush concurrently (a slow first conversation
-    * no longer delays every other one); the sequential first-OK-wins
-    * relay order inside one publish is kept. Concurrent callers share
-    * a single in-flight run, so two flushes can never publish the same
-    * Sending row twice. Never silently drops: a message that exhausts
-    * DM_MAX_ATTEMPTS becomes Failed, not deleted.
+   * queue (other conversations are unaffected). Conversations are
+   * independent, so they flush concurrently (a slow first conversation
+   * no longer delays every other one). Concurrent callers share a single
+   * in-flight run, so two flushes can never publish the same row twice.
+   * Never silently drops: a message that exhausts its attempts becomes
+   * Failed, a message with no transport becomes Queued, and a message a
+   * relay accepted becomes Relayed, never Failed.
+   * `force` attempts every outbox row regardless of nextAttemptAtMs: used
+   * on start, foreground, connectivity return, and BLE peer arrival, so a
+   * transport returning early drains the queue instead of waiting out
+   * the backoff timer. Timer flushes stay non-force (due rows only).
    */
-  async flushOutbox(nowMs?: number): Promise<void> {
+  async flushOutbox(force = false): Promise<void> {
     if (this.flushInFlight) return this.flushInFlight;
-    const run = this.flushOutboxInner(nowMs);
+    const run = this.flushOutboxInner(force);
     this.flushInFlight = run;
     try {
       await run;
@@ -400,8 +646,8 @@ export class DmService {
     }
   }
 
-  private async flushOutboxInner(nowMs?: number): Promise<void> {
-    const now = nowMs ?? this.now();
+  private async flushOutboxInner(force: boolean): Promise<void> {
+    const now = this.now();
     const convs = await this.store.listConversations();
     const results = await Promise.all(
       convs.map(async (conv) => {
@@ -411,16 +657,26 @@ export class DmService {
         );
         let changed = false;
         for (const m of messages) {
-          if (m.direction !== 'out' || m.status !== 'Sending') continue;
-          if (m.nextAttemptAtMs > now) continue;
-          // A missing envelope is permanent (in-memory outbox lost, e.g.
-          // after restart): tryPublish marks it Failed, and the queue must
-          // continue past it instead of head-blocking on a dead row. A
-          // transient publish failure still stops this conversation's queue.
-          const envelopeMissing = !this.outboxEnvelopes.has(m.id);
-          const ok = await this.tryPublish(m, now);
+          if (m.direction !== 'out') continue;
+          if (m.status === 'Relayed' || m.status === 'Delivered' || m.status === 'Failed') continue;
+          if (m.status === 'MeshSent' && (m.meshAttempts ?? 0) >= DM_MESH_MAX_ATTEMPTS) {
+            // Mesh sends exhausted without an ack: Failed, and the queue
+            // continues past it (it is terminal for this row, not a head
+            // block). A late ack still upgrades it to Delivered.
+            m.status = 'Failed';
+            await this.store.updateMessage(m);
+            changed = true;
+            continue;
+          }
+          if (!force && m.nextAttemptAtMs > now) continue;
+          // A missing envelope is permanent only when no plaintext
+          // survives to re-seal from: tryPublish marks it Failed, and the
+          // queue must continue past it instead of head-blocking on a
+          // dead row. A transient publish failure still stops this
+          // conversation's queue.
+          const result = await this.tryPublish(m, now);
           changed = true;
-          if (!ok && !envelopeMissing) break; // FIFO head-of-line
+          if (!result.ok && !result.envelopeMissing) break; // FIFO head-of-line
         }
         return changed;
       }),
@@ -436,41 +692,86 @@ export class DmService {
     if (changed) void this.scheduleFlush();
   }
 
-  private async tryPublish(m: DmMessageRow, now: number): Promise<boolean> {
-    // The stored row carries only the sealed payload; the sendable envelope
-    // (ephemeral pubkey header) lives in the memory-only outbox map, filled
-    // by sendMessage. If it is gone (app restarted before a SQLite outbox
-    // lands — see the P1-follow-up note at the bottom), the message goes
-    // Failed, visibly, never silently dropped; tap-to-retry then needs the
-    // envelope back, which only a fresh send provides.
-    const envelope = this.outboxEnvelopes.get(m.id);
+  private async tryPublish(
+    m: DmMessageRow,
+    now: number,
+  ): Promise<{ ok: boolean; envelopeMissing: boolean }> {
+    // The stored row carries the sendable envelope (persisted by the
+    // SQLite store). The memory-only outbox map covers rows that predate
+    // envelope persistence. When both are gone but the plaintext
+    // survives, re-seal a fresh envelope: the retry then sends identical
+    // text under a new delivery id, and the thread keeps rendering. When
+    // neither survives, the row goes Failed, visibly, never silently
+    // dropped; tap-to-retry then needs a fresh send.
+    let envelope = m.envelope ?? this.outboxEnvelopes.get(m.id);
     if (!envelope) {
-      m.status = 'Failed';
-      await this.store.updateMessage(m);
-      return false;
+      const plainText = m.plainText ?? this.outgoingPlaintext.get(m.id);
+      if (plainText !== undefined) {
+        const sealed = sealDmWithAckProof(plainText, this.ownMeshHex(), m.peerHex, Math.floor(now / 1000));
+        envelope = sealed.envelope;
+        m.envelope = envelope;
+        m.sealed = envelope.sealed;
+        m.deliveryId = envelope.deliveryId;
+        m.ackProof = sealed.ackProof;
+      } else {
+        m.status = 'Failed';
+        await this.store.updateMessage(m);
+        return { ok: false, envelopeMissing: true };
+      }
     }
-    let accepted = false;
+    // Relay first: the primary online path. A relay OK is a handoff, not
+    // delivery, so it lands in Relayed, never Delivered.
+    let relayRes: DmRelayPublishResult = { accepted: false, rejected: false };
     try {
-      accepted = await this.relay.publish(envelope);
+      relayRes = await this.relay.publish(envelope);
     } catch {
-      accepted = false;
+      relayRes = { accepted: false, rejected: false };
     }
-    if (accepted) {
-      m.status = 'Sent';
+    if (relayRes.accepted) {
+      m.status = 'Relayed';
       await this.store.updateMessage(m);
-      return true;
+      return { ok: true, envelopeMissing: false };
     }
-    m.attempts += 1;
-    if (m.attempts >= DM_MAX_ATTEMPTS) {
+    // Mesh fallback: direct connected peers only in v1 (no multi-hop DM
+    // relaying). A notify resolving is a radio handoff, not delivery, so
+    // it lands in MeshSent and waits for the peer ack.
+    let meshThrew = false;
+    let meshPeers = 0;
+    if (this.mesh) {
+      try {
+        meshPeers = await this.mesh.publish(envelope, 'dm');
+      } catch {
+        meshThrew = true;
+      }
+    }
+    if (meshPeers > 0) {
+      m.status = 'MeshSent';
+      m.meshAttempts = (m.meshAttempts ?? 0) + 1;
+      m.nextAttemptAtMs = now + DM_MESH_RETRY_MS;
+      await this.store.updateMessage(m);
+      return { ok: true, envelopeMissing: false };
+    }
+    // No transport took it. Hard means a transport actively refused the
+    // envelope (relay OK=false, or a BLE send that threw): only hard
+    // failures at the attempt cap end in Failed. Unreachable transports
+    // end in Queued, which retries without a cap so a long offline
+    // stretch still drains when a transport returns.
+    const hard = relayRes.rejected || meshThrew;
+    m.attempts = Math.min(m.attempts + 1, DM_MAX_ATTEMPTS);
+    if (hard && m.attempts >= DM_MAX_ATTEMPTS) {
       m.status = 'Failed';
+    } else if (m.status === 'MeshSent') {
+      m.status = 'MeshSent';
+      m.nextAttemptAtMs = now + DM_MESH_RETRY_MS;
     } else {
+      m.status = hard ? 'Sending' : 'Queued';
       m.nextAttemptAtMs = now + DM_BACKOFF_MS[Math.min(m.attempts, DM_BACKOFF_MS.length - 1)];
     }
     await this.store.updateMessage(m);
-    return false;
+    return { ok: false, envelopeMissing: false };
   }
 
-  /** In-memory outbox envelopes, keyed by message id (see tryPublish note). */
+  /** In-memory outbox envelopes, keyed by message id (fallback only; see tryPublish). */
   private readonly outboxEnvelopes = new Map<string, DmEnvelope>();
 
   /** Tap-to-retry a Failed message: back to Sending, attempts reset, due now. */
@@ -481,6 +782,7 @@ export class DmService {
     if (!m || m.direction !== 'out' || m.status !== 'Failed') return;
     m.status = 'Sending';
     m.attempts = 0;
+    m.meshAttempts = 0;
     m.nextAttemptAtMs = this.now();
     await this.store.updateMessage(m);
     this.emit();
@@ -495,12 +797,18 @@ export class DmService {
     const senderHex = rumor.pubkey;
     if (senderHex === this.ownMeshHex()) return 'ignored';
     const existing = await this.store.getConversation(senderHex);
-    if (existing?.state === 'blocked') return 'dropped'; // silent drop: no row, no badge
-    // Dedup by relay event id, never by text or sender: the same event
-    // delivered twice (two relays, relay replay) renders once, with one
-    // unread increment. Envelopes without an event id (in-process relay)
-    // carry no dedup key and are always delivered.
-    if (envelope.relayEventId) {
+    if (existing?.state === 'blocked') return 'dropped'; // silent drop: no row, no badge, no ack
+    // Dedup by delivery id, never by text or sender: the same send
+    // delivered twice (two relays, relay plus BLE, relay replay) renders
+    // once, with one unread increment. The id is persisted in the store,
+    // so dedup survives restart. Envelopes without an id (pre-change
+    // senders) fall back to the in-memory relay-event-id set, which does
+    // not survive restart: those duplicates may re-render after one.
+    const deliveryId = envelope.deliveryId;
+    if (deliveryId !== undefined) {
+      if (!isDeliveryId(deliveryId)) return 'ignored';
+      if (await this.store.hasSeenDelivery(deliveryId)) return 'ignored';
+    } else if (envelope.relayEventId) {
       let seen = this.seenRelayEventIds.get(senderHex);
       if (!seen) {
         seen = new Set<string>();
@@ -520,8 +828,10 @@ export class DmService {
       peerHex: senderHex,
       direction: 'in',
       sealed: envelope.sealed,
+      envelope,
+      deliveryId,
       createdAtMs: nowMs,
-      status: 'Sent', // inbound: already delivered to this device
+      status: 'Delivered', // inbound: already on this device
       attempts: 0,
       nextAttemptAtMs: nowMs,
       senderCreatedAtSec: envelope.createdAt,
@@ -529,6 +839,7 @@ export class DmService {
     await this.store.addMessage(row);
     this.incomingEnvelopes.set(row.id, envelope);
     capMapEntries(this.incomingEnvelopes);
+    if (deliveryId !== undefined) await this.store.markSeenDelivery(deliveryId, senderHex);
     if (!existing) {
       // Unknown sender -> requests folder, NEVER straight to inbox (orders).
       await this.store.upsertConversation({
@@ -542,20 +853,71 @@ export class DmService {
         lastDirection: 'in',
       });
       this.emit();
+      if (deliveryId !== undefined) void this.sendAck(senderHex, envelope, deliveryId).catch(() => {});
       return 'request';
     }
     const next: DmConversationRow = {
       ...existing,
-      ignored: false, // a new message re-surfaces an Ignored request (plan §6)
+      ignored: false, // a new message re-surfaces an Ignored request (plan section 6)
       lastMessageAtMs: nowMs,
       lastSealed: envelope.sealed,
       lastDirection: 'in',
     };
-    // Mute = messages arrive but the badge does not move (plan §6).
+    // Mute = messages arrive but the badge does not move (plan section 6).
     if (!existing.muted) next.unread = existing.unread + 1;
     await this.store.upsertConversation(next);
     this.emit();
+    if (deliveryId !== undefined) void this.sendAck(senderHex, envelope, deliveryId).catch(() => {});
     return existing.state === 'request' ? 'request' : 'inbox';
+  }
+
+  /**
+   * Send a delivery ack for a stored inbound message: sealed to the sender
+   * (only the sender can unseal it), over every ack channel available.
+   * Best-effort and never blocking receipt: a lost ack leaves the sender
+   * on Relayed or MeshSent, which is honest, and the sender's next
+   * resubscribe backfill can still surface a re-sent ack. Never sent for
+   * blocked senders (receiveEnvelope drops those before this point) and
+   * never a read receipt: it fires on store, not on thread open.
+   */
+  private async sendAck(senderHex: string, envelope: DmEnvelope, deliveryId: string): Promise<void> {
+    const proof = dmAckProofForEnvelope(this.ownKeys().secretKey, envelope, deliveryId);
+    if (!proof) return;
+    const ackEnvelope = sealDm(JSON.stringify({ dmAckFor: deliveryId, proof }), this.ownMeshHex(), senderHex);
+    try {
+      await this.relay.publishAck(ackEnvelope);
+    } catch {
+      // Ack loss is not receipt loss: the message is already stored here.
+    }
+    if (this.mesh) {
+      try {
+        await this.mesh.publish(ackEnvelope, 'ack');
+      } catch {
+        // Same as above: best-effort only.
+      }
+    }
+  }
+
+  /** Route one incoming delivery ack. Returns what happened (for tests/logs). */
+  async receiveAck(envelope: DmEnvelope): Promise<'delivered' | 'ignored'> {
+    if (envelope.recipientHex !== this.ownMeshHex()) return 'ignored';
+    const rumor = unsealDm(envelope, this.ownKeys(), this.ownMeshHex());
+    if (!rumor) return 'ignored';
+    const ack = parseDmAckContent(rumor.content);
+    if (!ack) return 'ignored';
+    const row = await this.store.findMessageByDeliveryId(ack.dmAckFor);
+    if (!row || row.direction !== 'out') return 'ignored';
+    if (row.status === 'Delivered') return 'ignored';
+    // The proof check is the whole trust boundary: anyone can seal an ack
+    // envelope to the sender, but only the true recipient can recompute
+    // the proof, because only it holds the secret that derives the
+    // message conversation key. A row without a stored proof (pre-change
+    // send) can never verify, so it is never upgraded.
+    if (row.ackProof === undefined || row.ackProof !== ack.proof) return 'ignored';
+    row.status = 'Delivered';
+    await this.store.updateMessage(row);
+    this.emit();
+    return 'delivered';
   }
 
   async acceptRequest(peerHex: string): Promise<void> {
@@ -603,7 +965,7 @@ export class DmService {
     // mark them Failed now. After unblock, tap-to-retry sends them again.
     const messages = await this.store.listMessages(peerHex);
     for (const m of messages) {
-      if (m.direction === 'out' && m.status === 'Sending') {
+      if (m.direction === 'out' && (m.status === 'Sending' || m.status === 'Queued' || m.status === 'MeshSent')) {
         await this.store.updateMessage({ ...m, status: 'Failed' });
       }
     }
@@ -617,7 +979,7 @@ export class DmService {
     if (c && c.state === 'blocked') {
       if (c.lastMessageAtMs === 0) {
         // Blocked before any message ever arrived: no history to keep, so
-        // drop the row — the peer's next message then routes as unknown
+        // drop the row - the peer's next message then routes as unknown
         // (requests folder), exactly as if never blocked.
         await this.store.deleteConversation(peerHex);
       } else {
@@ -641,8 +1003,10 @@ export class DmService {
 
   /**
    * Delete LOCAL ONLY: removes the conversation + all its messages from this
-   * device's DM store. Relay envelopes and the recipient's copy are untouched
-   * — unsend is impossible, and the UI must say so.
+   * device's DM store. Relay envelopes and the recipient's copy are untouched:
+   * unsend is impossible, and the UI must say so. Seen delivery ids are
+   * kept on purpose: a relay replay of a deleted message must not
+   * resurrect the conversation it was deleted from.
    */
   async deleteConversationLocalOnly(peerHex: string): Promise<void> {
     assertPeerHex(peerHex, 'deleteConversationLocalOnly');
@@ -703,14 +1067,15 @@ export class DmService {
   }
 
   /** Thread view: decrypt on read only. Outgoing rows were sealed to the peer,
-   *  so they cannot be decrypted by self — their text comes from the send-time
-   *  plaintext cache (memory only, never disk). Unknown rows get null text
+   *  so they cannot be decrypted by self - their text comes from the
+   *  persisted plaintext column (or, for legacy in-memory rows, the
+   *  send-time plaintext cache). Unknown rows get null text
    *  (the UI renders the "Encrypted message" placeholder). */
   async getThread(peerHex: string): Promise<DmThreadRow[]> {
     assertPeerHex(peerHex, 'getThread');
     // Order by sender time within the conversation, with receive time as
-    // the tiebreak for same-second sends. Outgoing rows carry no sender
-    // timestamp, so their send time stands in for it.
+    // the tiebreak for same-second sends. Outgoing rows carry their send
+    // time as sender time, so the order survives restart.
     const rows = (await this.store.listMessages(peerHex)).sort((a, b) => {
       const aSender = a.senderCreatedAtSec ?? Math.floor(a.createdAtMs / 1000);
       const bSender = b.senderCreatedAtSec ?? Math.floor(b.createdAtMs / 1000);
@@ -725,7 +1090,7 @@ export class DmService {
       return {
         id: m.id,
         direction: 'out' as const,
-        text: this.outgoingPlaintext.get(m.id) ?? null,
+        text: m.plainText ?? this.outgoingPlaintext.get(m.id) ?? null,
         status: m.status,
         createdAtMs: m.createdAtMs,
       };
@@ -749,17 +1114,17 @@ export class DmService {
     return this.decryptRow(last).text;
   }
 
-  /** Per-conversation seen relay event ids for inbound dedup (P1-06). */
+  /** Per-conversation seen relay event ids for inbound dedup (P1-06, pre-change senders only). */
   private readonly seenRelayEventIds = new Map<string, Set<string>>();
 
-  /** Memory-only plaintext for outgoing rows (never persisted). */
+  /** Memory-only plaintext for outgoing rows (never persisted). Fallback only; see decryptRow. */
   private readonly outgoingPlaintext = new Map<string, string>();
 
   private decryptIncoming(m: DmMessageRow): string | null {
-    // Incoming sealed payloads decrypt with the gift-wrap path only when the
-    // full envelope (ephemeral pubkey) is present; the store keeps the sealed
-    // payload, and the envelope header arrives with it at receive time.
-    const envelope = this.incomingEnvelopes.get(m.id);
+    // The persisted envelope (ephemeral pubkey header) decrypts the row
+    // after a restart; the memory-only map covers rows that predate
+    // envelope persistence.
+    const envelope = m.envelope ?? this.incomingEnvelopes.get(m.id);
     if (!envelope) return null;
     const rumor: DmRumor | null = unsealDm(envelope, this.ownKeys(), this.ownMeshHex());
     return rumor ? rumor.content : null;
@@ -778,12 +1143,3 @@ export class DmService {
     });
   }
 }
-
-// P1-FOLLOW-UP NOTE (honest limitation): the outbox envelope header
-// (ephemeral pubkey) and outgoing plaintext live in memory only. A SQLite
-// DmStore implementing DmStorePort must persist the envelope header next to
-// `sealed` per row so retries and own-thread text survive a restart; until
-// then a restart turns unsent outbox rows Failed on next flush (visible, not
-// silently dropped) and own sent messages show the "Encrypted message"
-// placeholder. Incoming messages are unaffected: their envelopes arrive with
-// the message and decrypt on read.

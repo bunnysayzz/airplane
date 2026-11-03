@@ -16,6 +16,32 @@ export interface DmBubbleProps {
     onRetry: (messageId: string) => void;
 }
 
+/**
+ * Honest delivery labels. Relayed and MeshSent name the handoff and the
+ * missing peer confirmation in the same breath: a relay OK or a BLE
+ * notify is not delivery, and the label must never imply it is. The
+ * legacy 'Sent' value (pre-change rows) maps to the relay wording, since
+ * that is what it always meant.
+ */
+export function dmStatusLabel(status: DmThreadRow['status']): string {
+    switch (status) {
+        case 'Sending':
+            return 'Sending';
+        case 'Queued':
+            return 'Queued, waiting for a transport';
+        case 'Relayed':
+            return 'Sent to relay, not delivered yet';
+        case 'MeshSent':
+            return 'Sent over BLE, not delivered yet';
+        case 'Delivered':
+            return 'Delivered';
+        case 'Failed':
+            return 'Failed, tap to retry';
+        default:
+            return 'Sent to relay, not delivered yet';
+    }
+}
+
 function DmBubbleInner({ item, onRetry }: DmBubbleProps) {
     const { colors, type } = useTheme();
     return (
@@ -29,9 +55,7 @@ function DmBubbleInner({ item, onRetry }: DmBubbleProps) {
                         }
                     }}
                 >
-                    <Text style={[type.meta, { color: colors.textMuted }]}>
-                        {item.status === 'Failed' ? 'Failed, tap to retry' : item.status}
-                    </Text>
+                    <Text style={[type.meta, { color: colors.textMuted }]}>{dmStatusLabel(item.status)}</Text>
                 </Pressable>
             ) : null}
         </View>

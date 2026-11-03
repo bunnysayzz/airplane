@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// DM P1 thread view: chronological bubbles, text-only send box, delivery
-// states Sending / Sent / Failed (Failed = tap to retry, never silently
-// dropped). No read receipts, in either direction. Delete is LOCAL ONLY and
-// the confirm copy says so. Requests landing here get Accept / Block / Ignore.
+// DM thread view: chronological bubbles, text-only send box, delivery
+// states Sending / Queued / Relayed / MeshSent / Delivered / Failed
+// (Failed = tap to retry, never silently dropped; Relayed and MeshSent
+// name their handoff and say the peer has not confirmed yet; only
+// Delivered claims the peer app has the message). No read receipts, in
+// either direction. Delete is LOCAL ONLY and the confirm copy says so.
+// Requests landing here get Accept / Block / Ignore.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';

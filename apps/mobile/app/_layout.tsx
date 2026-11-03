@@ -8,7 +8,7 @@ import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
 import { startTransport, stopTransport, pruneExpiredStore } from '../services/airplane';
 import { revalidateBleRadio } from '../services/airplane/transport';
-import { flushDmOutboxIfStarted } from '../services/airplane/dm';
+import { flushDmOutboxIfStarted, refreshDmSubscriptionIfStarted } from '../services/airplane/dm';
 import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
 import { friendlyErrorMessage } from '../src/lib/errorCopy';
 import { recordUiEvent } from '../services/airplane/diagnostics';
@@ -90,10 +90,13 @@ export default function RootLayout() {
           // revalidateBleRadio itself guards to radios that were on.
           if (state === 'active') void revalidateBleRadio().catch(() => {});
           // P1-09: timers do not reliably fire while backgrounded, so a
-          // foreground return also drains the DM outbox (no-op if the DM
-          // service was never started, so this never creates subscriptions).
+          // foreground return also drains the DM outbox and replays missed
+          // DMs and acks (both no-ops if the DM service was never started,
+          // so this never creates subscriptions for a user who never
+          // opened Messages).
           if (state === 'active') {
-            void flushDmOutboxIfStarted().catch(() => {});
+            void flushDmOutboxIfStarted(true).catch(() => {});
+            void refreshDmSubscriptionIfStarted().catch(() => {});
           }
         });
         // Start hybrid transport (BLE always, Nostr when online) AFTER first
@@ -102,7 +105,7 @@ export default function RootLayout() {
         const task = InteractionManager.runAfterInteractions(() => {
             startTransport().catch(() => {});
         });
-        // T14: update check, same deal — after first paint, fire-and-forget.
+        // T14: update check, same deal - after first paint, fire-and-forget.
         // A failed check, no network, or a bad response never breaks launch;
         // the updater module resolves those to "no update" instead of throwing.
         const updateTask = InteractionManager.runAfterInteractions(() => {
