@@ -43,4 +43,8 @@ export interface PostCardModel {
   starLabel: string;
   /** True when the device's own latest star state for this post is "star". */
   starredByMe: boolean;
+  /** True when the post carries the last-known location tag: its cell is
+   * a real previously observed area, not a fresh fix. Absent (old cached
+   * cards) reads as false. */
+  locationStale?: boolean;
 }

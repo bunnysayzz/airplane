@@ -55,6 +55,9 @@ export interface PostCardModel {
   starLabel?: string;
   /** True when the device's own latest star state for this post is "star". */
   starredByMe?: boolean;
+  /** True when the post carries the last-known location tag: its cell is
+   * a real previously observed area, not a fresh fix. */
+  locationStale?: boolean;
 }
 
 export interface PostCardProps {
@@ -139,6 +142,16 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
               accessibilityLabel="Reached the world network"
             >
               🌐
+            </Text>
+          </Post.Action>
+        ) : null}
+        {post.locationStale ? (
+          <Post.Action>
+            <Text
+              style={[type.meta, { fontSize: 10, opacity: 0.6 }]}
+              accessibilityLabel="Posted from last known area"
+            >
+              Last known area
             </Text>
           </Post.Action>
         ) : null}
