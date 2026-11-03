@@ -6,11 +6,20 @@
 //   offset 5..6:  total   u16 = fragment count
 //   offset 7..8:  index   u16 = this fragment's index (0-based)
 //   offset 9:     ttl     u8  = remaining flood TTL for this message
-//   offset 10:    flags   u8  = reserved, must be 0
+//   offset 10:    flags   u8  = channel: 0 = feed event, 1 = DM frame
 // Payload per fragment: mtu - 11 bytes (458 at the default mtu of 469).
 // See docs/spec/wire-format.md - the spec is the source of truth.
+//
+// The flags channel is what keeps DM frames off the feed path: the feed
+// reassembler accepts only flags 0, the DM reassembler only flags 1, so a
+// DM frame can never corrupt a feed reassembly buffer (or vice versa) even
+// though both share one BLE port. A pre-change feed reassembler rejects
+// flags 1 outright, so old installs drop DM frames silently instead of
+// misreading them.
 
 import { decodeEvent } from '../codec/cbor';import {
+  FRAG_FLAG_DM,
+  FRAG_FLAG_FEED,
   FRAG_HEADER_LEN,
   FRAG_MAGIC,
   FRAG_WIRE_MAX,
@@ -80,8 +89,13 @@ export function parseHeader(frame: Uint8Array): FragmentHeader {
   if (total === 0) throw new FragmentError('total fragment count is 0');
   if (total > MAX_FRAGMENT_TOTAL) throw new FragmentError(`total fragment count ${total} exceeds cap ${MAX_FRAGMENT_TOTAL}`);
   if (index >= total) throw new FragmentError(`index ${index} >= total ${total}`);
-  // Flags are reserved and must be 0; a set flag is a malformed frame.
-  if (view.getUint8(10) !== 0) throw new FragmentError(`flags must be 0, got ${view.getUint8(10)}`);
+  // Flags name a channel (0 = feed, 1 = DM); anything else is malformed.
+  // Channel filtering itself lives in Reassembler (acceptFlags), so a
+  // parser accepting both channels never mixes them: each reassembler
+  // ignores frames from the other channel before buffering.
+  if (view.getUint8(10) !== FRAG_FLAG_FEED && view.getUint8(10) !== FRAG_FLAG_DM) {
+    throw new FragmentError(`unknown flags channel: ${view.getUint8(10)}`);
+  }
   return {
     msgTag: view.getUint32(1),
     total,
@@ -104,22 +118,41 @@ export function msgTagOf(eventBytes: Uint8Array): number {
  * The caller passes the flood TTL to stamp into every fragment header.
  */
 export function fragment(eventBytes: Uint8Array, ttl: number, mtu: number = FRAG_WIRE_MAX): Uint8Array[] {
+  return fragmentTagged(eventBytes, msgTagOf(eventBytes), ttl, mtu, FRAG_FLAG_FEED);
+}
+
+/**
+ * Split arbitrary bytes into wire frames with an explicit reassembly tag
+ * and channel flag. The feed path uses fragment() (tag from the event id,
+ * flags 0); the DM path uses this (tag from the payload hash, flags 1),
+ * because a DM envelope is not a CBOR event and decodeEvent cannot tag
+ * it. The tag is only a reassembly key, never an identity or a secret.
+ */
+export function fragmentTagged(
+  bytes: Uint8Array,
+  msgTag: number,
+  ttl: number,
+  mtu: number = FRAG_WIRE_MAX,
+  flags: number = FRAG_FLAG_FEED,
+): Uint8Array[] {
   if (mtu < FRAG_HEADER_LEN + 1) {
     throw new FragmentError(`mtu ${mtu} too small for ${FRAG_HEADER_LEN}-byte header`);
   }
   if (ttl < 0 || ttl > 255 || !Number.isInteger(ttl)) {
     throw new FragmentError(`ttl must be a u8, got ${ttl}`);
   }
-  const msgTag = msgTagOf(eventBytes);
+  if (flags !== FRAG_FLAG_FEED && flags !== FRAG_FLAG_DM) {
+    throw new FragmentError(`unknown flags channel: ${flags}`);
+  }
   const payloadMax = mtu - FRAG_HEADER_LEN;
-  const total = Math.max(1, Math.ceil(eventBytes.length / payloadMax));
-  if (total > MAX_FRAGMENT_TOTAL) throw new FragmentError(`event needs ${total} fragments, over cap ${MAX_FRAGMENT_TOTAL}`);
+  const total = Math.max(1, Math.ceil(bytes.length / payloadMax));
+  if (total > MAX_FRAGMENT_TOTAL) throw new FragmentError(`payload needs ${total} fragments, over cap ${MAX_FRAGMENT_TOTAL}`);
   const frames: Uint8Array[] = [];
   for (let index = 0; index < total; index++) {
     const start = index * payloadMax;
-    const payload = eventBytes.subarray(start, Math.min(start + payloadMax, eventBytes.length));
+    const payload = bytes.subarray(start, Math.min(start + payloadMax, bytes.length));
     const frame = new Uint8Array(FRAG_HEADER_LEN + payload.length);
-    writeHeader(frame, { msgTag, total, index, ttl, flags: 0 });
+    writeHeader(frame, { msgTag, total, index, ttl, flags });
     frame.set(payload, FRAG_HEADER_LEN);
     frames.push(frame);
   }
@@ -138,11 +171,29 @@ interface Reassembly {
  * otherwise null. Incomplete buffers are dropped by purge(nowMs) after
  * REASSEMBLY_TIMEOUT_MS.
  */
+export interface ReassemblerOpts {
+  /** Channels this reassembler buffers. Default [0] (feed): a DM frame
+   *  hitting the feed reassembler is ignored before buffering, never
+   *  mixed into a feed reassembly. */
+  acceptFlags?: number[];
+  /** Max buffered bytes for one tag. Default MAX_EVENT_BYTES (feed);
+   *  DM envelopes run larger (a 4 KiB text seals to roughly 7 KiB). */
+  maxBytes?: number;
+}
+
 export class Reassembler {
   private readonly pending = new Map<number, Reassembly>();
+  private readonly acceptFlags: number[];
+  private readonly maxBytes: number;
+
+  constructor(opts: ReassemblerOpts = {}) {
+    this.acceptFlags = opts.acceptFlags ?? [FRAG_FLAG_FEED];
+    this.maxBytes = opts.maxBytes ?? MAX_EVENT_BYTES;
+  }
 
   push(frame: Uint8Array, nowMs: number = Date.now()): Uint8Array | null {
     const header = parseHeader(frame);
+    if (!this.acceptFlags.includes(header.flags)) return null;
     const payload = frame.subarray(FRAG_HEADER_LEN);
     let entry = this.pending.get(header.msgTag);
     if (!entry) {
@@ -159,11 +210,11 @@ export class Reassembler {
     // first one seen and ignore mismatched frames.
     if (entry.total !== header.total) return null;
     if (!entry.frames.has(header.index)) {
-      // Total buffered bytes for one tag must stay within one event: a
-      // claim of many fragments must not pin more than MAX_EVENT_BYTES.
+      // Total buffered bytes for one tag must stay within the cap: a
+      // claim of many fragments must not pin unbounded memory.
       let buffered = payload.length;
       for (const part of entry.frames.values()) buffered += part.length;
-      if (buffered > MAX_EVENT_BYTES) {
+      if (buffered > this.maxBytes) {
         this.pending.delete(header.msgTag);
         return null;
       }

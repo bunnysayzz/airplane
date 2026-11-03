@@ -4,6 +4,7 @@ import {
   Reassembler,
   encodeHeader,
   fragment,
+  fragmentTagged,
   msgTagOf,
   parseHeader,
 } from './fragment';
@@ -143,13 +144,15 @@ describe('fragmentation', () => {
 });
 
 describe('fragment bounds (audit area6 F12)', () => {
-  test('parseHeader rejects total over the cap and nonzero flags', () => {
+  test('parseHeader rejects total over the cap and unknown flag channels', () => {
     expect(() => parseHeader(encodeHeader({ msgTag: 1, total: 257, index: 0, ttl: 7, flags: 0 }))).toThrow(
       FragmentError,
     );
-    expect(() => parseHeader(encodeHeader({ msgTag: 1, total: 1, index: 0, ttl: 7, flags: 1 }))).toThrow(
+    // Flags 0 (feed) and 1 (DM) are the two channels; anything else is malformed.
+    expect(() => parseHeader(encodeHeader({ msgTag: 1, total: 1, index: 0, ttl: 7, flags: 2 }))).toThrow(
       FragmentError,
     );
+    expect(parseHeader(encodeHeader({ msgTag: 1, total: 1, index: 0, ttl: 7, flags: 1 })).flags).toBe(1);
     // 38 fragments (the MTU-aware broadcast case) stays accepted.
     expect(parseHeader(encodeHeader({ msgTag: 1, total: 38, index: 0, ttl: 7, flags: 0 })).total).toBe(38);
     expect(parseHeader(encodeHeader({ msgTag: 1, total: 256, index: 0, ttl: 7, flags: 0 })).total).toBe(256);
@@ -168,5 +171,31 @@ describe('fragment bounds (audit area6 F12)', () => {
     second.set(encodeHeader({ msgTag: 0, total: 2, index: 1, ttl: 7, flags: 0 }));
     expect(rx.push(second, 1000)).toBeNull();
     expect(rx.pendingCount).toBe(64);
+  });
+});
+
+describe('fragment channel isolation (DM flags)', () => {
+  test('the feed reassembler ignores DM-channel frames before buffering', () => {
+    const feedRx = new Reassembler();
+    const dmFrames = fragmentTagged(new TextEncoder().encode('dm-payload'), 0x01020304, 7, 469, 1);
+    for (const frame of dmFrames) {
+      expect(feedRx.push(frame)).toBeNull();
+    }
+    expect(feedRx.pendingCount).toBe(0);
+  });
+
+  test('a DM-channel reassembler reassembles DM frames and ignores feed frames', () => {
+    const dmRx = new Reassembler({ acceptFlags: [1], maxBytes: 16384 });
+    const payload = new TextEncoder().encode('dm-payload');
+    const dmFrames = fragmentTagged(payload, 0x01020304, 7, 469, 1);
+    // A feed frame with the same tag must not pollute the DM buffer.
+    const feedFrames = fragmentTagged(payload, 0x01020304, 7, 469, 0);
+    expect(dmRx.push(feedFrames[0])).toBeNull();
+    let out: Uint8Array | null = null;
+    for (const frame of dmFrames) {
+      out = dmRx.push(frame) ?? out;
+    }
+    expect(out).not.toBeNull();
+    expect(new TextDecoder().decode(out as Uint8Array)).toBe('dm-payload');
   });
 });

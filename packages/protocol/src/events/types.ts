@@ -51,6 +51,11 @@ export const FRAG_PAYLOAD_MAX = FRAG_WIRE_MAX - FRAG_HEADER_LEN; // 458
 /** Fragment header magic byte. */
 export const FRAG_MAGIC = 0xa1;
 
+/** Fragment channel flag: feed event frames. */
+export const FRAG_FLAG_FEED = 0;
+/** Fragment channel flag: DM frames (sealed envelopes, never feed events). */
+export const FRAG_FLAG_DM = 1;
+
 /** Incomplete reassembly buffers are dropped after this many ms. */
 export const REASSEMBLY_TIMEOUT_MS = 30000;
 
