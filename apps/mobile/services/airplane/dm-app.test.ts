@@ -21,7 +21,8 @@ jest.mock('@airplane/transport', () => {
 
 import { dmPeerLabel, dmUserErrorMessage, getDmService, __resetDmServiceForTests } from './dm';
 import { __resetDeviceKeypairForTests, setKeyStore } from './identity';
-import { authorLabelFor } from './names';
+import { memorableNameFor } from './names';
+import { __resetDisplayNamesForTests, recordPeerDisplayName } from './displayNames';
 import { dmFromHex } from '@airplane/transport';
 
 class FailingLoadStore extends MemoryKeyStore {
@@ -33,20 +34,28 @@ class FailingLoadStore extends MemoryKeyStore {
 beforeEach(() => {
   __resetDeviceKeypairForTests();
   __resetDmServiceForTests();
+  __resetDisplayNamesForTests();
 });
 
 afterEach(() => {
   __resetDeviceKeypairForTests();
   __resetDmServiceForTests();
+  __resetDisplayNamesForTests();
 });
 
 describe('dmPeerLabel (F20)', () => {
-  test('a valid peer hex gets the feed author label, garbage falls back to anon', () => {
+  test('a valid peer hex gets the clean name (no hex suffix), garbage falls back to anon', () => {
     const hex = 'ab'.repeat(32);
     const bytes = dmFromHex(hex);
     expect(bytes).not.toBeNull();
-    expect(dmPeerLabel(hex)).toBe(authorLabelFor(bytes!));
+    expect(dmPeerLabel(hex)).toBe(memorableNameFor(bytes!));
     expect(dmPeerLabel('garbage')).toBe('anon·garb');
+  });
+
+  test('a recorded signed display name wins over the memorable name', () => {
+    const hex = 'ab'.repeat(32);
+    recordPeerDisplayName(hex, 'tuba');
+    expect(dmPeerLabel(hex)).toBe('tuba');
   });
 });
 
