@@ -353,7 +353,6 @@ describe('transport manager', () => {
     // nothing.
     await expect(runWorldSyncPass()).resolves.toBeUndefined();
   });
-  });
 
   test('an inbound burst coalesces to a single feed notify', async () => {
     await startTransport();
