@@ -347,6 +347,11 @@ export default function DmThreadScreen() {
                 onContentSizeChange={handleListContentSizeChange}
                 renderItem={renderItem}
                 keyboardShouldPersistTaps="handled"
+                ListEmptyComponent={
+                    <View style={styles.list}>
+                        <Text style={[type.meta, { color: colors.textMuted }]}>No messages yet.</Text>
+                    </View>
+                }
             />
 
             {isBlocked ? null : (

@@ -167,6 +167,9 @@ export default function MessagesTab() {
             <Text style={[type.meta, { color: colors.textMuted }]}>
                 Type a username to message someone you have seen post or messaged before, or paste a key for anyone else. There is no directory: unseen peers cannot be found by name.
             </Text>
+            <Text style={[type.meta, { color: colors.textMuted }]}>
+                DMs go over relays only, and this device keeps them only for this app session.
+            </Text>
             <View style={styles.pasteRow}>
                 <TextInput
                     value={query}
