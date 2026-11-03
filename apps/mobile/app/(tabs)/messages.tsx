@@ -117,6 +117,9 @@ export default function MessagesTab() {
             <Text style={[type.meta, { color: colors.textMuted }]}>
                 Paste a key, or pick someone whose post you saw. No names exist here. Keys are the addresses.
             </Text>
+            <Text style={[type.meta, { color: colors.textMuted }]}>
+                DMs go over relays only, and this device keeps them only for this app session.
+            </Text>
             <View style={styles.pasteRow}>
                 <TextInput
                     value={paste}

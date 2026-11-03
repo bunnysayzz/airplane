@@ -30,7 +30,7 @@ function DmBubbleInner({ item, onRetry }: DmBubbleProps) {
                     }}
                 >
                     <Text style={[type.meta, { color: colors.textMuted }]}>
-                        {item.status === 'Failed' ? 'Failed, tap to retry' : item.status}
+                        {item.status === 'Failed' ? 'Failed, tap to retry' : item.status === 'Sent' ? 'Sent to relay' : item.status}
                     </Text>
                 </Pressable>
             ) : null}
