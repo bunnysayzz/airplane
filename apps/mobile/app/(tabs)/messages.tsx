@@ -1,14 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
-// DM P1 inbox: conversations list, requests folder (default ON), pubkey paste
-// to start a conversation, blocked list with unblock. Unread badge total is
+// DM P1 inbox: conversations list, requests folder (default ON), username
+// search over known peers plus pubkey paste to start a conversation, blocked list with unblock. Unread badge total is
 // inbox-only (muted excluded, requests shown as their own row).
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow } from '@airplane/transport';
 import { DM_UNDECRYPTABLE_PLACEHOLDER } from '@airplane/transport';
 import { getDmService, dmPeerLabel, dmUserErrorMessage } from '../../services/airplane/dm';
+import {
+    hydratePeerDisplayNames,
+    knownPeerHexes,
+    matchKnownPeers,
+    resolvePeerNames,
+} from '../../services/airplane/displayNames';
+import { Avatar } from '../../components/ui';
 import { useTheme } from '../../src/theme/themeContext';
 import { recordUiEvent } from '../../services/airplane/diagnostics';
 import { RouteTracker } from '../../components/RouteTracker/routeTracker';
@@ -21,41 +28,40 @@ export default function MessagesTab() {
     const [requests, setRequests] = useState<DmConversationRow[]>([]);
     const [blocked, setBlocked] = useState<DmConversationRow[]>([]);
     const [previews, setPreviews] = useState<Record<string, string | null>>({});
-    const [paste, setPaste] = useState('');
+    const [query, setQuery] = useState('');
     // A failed refresh used to leave stale lists with no error shown. Now
     // refresh is all-or-nothing (lists + previews set only on success) and
     // a failure shows a retry affordance instead of silent staleness.
     const [refreshError, setRefreshError] = useState(false);
 
     const refresh = useCallback(() => {
-        void getDmService()
-            .then(async svc => {
-                try {
-                    const nextInbox = await svc.listInbox();
-                    const nextRequests = await svc.listRequests();
-                    const nextBlocked = await svc.listBlocked();
-                    const convs = [...nextInbox, ...nextRequests];
-                    // Previews used to load one conversation at a time (each a
-                    // potential decrypt); one parallel batch instead.
-                    const previewValues = await Promise.all(convs.map(c => svc.previewFor(c.peerHex)));
-                    const nextPreviews: Record<string, string | null> = {};
-                    convs.forEach((c, i) => {
-                        nextPreviews[c.peerHex] = previewValues[i];
-                    });
-                    setInbox(nextInbox);
-                    setRequests(nextRequests);
-                    setBlocked(nextBlocked);
-                    setPreviews(nextPreviews);
-                    setRefreshError(false);
-                } catch {
-                    setRefreshError(true);
-                }
-            })
-            .catch(() => {
-                // A getDmService rejection used to bypass the inner catch
-                // entirely and leave stale lists with no retry affordance.
+        void (async () => {
+            // Hydrate first: the registry holds display names learned from
+            // feed posts, which is what makes username search and clean
+            // DM list names work after a restart.
+            await hydratePeerDisplayNames();
+            try {
+                const svc = await getDmService();
+                const nextInbox = await svc.listInbox();
+                const nextRequests = await svc.listRequests();
+                const nextBlocked = await svc.listBlocked();
+                const convs = [...nextInbox, ...nextRequests];
+                // Previews used to load one conversation at a time (each a
+                // potential decrypt); one parallel batch instead.
+                const previewValues = await Promise.all(convs.map(c => svc.previewFor(c.peerHex)));
+                const nextPreviews: Record<string, string | null> = {};
+                convs.forEach((c, i) => {
+                    nextPreviews[c.peerHex] = previewValues[i];
+                });
+                setInbox(nextInbox);
+                setRequests(nextRequests);
+                setBlocked(nextBlocked);
+                setPreviews(nextPreviews);
+                setRefreshError(false);
+            } catch {
                 setRefreshError(true);
-            });
+            }
+        })();
     }, []);
 
     useFocusEffect(refresh);
@@ -69,17 +75,48 @@ export default function MessagesTab() {
 
     const open = (peerHex: string) => router.push(`/dm/${peerHex}`);
 
-    const startFromPaste = () => {
-        const key = paste.trim().toLowerCase();
+    // Candidate peers for username search: conversation contacts plus
+    // every peer whose signed display name this device recorded from a
+    // post. A peer never seen cannot resolve by name (no directory
+    // exists); the hex path below stays as the fallback for that case.
+    const allPeerHexes = useMemo(() => {
+        const hexes = new Set<string>();
+        for (const c of [...inbox, ...requests, ...blocked]) hexes.add(c.peerHex.toLowerCase());
+        for (const hex of knownPeerHexes()) hexes.add(hex);
+        return [...hexes];
+    }, [inbox, requests, blocked]);
+    const peerNames = useMemo(() => resolvePeerNames(allPeerHexes), [allPeerHexes]);
+    const peerNameFor = (peerHex: string) => peerNames.get(peerHex.toLowerCase()) ?? dmPeerLabel(peerHex);
+
+    const queryTrim = query.trim();
+    const queryIsHex = /^[0-9a-f]{64}$/i.test(queryTrim);
+    const matches = useMemo(() => {
+        if (!queryTrim || queryIsHex) return [];
+        return matchKnownPeers(queryTrim, allPeerHexes);
+    }, [queryTrim, queryIsHex, allPeerHexes]);
+
+    const startFromInput = () => {
+        const key = query.trim().toLowerCase();
         if (!/^[0-9a-f]{64}$/.test(key)) {
-            Alert.alert('Not a key', 'Paste a 64-character hex pubkey (or npub support lands in P3).');
+            Alert.alert('Not a key', 'Paste a 64-character hex pubkey, or tap a matching username below.');
             return;
         }
         void getDmService()
             .then(svc => svc.startConversation(key))
             .then(() => {
-                setPaste('');
+                setQuery('');
                 open(key);
+            })
+            .catch((e: unknown) => Alert.alert('Could not start conversation', dmUserErrorMessage(e)));
+    };
+
+    const startFromMatch = (peerHex: string) => {
+        recordUiEvent('dm:start-username');
+        void getDmService()
+            .then(svc => svc.startConversation(peerHex))
+            .then(() => {
+                setQuery('');
+                open(peerHex);
             })
             .catch((e: unknown) => Alert.alert('Could not start conversation', dmUserErrorMessage(e)));
     };
@@ -93,16 +130,19 @@ export default function MessagesTab() {
             }}
             style={[styles.row, { borderBottomColor: colors.borderColor }]}
             accessibilityRole="button"
-            accessibilityLabel={`Conversation with ${dmPeerLabel(c.peerHex)}`}
+            accessibilityLabel={`Conversation with ${peerNameFor(c.peerHex)}`}
         >
-            <Text style={[type.name, { color: colors.textPrimary }]}>{dmPeerLabel(c.peerHex)}</Text>
-            <Text style={[type.meta, { color: colors.textMuted }]} numberOfLines={1}>
-                {!c.lastSealed ? 'No messages yet' : (previews[c.peerHex] ?? DM_UNDECRYPTABLE_PLACEHOLDER)}
-            </Text>
-            {c.unread > 0 && !c.muted ? (
-                <Text style={[type.meta, { color: colors.accentText }]}>{c.unread} unread</Text>
-            ) : null}
-            {c.muted ? <Text style={[type.meta, { color: colors.textMuted }]}>Muted</Text> : null}
+            <Avatar name={peerNameFor(c.peerHex)} pubkeyHex={c.peerHex} size={36} />
+            <View style={{ flex: 1, gap: 2 }}>
+                <Text style={[type.name, { color: colors.textPrimary }]}>{peerNameFor(c.peerHex)}</Text>
+                <Text style={[type.meta, { color: colors.textMuted }]} numberOfLines={1}>
+                    {!c.lastSealed ? 'No messages yet' : (previews[c.peerHex] ?? DM_UNDECRYPTABLE_PLACEHOLDER)}
+                </Text>
+                {c.unread > 0 && !c.muted ? (
+                    <Text style={[type.meta, { color: colors.accentText }]}>{c.unread} unread</Text>
+                ) : null}
+                {c.muted ? <Text style={[type.meta, { color: colors.textMuted }]}>Muted</Text> : null}
+            </View>
         </Pressable>
     );
 
@@ -115,13 +155,13 @@ export default function MessagesTab() {
         >
             <Text style={[type.title, { color: colors.textPrimary }]}>Messages</Text>
             <Text style={[type.meta, { color: colors.textMuted }]}>
-                Paste a key, or pick someone whose post you saw. No names exist here. Keys are the addresses.
+                Type a username to message someone you have seen post or messaged before, or paste a key for anyone else. There is no directory: unseen peers cannot be found by name.
             </Text>
             <View style={styles.pasteRow}>
                 <TextInput
-                    value={paste}
-                    onChangeText={setPaste}
-                    placeholder="Paste a pubkey (64 hex chars)"
+                    value={query}
+                    onChangeText={setQuery}
+                    placeholder="Username or pubkey (64 hex chars)"
                     placeholderTextColor={colors.textMuted}
                     autoCapitalize="none"
                     autoCorrect={false}
@@ -129,11 +169,37 @@ export default function MessagesTab() {
                 />
                 <Pressable onPress={() => {
                     recordUiEvent('dm:start-paste');
-                    startFromPaste();
+                    startFromInput();
                 }} style={[styles.go, { backgroundColor: colors.accentColor }]}>
                     <Text style={{ color: colors.buttonTextColor }}>Go</Text>
                 </Pressable>
             </View>
+
+            {queryTrim && !queryIsHex ? (
+                matches.length > 0 ? (
+                    <View style={{ marginTop: 12, gap: 2 }}>
+                        {matches.map(m => (
+                            <Pressable
+                                key={m.pubkeyHex}
+                                onPress={() => startFromMatch(m.pubkeyHex)}
+                                style={[styles.row, { borderBottomColor: colors.borderColor }]}
+                                accessibilityRole="button"
+                                accessibilityLabel={`Message ${m.name}`}
+                            >
+                                <Avatar name={m.name} pubkeyHex={m.pubkeyHex} size={36} />
+                                <View style={{ flex: 1, gap: 2 }}>
+                                    <Text style={[type.name, { color: colors.textPrimary }]}>{m.name}</Text>
+                                    <Text style={[type.meta, { color: colors.textMuted }]}>Tap to message</Text>
+                                </View>
+                            </Pressable>
+                        ))}
+                    </View>
+                ) : (
+                    <Text style={[type.meta, { color: colors.textMuted, marginTop: 12 }]}>
+                        No known peer matches that name. Paste their full key above to start anyway.
+                    </Text>
+                )
+            ) : null}
 
             {refreshError ? (
                 <View style={styles.retryRow}>
@@ -163,7 +229,8 @@ export default function MessagesTab() {
                     <Text style={[type.name, { color: colors.textPrimary, marginTop: 20 }]}>Blocked</Text>
                     {blocked.map(c => (
                         <View key={c.peerHex} style={[styles.row, { borderBottomColor: colors.borderColor }]}>
-                            <Text style={[type.name, { color: colors.textPrimary }]}>{dmPeerLabel(c.peerHex)}</Text>
+                            <Avatar name={peerNameFor(c.peerHex)} pubkeyHex={c.peerHex} size={36} />
+                            <Text style={[type.name, { color: colors.textPrimary, flex: 1 }]}>{peerNameFor(c.peerHex)}</Text>
                             <Pressable
                                 onPress={() => {
                                     recordUiEvent('dm:unblock', c.peerHex);
@@ -191,5 +258,5 @@ const styles = StyleSheet.create({
     retryRow: { flexDirection: 'row', gap: 8, marginTop: 12, alignItems: 'center' },
     input: { flex: 1, borderWidth: 1, borderRadius: 8, padding: 10 },
     go: { borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
-    row: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, gap: 2 },
+    row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth },
 });

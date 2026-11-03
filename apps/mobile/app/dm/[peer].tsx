@@ -10,6 +10,9 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow, DmThreadRow } from '@airplane/transport';
 import { getDmService, dmPeerLabel, dmUserErrorMessage, sendDm } from '../../services/airplane/dm';
+import { authorLabelFor } from '../../services/airplane/names';
+import { fromHex } from '@airplane/protocol';
+import { Avatar } from '../../components/ui';
 import { isNearBottom } from '../../src/lib/dmThread';
 import { DmBubble } from '../../components/DmBubble';
 import { recordUiEvent } from '../../services/airplane/diagnostics';
@@ -30,6 +33,10 @@ export default function DmThreadScreen() {
     // A rapid double-tap used to send the same text twice as two distinct
     // envelopes; the Send button is disabled while a send is in flight.
     const [sending, setSending] = useState(false);
+    // Details affordance: the header shows only the clean name, so the
+    // full identity (full memorable label plus full key) lives behind
+    // this toggle instead of in the header itself.
+    const [showDetails, setShowDetails] = useState(false);
     // A failed refresh used to leave a stale thread with no error shown.
     const [refreshError, setRefreshError] = useState(false);
 
@@ -213,9 +220,31 @@ export default function DmThreadScreen() {
                 <Pressable onPress={() => router.back()}>
                     <Text style={[type.meta, { color: colors.accentText }]}>Back</Text>
                 </Pressable>
-                <Text style={[type.name, { color: colors.textPrimary }]}>{dmPeerLabel(peerHex)}</Text>
+                <Avatar name={dmPeerLabel(peerHex)} pubkeyHex={peerHex} size={32} />
+                <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={[type.name, { color: colors.textPrimary }]}>{dmPeerLabel(peerHex)}</Text>
+                    <Pressable
+                        onPress={() => {
+                            recordUiEvent('dm:details', peerHex);
+                            setShowDetails(v => !v);
+                        }}
+                        accessibilityRole="button"
+                        accessibilityLabel="Peer details"
+                    >
+                        <Text style={[type.meta, { color: colors.accentText }]}>{showDetails ? 'Hide details' : 'Details'}</Text>
+                    </Pressable>
+                </View>
                 <View style={styles.headerSpacer} />
             </View>
+
+            {showDetails ? (
+                <View style={[styles.requestBar, { borderBottomColor: colors.borderColor }]}>
+                    <Text style={[type.meta, { color: colors.textMuted }]}>
+                        Full name: {(() => { const bytes = fromHex(peerHex); return bytes ? authorLabelFor(bytes) : peerHex; })()}
+                    </Text>
+                    <Text style={[type.meta, { color: colors.textMuted }]} selectable>{peerHex}</Text>
+                </View>
+            ) : null}
 
             {isRequest ? (
                 <View style={[styles.requestBar, { borderBottomColor: colors.borderColor }]}>

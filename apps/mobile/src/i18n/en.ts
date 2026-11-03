@@ -551,6 +551,16 @@ export const en = {
     copyCode: 'Copy code',
     copied: 'Copied',
     copyFailed: 'Copy failed. Long-press the code to copy it.',
+    displayNameSection: 'Display name',
+    displayNameHint:
+      'A name other phones show for you, instead of your memorable name. It travels signed on your next posts, so only posts made after you set it carry it. Old posts keep their old name.',
+    displayNamePlaceholder: 'Pick a display name',
+    displayNameSave: 'Save name',
+    displayNameSaved: 'Display name saved. Your next posts will carry it.',
+    displayNameClear: 'Clear name',
+    displayNameCleared: 'Display name cleared. Your next posts carry no name tag.',
+    displayNameInvalid: 'Use 1 to 32 characters, no line breaks.',
+    displayNameSaveFailed: 'Could not save the display name. Try again.',
   },
   appearance: {
     title: 'Appearance',
