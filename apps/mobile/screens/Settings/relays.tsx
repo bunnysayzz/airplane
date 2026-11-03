@@ -19,7 +19,7 @@ interface RelaysProps {
 // Second-level Settings page (same pattern as Appearance): lists the Nostr
 // relays the World uplink publishes to, lets the user add a custom relay
 // and remove any relay, and resets to the defaults. Changes are persisted
-// immediately but apply on the next app start — the transport is built
+// immediately but apply on the next app start - the transport is built
 // with its relay list at launch and is never torn down live (see
 // settingsContext.tsx), so the page says so instead of implying otherwise.
 const Relays: React.FC<RelaysProps> = ({ onBack }) => {
@@ -133,6 +133,7 @@ const Relays: React.FC<RelaysProps> = ({ onBack }) => {
                             onSubmitEditing={() => void handleAdd()}
                         />
                         <Pressable
+                            hitSlop={8}
                             style={[styles.addButton, draft.trim().length === 0 && styles.addButtonDisabled]}
                             onPress={() => void handleAdd()}
                             disabled={draft.trim().length === 0}

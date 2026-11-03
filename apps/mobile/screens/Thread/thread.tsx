@@ -139,6 +139,11 @@ const styles = StyleSheet.create({
         alignItems: 'center',
     },
     listContent: {
+        // F20: same readable-width cap as the feed (see Timeline styles).
+        // Phones are narrower than the cap, so their layout is unchanged.
+        width: '100%',
+        maxWidth: 640,
+        alignSelf: 'center',
         // Bottom padding is applied by the component (it depends on the
         // live safe-area inset) - see contentContainerStyle above.
     },

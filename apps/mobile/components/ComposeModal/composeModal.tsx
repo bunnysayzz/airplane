@@ -27,6 +27,7 @@ import { DialogHost } from '../Dialog/dialogHost';
 import { dialog } from '../../src/lib/dialog';
 import { captureError } from '../../src/sentry';
 import { publishPost, LocationError } from '../../services/airplane/composer';
+import { getComposeDraftStore } from '../../services/airplane/composeDraft';
 import { recordUiEvent } from '../../services/airplane/diagnostics';
 import {
     failureCodeForPublishError,
@@ -123,6 +124,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
                     onPress: () => {
                         recordUiEvent('compose:discard');
                         resetDrag();
+                        void getComposeDraftStore().clear().catch(() => {});
                         onClose();
                     },
                 },
@@ -149,6 +151,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
                     onPress: () => {
                         recordUiEvent('compose:discard');
                         resetDrag();
+                        void getComposeDraftStore().clear().catch(() => {});
                         onClose();
                     },
                 },
@@ -160,12 +163,31 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
         }
     };
 
-    // Fresh sheet every time it opens; focus the input once the sheet has slid up
+    // Draft restore: the sheet opens with the persisted draft (if any),
+    // not a blank sheet. A kill during the location race, a failed publish,
+    // or a plain close all keep the draft; only a successful publish or an
+    // explicit Discard clears it (see the clear calls in handlePublish and
+    // in the discard handlers). The restore is skipped if the user already
+    // typed before it landed, so a fast keystroke is never overwritten by
+    // the older saved value.
+    const draftRestorePendingRef = useRef(false);
     useEffect(() => {
         if (isOpen) {
             setText('');
             setLoading(false);
             initialText.current = '';
+            draftRestorePendingRef.current = true;
+            getComposeDraftStore()
+                .load()
+                .then(saved => {
+                    if (!draftRestorePendingRef.current) return;
+                    draftRestorePendingRef.current = false;
+                    setText(saved);
+                    initialText.current = saved;
+                })
+                .catch(() => {
+                    draftRestorePendingRef.current = false;
+                });
             // Warm the location fix while the user types, so submit usually
             // finds a warm cache or an in-flight fix instead of starting a
             // cold 15 second race. Silent: failures surface at submit.
@@ -174,6 +196,15 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             return () => clearTimeout(focus);
         }
     }, [isOpen]);
+
+    // Every keystroke persists the draft, so a kill at any moment loses
+    // at most the characters typed since the last keystroke save landed.
+    // The text itself is never logged anywhere.
+    const handleChangeText = (value: string) => {
+        draftRestorePendingRef.current = false;
+        setText(value);
+        void getComposeDraftStore().save(value).catch(() => {});
+    };
 
     // The counter and the send gate measure the same thing: trimmed length,
     // so trailing whitespace can't show a false "over".
@@ -186,7 +217,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
 
     // Permission priming: the OS dialog only ever fires on the user's
     // explicit action. Our own rationale goes first; a denied grant gets
-    // clear copy and a one-tap path to Settings — never a dead end, never a
+    // clear copy and a one-tap path to Settings - never a dead end, never a
     // repeated OS nag.
     const showLocationDeniedDialog = () => {
         dialog.alert(t('compose.locationDeniedTitle'), t('compose.locationPermissionDenied'), [
@@ -206,6 +237,9 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
         publishingRef.current = true;
         setLoading(true);
         recordUiEvent('compose:submit');
+        // Submit-start persist: the keystroke saves should already hold
+        // this text, but a dropped one must not lose the post mid-race.
+        await getComposeDraftStore().save(text).catch(() => {});
         try {
             const status = await getLocationPermissionStatus();
             if (status === 'denied') {
@@ -258,6 +292,10 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             // stages, and the toast copy says saved, not published.
             dialog.toast(t('compose.posted'));
             onPublished?.(eventId);
+            // Successful publish is one of the two clear paths (the other
+            // is explicit Discard). A failed publish never reaches here,
+            // so its draft survives for the next open.
+            await getComposeDraftStore().clear().catch(() => {});
             onClose();
         } catch (error: unknown) {
             // Every publish failure lands here with its code, so a submit
@@ -276,7 +314,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             // copy instead. A denied OS permission gets its own copy (it tells
             // the user what to do); every other location failure shows its
             // typed userMessage (T10: services-off, timeout and unavailable
-            // each carry distinct actionable copy — collapsing them into one
+            // each carry distinct actionable copy - collapsing them into one
             // generic "paused" line hid what the user should do next).
             const message =
                 error instanceof LocationError
@@ -341,7 +379,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
                     placeholderTextColor={colors.textMuted}
                     multiline
                     value={text}
-                    onChangeText={setText}
+                    onChangeText={handleChangeText}
                     maxLength={MAX_POST_LENGTH + 50}
                 />
 

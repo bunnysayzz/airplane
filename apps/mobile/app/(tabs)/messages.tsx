@@ -192,7 +192,7 @@ export default function MessagesTab() {
                 <Pressable onPress={() => {
                     recordUiEvent('dm:start-paste');
                     startFromInput();
-                }} style={[styles.go, { backgroundColor: colors.accentColor }]}>
+                }} disabled={!queryIsHex} hitSlop={8} style={[styles.go, { backgroundColor: colors.accentColor }, !queryIsHex && styles.goDisabled]}>
                     <Text style={{ color: colors.buttonTextColor }}>Go</Text>
                 </Pressable>
             </View>
@@ -299,6 +299,7 @@ const styles = StyleSheet.create({
     retryRow: { flexDirection: 'row', gap: 8, marginTop: 12, alignItems: 'center' },
     input: { flex: 1, borderWidth: 1, borderRadius: 8, padding: 10 },
     go: { borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
+    goDisabled: { opacity: 0.5 },
     row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth },
     unreadPill: {
         minWidth: 22,

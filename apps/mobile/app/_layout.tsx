@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { AppState, InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
+import { AppState, InteractionManager, Pressable, ScrollView, StyleSheet, Text } from 'react-native';
 import { SplashScreen, Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { ThemeProvider, useTheme } from '../src/theme/themeContext';
@@ -28,8 +28,10 @@ SplashScreen.preventAutoHideAsync().catch(() => {
  *  shows mapped friendly copy with a generic fallback. */
 export function ErrorBoundary({ error, retry }: { error: Error; retry: () => void }) {
     console.error(error);
+    // F15: a ScrollView, not a plain View, so a long error message can
+    // never push the retry button off screen on a small phone.
     return (
-        <View style={fallbackStyles.center}>
+        <ScrollView contentContainerStyle={fallbackStyles.scrollContent}>
             <Text style={fallbackStyles.title}>Something broke</Text>
             <Text style={fallbackStyles.muted}>{friendlyErrorMessage(error)}</Text>
             <Pressable style={fallbackStyles.button} onPress={() => {
@@ -38,7 +40,7 @@ export function ErrorBoundary({ error, retry }: { error: Error; retry: () => voi
             }}>
                 <Text style={fallbackStyles.buttonText}>Try again</Text>
             </Pressable>
-        </View>
+        </ScrollView>
     );
 }
 
@@ -163,8 +165,8 @@ export default function RootLayout() {
 }
 
 const fallbackStyles = StyleSheet.create({
-    center: {
-        flex: 1,
+    scrollContent: {
+        flexGrow: 1,
         alignItems: 'center',
         justifyContent: 'center',
         gap: 12,

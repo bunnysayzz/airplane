@@ -372,7 +372,7 @@ export default function DmThreadScreen() {
                         multiline
                         style={[styles.input, { color: colors.textPrimary, borderColor: colors.borderColor }]}
                     />
-                    <Pressable onPress={send} disabled={sending} style={[styles.send, { backgroundColor: colors.accentColor }]}>
+                    <Pressable onPress={send} disabled={sending} hitSlop={8} style={[styles.send, { backgroundColor: colors.accentColor }]}>
                         <Text style={{ color: colors.buttonTextColor }}>Send</Text>
                     </Pressable>
                 </View>

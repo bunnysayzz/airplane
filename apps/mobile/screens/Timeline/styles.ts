@@ -62,6 +62,12 @@ export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     },
     listContent: {
         paddingTop: 8,
+        // F20: on tablets the cards cap at a readable width and center
+        // instead of stretching full width. Phones are narrower than the
+        // cap, so their layout is unchanged.
+        width: '100%',
+        maxWidth: 640,
+        alignSelf: 'center',
         // Bottom clearance is applied by the screen itself (it needs the live
         // safe-area inset) - see timeline.tsx contentContainerStyle.
     },
