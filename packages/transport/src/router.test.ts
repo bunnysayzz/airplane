@@ -2,7 +2,7 @@
 // Ordered router (R4) tests: relay first, mesh fallback, queued when
 // neither can send, dedup across the router boundary, relay OK handling.
 
-import { type TransportPort } from '@airplane/protocol';
+import { type SignedEvent, type TransportPort } from '@airplane/protocol';
 import { makePost } from '../../protocol/src/test-helpers';
 import { BleTransport, HybridTransport, type IngressSource } from './hybrid';
 import { NostrTransport } from './nostr';
@@ -58,6 +58,9 @@ function makeRouter(opts?: {
   relays?: string[];
   relayDeadlineMs?: number;
   networkValidated?: () => boolean;
+  networkUnknown?: () => boolean;
+  unknownNetworkDeadlineMs?: number;
+  onRelayObserved?: (event: SignedEvent) => void;
 }) {
   const port = new FakeBlePort();
   const ble = new BleTransport(port);
@@ -77,6 +80,9 @@ function makeRouter(opts?: {
     {
       relayDeadlineMs: opts?.relayDeadlineMs ?? 50,
       networkValidated: opts?.networkValidated,
+      networkUnknown: opts?.networkUnknown,
+      unknownNetworkDeadlineMs: opts?.unknownNetworkDeadlineMs,
+      onRelayObserved: opts?.onRelayObserved,
     },
   );
   return { h, port, sockets };
@@ -297,6 +303,105 @@ describe('Ordered router publish', () => {
     // is dropped at ingress, never re-emitted to handlers.
     expect(h.ingress(event, 'ble', 'p1')).toBe(false);
     expect(seen).toEqual(['local']);
+    await h.stop();
+  });
+
+  test('relay observation of a deduped own post still fires onRelayObserved, without re-emitting', async () => {
+    const observed: unknown[] = [];
+    const { h } = makeRouter({
+      relays: [],
+      onRelayObserved: (event) => {
+        observed.push(event);
+      },
+    });
+    await h.start();
+
+    const seen: IngressSource[] = [];
+    h.onPost((_e, source) => {
+      seen.push(source);
+    });
+
+    const event = makePost('own post query hit');
+    await h.publish(event, ['p1']);
+    // A relay query hit returning our own post is a duplicate by id
+    // (publish marked it seen), so delivery dedups it, but the relay
+    // observation must still reach the World-confirmation hook: that
+    // hit is exactly how a relay win stops being trusted on OK alone.
+    expect(h.ingress(event, 'nostr')).toBe(false);
+    expect(seen).toEqual(['local']); // no second delivery
+    expect(observed).toHaveLength(1);
+    await h.stop();
+  });
+
+  test('BLE ingress never fires onRelayObserved', async () => {
+    const observed: unknown[] = [];
+    const { h } = makeRouter({ relays: [], onRelayObserved: (event) => observed.push(event) });
+    await h.start();
+
+    const event = makePost('ble only');
+    expect(h.ingress(event, 'ble', 'p1')).toBe(true);
+    expect(observed).toHaveLength(0);
+    await h.stop();
+  });
+
+  test('unknown network shortens the relay deadline before mesh fallback', async () => {
+    const { h, port, sockets } = makeRouter({
+      relayDeadlineMs: 5000,
+      unknownNetworkDeadlineMs: 50,
+      networkUnknown: () => true,
+    });
+    await h.start();
+    sockets[0].open();
+    await tick();
+
+    const started = Date.now();
+    const event = makePost('unknown network');
+    const res = await h.publish(event, ['p1']); // no OK injected: deadline fires
+    const elapsed = Date.now() - started;
+
+    expect(res.transport).toBe('mesh');
+    expect(res.relayTried).toBe(true);
+    expect(res.relayDetail).toMatch(/50ms/);
+    expect(res.relayDetail).toMatch(/shortened deadline/);
+    expect(elapsed).toBeLessThan(1000); // far under the full 5000 ms deadline
+    expect(port.sent.length).toBeGreaterThan(0);
+    await h.stop();
+  });
+
+  test('known network uses the full relay deadline', async () => {
+    const { h, sockets } = makeRouter({
+      relayDeadlineMs: 50,
+      unknownNetworkDeadlineMs: 10,
+      networkUnknown: () => false,
+    });
+    await h.start();
+    sockets[0].open();
+    await tick();
+
+    const event = makePost('known network');
+    const res = await h.publish(event, ['p1']); // no OK injected: deadline fires
+    expect(res.transport).toBe('mesh');
+    expect(res.relayDetail).toMatch(/50ms/);
+    expect(res.relayDetail).not.toMatch(/shortened/);
+    await h.stop();
+  });
+
+  test('known offline still skips relay at once even when network is also unknown', async () => {
+    const { h, port, sockets } = makeRouter({
+      networkValidated: () => false,
+      networkUnknown: () => true,
+    });
+    await h.start();
+    sockets[0].open();
+    await tick();
+
+    const event = makePost('offline wins over unknown');
+    const res = await h.publish(event, ['p1']);
+    expect(res.transport).toBe('mesh');
+    expect(res.relayTried).toBe(false);
+    expect(res.relayDetail).toBe('network not validated');
+    expect(sentEvents(sockets[0])).toHaveLength(0); // no EVENT ever sent
+    expect(port.sent.length).toBeGreaterThan(0);
     await h.stop();
   });
 });

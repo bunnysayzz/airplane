@@ -7,7 +7,7 @@ import { I18nProvider, useI18n } from '../src/i18n/i18nContext';
 import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
 import { startTransport, stopTransport, pruneExpiredStore } from '../services/airplane';
-import { revalidateBleRadio } from '../services/airplane/transport';
+import { revalidateBleRadio, runWorldSyncPass } from '../services/airplane/transport';
 import { flushDmOutboxIfStarted, refreshDmSubscriptionIfStarted, startDmServiceAtLaunch } from '../services/airplane/dm';
 import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
 import { friendlyErrorMessage } from '../src/lib/errorCopy';
@@ -97,6 +97,15 @@ export default function RootLayout() {
           if (state === 'active') {
             void flushDmOutboxIfStarted(true).catch(() => {});
             void refreshDmSubscriptionIfStarted().catch(() => {});
+            // Rank 13, foreground WorldSync trigger (cheap part only):
+            // one WorldSync pass, the same pass the connectivity return
+            // trigger runs, so a post backgrounded mid-fanout recovers
+            // on foreground return with internet and no connectivity
+            // flap, instead of waiting for the next 60 s timer tick.
+            // No-op while offline or before transport start. This is
+            // not a foreground service: the T4 foreground service is
+            // explicitly not in this batch.
+            void runWorldSyncPass().catch(() => {});
           }
         });
         // Start hybrid transport (BLE always, Nostr when online) AFTER first

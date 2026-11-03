@@ -30,7 +30,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
+import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
@@ -42,6 +42,7 @@ import {
 } from './reshares';
 import { NobleCrypto, createReshare, fromHex, toHex } from '@airplane/protocol';
 import type { PostCardModel } from './types';
+import { getDiagnosticsSnapshot, resetDiagnosticsForTests } from './diagnostics';
 import { DEFAULT_RELAYS, RELAYS_KEY } from '../../src/lib/relays';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -210,7 +211,7 @@ describe('transport manager', () => {
     expect(Array.isArray(result.relays)).toBe(true);
   });
 
-  test('a relay win marks the post World-confirmed at publish time', async () => {
+  test('a relay win does NOT mark the post World-confirmed at publish time', async () => {
     await startTransport();
     const hybrid = __getHybridForTests();
     expect(hybrid).not.toBeNull();
@@ -224,6 +225,31 @@ describe('transport manager', () => {
       relayDetail: null,
     });
     await publishViaTransport(event);
+    // Rank 5: a relay OK alone is not World. A relay can OK and then
+    // drop the event before any peer fetches it; confirmation comes
+    // only from a relay observation (query hit or subscription replay).
+    expect(await getStore().isWorldConfirmed(toHex(event.id))).toBe(false);
+  });
+
+  test('a relay observation confirms a post a relay win left unconfirmed', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const event = makeSignedEvent();
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'relay',
+      status: 'relayed',
+      blePeers: 0,
+      relays: ['wss://test.relay'],
+      relayTried: true,
+      relayDetail: null,
+    });
+    await publishViaTransport(event);
+    expect(await getStore().isWorldConfirmed(toHex(event.id))).toBe(false);
+    // The WorldSync query round trip (or a subscription replay)
+    // returns the post from a relay: that observation confirms it.
+    hybrid!.ingress(event, 'nostr');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
     expect(await getStore().isWorldConfirmed(toHex(event.id))).toBe(true);
   });
 
@@ -295,6 +321,40 @@ describe('transport manager', () => {
     expect(statuses.get(toHex(event.id))).toBe('unsent');
   });
 
+  test('a mesh publish records handed to radio, never delivered, in diagnostics', async () => {
+    resetDiagnosticsForTests();
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const event = makeSignedEvent();
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'mesh',
+      status: 'sent',
+      blePeers: 2,
+      relays: [],
+      relayTried: true,
+      relayDetail: 'no relay OK within 5000ms',
+    });
+    await publishViaTransport(event);
+    const messages = getDiagnosticsSnapshot().messages;
+    const outbound = messages.filter((m) => m.direction === 'outbound');
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0].finalStatus).toBe('handed to radio over BLE');
+    expect(outbound[0].finalStatus).not.toMatch(/deliver/i);
+    const bleAttempt = outbound[0].attempts.find((a) => a.transport === 'ble');
+    expect(bleAttempt?.detail).toMatch(/handed to radio/);
+    expect(bleAttempt?.detail).toMatch(/no peer receipt signal/);
+  });
+
+  test('runWorldSyncPass is a no-op while offline', async () => {
+    await startTransport();
+    // Fake sockets never open, so the transport is offline: one
+    // foreground pass must resolve without throwing and schedule
+    // nothing.
+    await expect(runWorldSyncPass()).resolves.toBeUndefined();
+  });
+  });
+
   test('an inbound burst coalesces to a single feed notify', async () => {
     await startTransport();
     const hybrid = __getHybridForTests();
@@ -364,7 +424,7 @@ describe('transport manager', () => {
     // NetInfo reports isInternetReachable as not-yet-known until its
     // reachability check lands, so the listener can fire offline first
     // and the initial fetch resolve online after. The fetch path must
-    // restart Nostr, not just the sync timer — otherwise the silent
+    // restart Nostr, not just the sync timer, otherwise the silent
     // WorldSync uplink stays dead until the next connectivity flap.
     type NetState = { isConnected: boolean; isInternetReachable: boolean };
     let resolveFetch: ((s: NetState) => void) | null = null;
@@ -415,7 +475,7 @@ describe('transport manager', () => {
     // Re-import the transport module fresh so it picks up the throwing mock.
     const fresh = await import('./transport');
     fresh.__resetNetInfoForTests();
-    // Must not throw — app launches in offline-only mode.
+    // Must not throw: app launches in offline-only mode.
     await expect(fresh.startTransport()).resolves.toBeUndefined();
     await fresh.stopTransport();
     jest.dontMock('@react-native-community/netinfo');

@@ -79,7 +79,7 @@ export class BleTransport {
        * Event authenticity check (T11 §23.6: the BLE ingress path must
        * reject tampered/wrong-key signatures, matching the Nostr path
        * which already verifies). When supplied, an event failing the
-       * check — or a check that throws — is dropped silently, never
+       * check, or a check that throws, is dropped silently, never
        * delivered to handlers. Absent, decoding alone gates delivery
        * (legacy behavior, kept for tests that construct unsigned
        * fixtures); the app always wires verifyEvent.
@@ -264,7 +264,11 @@ export class BleTransport {
    * every frame goes through port.send() which must fit the link MTU.
    * Marks the id seen so our own broadcast isn't re-emitted on receipt.
    * Returns the count of peers that completed without error, so the
-   * router can tell "sent to N peers" from "failed on every peer".
+   * router can tell "handed to radio for N peers" from "failed on
+   * every peer". Handed to radio is the honest wording: a GATT notify
+   * can resolve even with no peer central subscribed, and there is no
+   * BLE ack for posts, so a completed broadcast is never peer
+   * delivery.
    */
   async broadcast(event: SignedEvent, peerIds: string[], ttl: number = this.ttl): Promise<number> {
     const bytes = encodeEvent(event);
@@ -323,8 +327,11 @@ export type RouterTransport = 'relay' | 'mesh' | 'none';
 
 /**
  * Result of one routed publish. blePeers and relays keep their old
- * meaning for callers: blePeers is the count of BLE peers sent to,
- * relays is the list of relay URLs that sent an accepted OK.
+ * meaning for callers: blePeers is the count of BLE peers the frames
+ * were handed to via the radio (a radio handoff, not peer receipt:
+ * there is no BLE ack for posts, and a GATT notify can resolve with
+ * no subscriber), relays is the list of relay URLs that sent an
+ * accepted OK.
  */
 export interface RouteResult {
   transport: RouterTransport;
@@ -353,10 +360,43 @@ export interface RouterOpts {
    * working exactly as before.
    */
   networkValidated?: () => boolean;
+  /**
+   * Unknown-network fact, supplied by the app (NetInfo). True while no
+   * connectivity state has been reported yet (before the first NetInfo
+   * listener or fetch resolution, or when the NetInfo module failed to
+   * load and no state will ever arrive). While unknown, the relay stage
+   * still runs on the live socket fact, but with the shortened deadline
+   * below instead of the full one: a publish on a dead hotspot during
+   * that window must not burn the full relay deadline before mesh
+   * fallback. Known offline still skips the relay stage entirely
+   * (networkValidated takes precedence over this flag).
+   */
+  networkUnknown?: () => boolean;
+  /**
+   * Relay OK deadline used while the network state is unknown (see
+   * networkUnknown). Default 1500: long enough for a healthy relay to
+   * OK, short enough that a dead upstream cannot stall mesh fallback
+   * for the full deadline.
+   */
+  unknownNetworkDeadlineMs?: number;
+  /**
+   * Relay-observation hook, called for every relay-sourced event at
+   * ingress, including duplicates dropped by the seen cache. Delivery
+   * handlers still dedup, but World confirmation must not be lost to
+   * that dedup: a post this phone published (seen at publish time) is
+   * confirmed when a relay query or subscription returns it, and that
+   * return is a duplicate by id by definition. Never called for BLE
+   * or local sources. A throwing hook must not break ingress, so
+   * ingress wraps the call in try/catch.
+   */
+  onRelayObserved?: (event: SignedEvent) => void;
 }
 
 /** Default relay OK deadline (ms). */
 export const DEFAULT_RELAY_DEADLINE_MS = 5000;
+
+/** Relay OK deadline (ms) while the network state is unknown. */
+export const DEFAULT_UNKNOWN_NETWORK_DEADLINE_MS = 1500;
 
 /**
  * Runs BLE mesh and Nostr relays in strict order (R4): relay first when
@@ -386,6 +426,9 @@ export class HybridTransport {
   private readonly diagnosticsOpts: HybridDiagnosticsOpts | undefined;
   private readonly relayDeadlineMs: number;
   private readonly networkValidated: (() => boolean) | undefined;
+  private readonly networkUnknown: (() => boolean) | undefined;
+  private readonly unknownNetworkDeadlineMs: number;
+  private readonly onRelayObserved: ((event: SignedEvent) => void) | undefined;
 
   constructor(
     private readonly ble: BleTransport,
@@ -397,6 +440,9 @@ export class HybridTransport {
     this.diagnosticsOpts = diagnosticsOpts;
     this.relayDeadlineMs = routerOpts?.relayDeadlineMs ?? DEFAULT_RELAY_DEADLINE_MS;
     this.networkValidated = routerOpts?.networkValidated;
+    this.networkUnknown = routerOpts?.networkUnknown;
+    this.unknownNetworkDeadlineMs = routerOpts?.unknownNetworkDeadlineMs ?? DEFAULT_UNKNOWN_NETWORK_DEADLINE_MS;
+    this.onRelayObserved = routerOpts?.onRelayObserved;
   }
 
   async start(): Promise<void> {
@@ -416,10 +462,22 @@ export class HybridTransport {
 
   /**
    * Single ingress point. Deduplicates across transports by event ID;
-   * first arrival wins, later duplicates are dropped silently.
+   * first arrival wins, later duplicates are dropped silently for
+   * delivery. Relay observation is not deduplicated for confirmation:
+   * the onRelayObserved hook runs for every relay-sourced event,
+   * including duplicates, so a relay query hit confirms a post this
+   * phone already published instead of being swallowed by the seen
+   * cache that publish time populated.
    */
   ingress(event: SignedEvent, source: IngressSource, peerId?: string): boolean {
     const idHex = toHex(event.id);
+    if (source === 'nostr') {
+      try {
+        this.onRelayObserved?.(event);
+      } catch {
+        // A confirmation hook must never break ingress.
+      }
+    }
     if (this.seen.has(idHex)) {
       this.diagnosticsOpts?.onDedupDrop?.(source, peerId ?? null);
       return false;
@@ -492,6 +550,12 @@ export class HybridTransport {
    * the reason the stage did not win. Skips the wait entirely when the
    * network is known offline or no relay socket is open: per plan, a
    * relay client in backoff is not waited on, it is fallen through.
+   * While the network state is unknown, the stage still runs on the
+   * live socket fact but with the shortened unknown-network deadline,
+   * so a dead upstream cannot burn the full deadline before mesh
+   * fallback. The timeout detail names the shortened deadline when
+   * it applies, so diagnostics never present a short wait as a full
+   * deadline wait.
    */
   private async attemptRelay(event: SignedEvent): Promise<{
     ok: string[];
@@ -504,13 +568,22 @@ export class HybridTransport {
     if (!this.nostr.online) {
       return { ok: [], tried: false, detail: 'no open relay socket' };
     }
-    const ack = await this.nostr.publishWithAck(event, this.relayDeadlineMs);
+    const unknown = this.networkUnknown?.() ?? false;
+    const deadlineMs = unknown ? this.unknownNetworkDeadlineMs : this.relayDeadlineMs;
+    const ack = await this.nostr.publishWithAck(event, deadlineMs);
     if (ack.ok.length > 0) return { ok: ack.ok, tried: true, detail: null };
     // Cancelled by stop(): skipped, not a relay failure. The caller
     // reports it as unattempted rather than failed.
     if (ack.cancelled) return { ok: [], tried: false, detail: 'relay publish cancelled' };
     if (ack.rejected.length > 0) return { ok: [], tried: true, detail: 'relays rejected the event' };
-    if (ack.timedOut) return { ok: [], tried: true, detail: `no relay OK within ${this.relayDeadlineMs}ms` };
+    if (ack.timedOut)
+      return {
+        ok: [],
+        tried: true,
+        detail: unknown
+          ? `no relay OK within ${deadlineMs}ms (shortened deadline: network state unknown)`
+          : `no relay OK within ${deadlineMs}ms`,
+      };
     return { ok: [], tried: true, detail: 'relay unavailable' };
   }
 
