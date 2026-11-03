@@ -310,7 +310,6 @@ export interface DmMeshPort {
  * its tables.
  */
 export const DM_MAX_MESSAGES_PER_CONVERSATION = 1000;
-export const DM_MAX_SEEN_EVENT_IDS_PER_CONVERSATION = 5000;
 export const DM_MAX_DM_MAP_ENTRIES = 5000;
 
 /** Re-attempt delay for MeshSent rows awaiting an ack, ms. */
@@ -798,29 +797,29 @@ export class DmService {
     if (senderHex === this.ownMeshHex()) return 'ignored';
     const existing = await this.store.getConversation(senderHex);
     if (existing?.state === 'blocked') return 'dropped'; // silent drop: no row, no badge, no ack
-    // Dedup by delivery id, never by text or sender: the same send
-    // delivered twice (two relays, relay plus BLE, relay replay) renders
-    // once, with one unread increment. The id is persisted in the store,
-    // so dedup survives restart. Envelopes without an id (pre-change
-    // senders) fall back to the in-memory relay-event-id set, which does
-    // not survive restart: those duplicates may re-render after one.
+    // Dedup, never by text or sender: the same send delivered twice (two
+    // relays, relay plus BLE, relay replay) renders once, with one unread
+    // increment. The dedup key is the delivery id when present, else the
+    // relay event id (pre-change senders). Both keys are persisted in the
+    // store seen set, so dedup survives restart: a backfill replay after
+    // restart must never re-render or re-count. The two key spaces cannot
+    // collide (32-hex delivery ids vs 64-hex relay event ids), and the
+    // seen set is never read back as delivery ids, so sharing it is safe.
+    // Keys in flight are also held in memory: two copies arriving at once
+    // (relay plus BLE) must not both pass the store check before either
+    // is recorded. The hold is checked both before and after the store
+    // await: the first check alone is not enough, because a twin copy
+    // can pass it while the first copy is still awaiting the store.
+    // The hold is released once the store record lands; on an add
+    // failure it is released so a retry can proceed.
     const deliveryId = envelope.deliveryId;
-    if (deliveryId !== undefined) {
-      if (!isDeliveryId(deliveryId)) return 'ignored';
-      if (await this.store.hasSeenDelivery(deliveryId)) return 'ignored';
-    } else if (envelope.relayEventId) {
-      let seen = this.seenRelayEventIds.get(senderHex);
-      if (!seen) {
-        seen = new Set<string>();
-        this.seenRelayEventIds.set(senderHex, seen);
-      }
-      if (seen.has(envelope.relayEventId)) return 'ignored';
-      seen.add(envelope.relayEventId);
-      while (seen.size > DM_MAX_SEEN_EVENT_IDS_PER_CONVERSATION) {
-        const oldest = seen.values().next();
-        if (oldest.done) break;
-        seen.delete(oldest.value);
-      }
+    if (deliveryId !== undefined && !isDeliveryId(deliveryId)) return 'ignored';
+    const dedupKey = deliveryId !== undefined ? deliveryId : envelope.relayEventId;
+    if (dedupKey !== undefined) {
+      if (this.pendingSeen.has(dedupKey)) return 'ignored';
+      if (await this.store.hasSeenDelivery(dedupKey)) return 'ignored';
+      if (this.pendingSeen.has(dedupKey)) return 'ignored';
+      this.pendingSeen.add(dedupKey);
     }
     const nowMs = this.now();
     const row: DmMessageRow = {
@@ -836,10 +835,18 @@ export class DmService {
       nextAttemptAtMs: nowMs,
       senderCreatedAtSec: envelope.createdAt,
     };
-    await this.store.addMessage(row);
+    try {
+      await this.store.addMessage(row);
+    } catch (e) {
+      if (dedupKey !== undefined) this.pendingSeen.delete(dedupKey);
+      throw e;
+    }
     this.incomingEnvelopes.set(row.id, envelope);
     capMapEntries(this.incomingEnvelopes);
-    if (deliveryId !== undefined) await this.store.markSeenDelivery(deliveryId, senderHex);
+    if (dedupKey !== undefined) {
+      await this.store.markSeenDelivery(dedupKey, senderHex);
+      this.pendingSeen.delete(dedupKey);
+    }
     if (!existing) {
       // Unknown sender -> requests folder, NEVER straight to inbox (orders).
       await this.store.upsertConversation({
@@ -1114,8 +1121,11 @@ export class DmService {
     return this.decryptRow(last).text;
   }
 
-  /** Per-conversation seen relay event ids for inbound dedup (P1-06, pre-change senders only). */
-  private readonly seenRelayEventIds = new Map<string, Set<string>>();
+  /** Dedup keys currently being stored: closes the window where two
+   *  copies of one send (relay plus BLE) both pass the store check
+   *  before either is recorded. Held only in flight, never across
+   *  restart; the store seen set is the durable record. */
+  private readonly pendingSeen = new Set<string>();
 
   /** Memory-only plaintext for outgoing rows (never persisted). Fallback only; see decryptRow. */
   private readonly outgoingPlaintext = new Map<string, string>();
