@@ -1,13 +1,20 @@
 import React, { useState } from 'react';
 import { Image, StyleSheet, Text, View } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useTheme } from '../../src/theme/themeContext';
+import { avatarGradientFor } from '../../services/airplane/displayNames';
 
 interface AvatarProps {
     // Used for the initials fallback and the accessibility label
     name: string;
     uri?: string | null;
     size?: number;
+    // Mesh pubkey hex of the person shown. Drives the deterministic
+    // gradient, so one peer always gets the same avatar on every device
+    // with no image download and no new dependency (expo-linear-gradient
+    // is already in the app dependencies).
+    pubkeyHex?: string;
     // Type glyph in an accent circle at the bottom-right (e.g. a notification's type)
     badge?: React.ComponentProps<typeof Ionicons>['name'];
     ring?: boolean;
@@ -34,16 +41,23 @@ export const AvatarBadge: React.FC<{ icon: React.ComponentProps<typeof Ionicons>
     );
 };
 
-export const Avatar: React.FC<AvatarProps> = ({ name, uri, size = 42, badge, ring = false }) => {
+export const Avatar: React.FC<AvatarProps> = ({ name, uri, size = 42, pubkeyHex, badge, ring = false }) => {
     const { colors, type } = useTheme();
     const [failedUri, setFailedUri] = useState<string | null>(null);
     const showImage = !!uri && uri !== failedUri;
     const circle = { width: size, height: size, borderRadius: size / 2 };
+    const gradient = pubkeyHex ? avatarGradientFor(pubkeyHex) : null;
 
     return (
         <View accessible accessibilityRole="image" accessibilityLabel={name} style={circle}>
             {showImage ? (
                 <Image testID="avatar-image" source={{ uri }} style={[circle, { backgroundColor: colors.inputBackground }]} onError={() => setFailedUri(uri)} />
+            ) : gradient ? (
+                <LinearGradient colors={gradient} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[circle, styles.initials]}>
+                    <Text style={[type.name, { fontSize: size * 0.38, lineHeight: size * 0.5, color: '#ffffff' }]}>
+                        {initialsOf(name)}
+                    </Text>
+                </LinearGradient>
             ) : (
                 <View style={[circle, styles.initials, { backgroundColor: colors.accentSoft }]}>
                     <Text style={[type.name, { fontSize: size * 0.38, lineHeight: size * 0.5, color: colors.accentText }]}>

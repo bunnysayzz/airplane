@@ -9,6 +9,13 @@ export interface PostCardModel {
   createdAtMs: number;
   /** Pseudonymous author label, e.g. "quiet fox·a3f9". */
   authorLabel: string;
+  /**
+   * Clean author display string, no hex suffix: the signed display name
+   * when the post carries one, else the memorable name without suffix.
+   * Collision suffixes are applied by the feed mapping layer (see feed.ts)
+   * once the peer set is known; a lone card keeps the clean string.
+   */
+  authorName?: string;
   /** NFC-normalized post body, 1..280 chars. */
   body: string;
   /** Geohash-5 cell the post was published in. */

@@ -18,6 +18,11 @@ import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
 import { recordMessage } from './diagnostics';
 import { getLocationCell as resolveLocationCell } from './location';
+import {
+  DISPLAY_NAME_TAG,
+  getOwnDisplayName,
+  normalizeDisplayName,
+} from './displayNames';
 
 export { LocationError, type LocationFailureCode } from './location';
 
@@ -49,6 +54,13 @@ export interface PublishOpts {
    * getLocationCell(). The override exists for tests/dev.
    */
   geohash5?: string;
+  /**
+   * Display name carried on this post as a signed tag. Undefined (the
+   * normal app path) means the device's own saved display name, when
+   * one is set; null means explicitly no tag; a string is normalized
+   * and dropped when invalid, never allowed to fail the post.
+   */
+  displayName?: string | null;
 }
 
 /**
@@ -62,9 +74,16 @@ export async function getLocationCell(): Promise<string> {
   return resolveLocationCell();
 }
 
-/** Pure builder seam: which tags a post carries for the given opts. Unit-tested. */
-export function tagsForPublish(_opts: PublishOpts): string[][] {
-  return [];
+/**
+ * Pure builder seam: which tags a post carries for the given opts.
+ * Unit-tested. A display name becomes one signed tag row
+ * ["display_name", name]; see displayNames.ts for why that tag is a
+ * signed claim and why older installs ignore it safely.
+ */
+export function tagsForPublish(opts: PublishOpts): string[][] {
+  if (opts.displayName === undefined || opts.displayName === null) return [];
+  const normalized = normalizeDisplayName(opts.displayName);
+  return normalized === null ? [] : [[DISPLAY_NAME_TAG, normalized]];
 }
 
 /**
@@ -88,13 +107,26 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
   // Location resolves here, OUTSIDE any stage wrapper: a LocationError must
   // propagate unwrapped so the UI maps it to location copy, never generic.
   const geohash = opts.geohash5 ?? (await getLocationCell());
+  // The display name resolves before signing, so it lands in the signed
+  // tags. A KV failure here must not fail the post: the post simply
+  // carries no name tag, and the memorable name still identifies it.
+  let displayName: string | null = null;
+  if (opts.displayName !== undefined) {
+    displayName = opts.displayName;
+  } else {
+    try {
+      displayName = await getOwnDisplayName();
+    } catch {
+      displayName = null;
+    }
+  }
   let event;
   try {
     event = await signDeviceEvent({
       created_at: Math.floor(Date.now() / 1000),
       kind: EVENT_KIND_POST as EventKind,
       geohash,
-      tags: tagsForPublish(opts),
+      tags: tagsForPublish({ ...opts, displayName }),
       content,
     });
   } catch (err) {

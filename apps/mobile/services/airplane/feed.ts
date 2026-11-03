@@ -10,7 +10,7 @@ import { EVENT_KIND_POST, toHex, type FeedPost, type Hex64 } from '@airplane/pro
 import { clampFutureCreatedAt, rankScore } from '@airplane/storage';
 import type { PostCardModel } from './types';
 import { ensureStarsHydrated, markStarPostKnown, resolveOwnPubkeyHex, starViewFor } from './stars';
-import { markResharePostKnown, reshareViewFor } from './reshares';
+import { getReshareCluster, markResharePostKnown, reshareViewFor } from './reshares';
 import { getStore } from './store';
 
 export interface FeedQueryOpts {
@@ -80,7 +80,13 @@ export const FEED_CELLS_MAX = 32;
  * maps to the same label, so repeat authors stay recognizable.
  */
 import { authorLabelFor } from './names';
-export { authorLabelFor };
+import { memorableNameFor } from './names';
+export { authorLabelFor, memorableNameFor };
+import {
+  displayNameFromTags,
+  recordDisplayNameFromTags,
+  resolvePeerNames,
+} from './displayNames';
 
 /** Pure mapping: protocol FeedPost -> card view-model. Unit-tested.
  * worldConfirmed is looked up from storage (not in the signed payload).
@@ -97,6 +103,7 @@ export function toPostCardModel(
     eventId: toHex(post.event.id),
     createdAtMs: post.event.created_at * 1000,
     authorLabel: authorLabelFor(post.event.pubkey),
+    authorName: displayNameFromTags(post.event.tags) ?? memorableNameFor(post.event.pubkey),
     authorPubkeyHex: toHex(post.event.pubkey),
     body: post.event.content,
     geohash: post.event.geohash,
@@ -167,6 +174,38 @@ export async function listFeedPage(opts: FeedPageOpts): Promise<FeedPage> {
 }
 
 /**
+ * Apply collision-aware peer names to mapped cards. Call after the page
+ * is mapped (and after its posts were recorded in the registry), so a
+ * suffix appears exactly when two peers in the known set share a base
+ * name. Resharer labels get the same treatment via their cluster hex.
+ */
+function applyResolvedPeerNames(cards: PostCardModel[]): PostCardModel[] {
+  const hexes: string[] = [];
+  const resharerByCard = new Map<string, string>();
+  for (const card of cards) {
+    if (card.authorPubkeyHex) hexes.push(card.authorPubkeyHex);
+    const latest = card.eventId ? getReshareCluster(card.eventId).latestResharer : null;
+    if (latest) {
+      hexes.push(latest);
+      resharerByCard.set(card.eventId, latest);
+    }
+  }
+  const names = resolvePeerNames(hexes);
+  for (const card of cards) {
+    if (card.authorPubkeyHex) {
+      const resolved = names.get(card.authorPubkeyHex.toLowerCase());
+      if (resolved) card.authorName = resolved;
+    }
+    const resharerHex = resharerByCard.get(card.eventId);
+    if (resharerHex && card.latestResharerLabel) {
+      const resolved = names.get(resharerHex.toLowerCase());
+      if (resolved) card.latestResharerLabel = resolved;
+    }
+  }
+  return cards;
+}
+
+/**
  * Map ranked store rows to cards (star/reshare views, World confirmation).
  * Shared by the single-page and globally ranked paths.
  */
@@ -184,7 +223,12 @@ async function mapPostsToCards(
   // One batched World-confirmation lookup for the whole page, not one
   // query per card.
   const confirmed = await store.listWorldConfirmed(ranked.map((p) => toHex(p.event.id) as Hex64));
-  return Promise.all(
+  // Record every signed display name claim on this page before resolving
+  // names, so the registry (and collision detection) sees the whole page.
+  for (const p of ranked) {
+    recordDisplayNameFromTags(toHex(p.event.pubkey), p.event.tags);
+  }
+  const cards = await Promise.all(
     ranked.map(async (p) => {
       const eventId = toHex(p.event.id);
       markStarPostKnown(eventId);
@@ -198,6 +242,7 @@ async function mapPostsToCards(
       }, reshareViewFor(eventId, ownHex ?? undefined));
     }),
   );
+  return applyResolvedPeerNames(cards);
 }
 
 /**
@@ -254,12 +299,14 @@ export async function getPostCardById(eventId: string): Promise<PostCardModel | 
   const star = starViewFor(id, ownHex);
   // --- RESHARE: same collapsed-cluster mapping as the feed path.
   markResharePostKnown(id);
-  return toPostCardModel(
+  recordDisplayNameFromTags(toHex(event.pubkey), event.tags);
+  const card = toPostCardModel(
     { event, views, score: rankScore(views, ageHours), ageHours },
     worldConfirmed,
     { stars: star.count, starLabel: star.label, starredByMe: star.starredByMe },
     reshareViewFor(id, ownHex ?? undefined),
   );
+  return applyResolvedPeerNames([card])[0];
 }
 
 // --- feed change notifications --------------------------------------------
