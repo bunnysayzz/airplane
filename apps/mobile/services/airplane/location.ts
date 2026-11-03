@@ -8,14 +8,25 @@
 // - permission denied / location services off / GPS timeout / missing native
 //   module -> a typed LocationError. Never a fake/default location: a
 //   fabricated cell would poison feed scoping and erode trust in the mesh.
-// - The last good fix is cached briefly (stale-while-revalidate): a geohash5
-//   cell is ~4.9 km x 4.9 km, so a minutes-old fix is still the right cell.
-//   A fix older than FIX_MAX_AGE_MS is NEVER served - past that age the call
-//   blocks on a fresh fix (or throws timeout). The cache is consulted only
-//   when foreground permission is still granted.
+// - The last good fix is cached briefly and refreshed in the background
+//   (true stale-while-revalidate): a geohash5 cell is ~4.9 km x 4.9 km,
+//   so a minutes-old fix is still the right cell. A cache hit past
+//   REVALIDATE_AFTER_MS serves the cached cell at once and kicks a
+//   background refresh; a fix older than FIX_MAX_AGE_MS is NEVER served
+//   as fresh - past that age the call runs the fresh path below. The
+//   cache is consulted only when foreground permission is still granted.
+// - Last-known fallback, last resort only: after the fresh fix race fails
+//   with timeout or unavailable (never for permission or services
+//   failures), the call may serve a real previously observed position:
+//   the OS last known fix, else the app's own expired cache cell. That
+//   cell is NEVER written back into the fresh cache, and it is always
+//   reported with source 'last-known' so the post carries an honest tag
+//   (see LOCATION_SOURCE_TAG). Fail loud stays the default; the fallback
+//   only rescues a post that would otherwise fail outright.
 
 import { encodeGeohash } from '@airplane/protocol';
 import type * as ExpoLocationTypes from 'expo-location';
+import { recordLocationEvent } from './diagnostics';
 
 /** Typed failure modes. `code` is stable for UI copy mapping. */
 export type LocationFailureCode =
@@ -63,6 +74,53 @@ export const FIX_TIMEOUT_MS = 15_000;
 // cell spans ~4.9 km; a fix within this window is still the right cell for
 // scoping, so reusing it keeps posting fast and battery-cheap.
 export const FIX_MAX_AGE_MS = 5 * 60_000;
+// Past this age a cache hit still serves at once, but it also kicks a
+// background refresh, so a session that keeps posting never walks into
+// the expiry cliff unprepared: the next submit finds a fresh cache.
+export const REVALIDATE_AFTER_MS = 3 * 60_000;
+// The OS last known fix is a cached value, not a provider activation, so
+// it answers fast or not at all; past this wait it is treated as absent.
+export const LAST_KNOWN_TIMEOUT_MS = 5_000;
+
+/** Where a resolved cell came from. 'fresh' is a current fix (a live
+ * provider fix, or an OS last known fix within the cache window, which
+ * is equally current for a 4.9 km cell). 'cached' is the app's own
+ * cache within the window. 'last-known' is the last resort fallback:
+ * a real previously observed position served only after the fresh race
+ * failed, and never written back into the fresh cache. */
+export type LocationSource = 'fresh' | 'cached' | 'last-known';
+
+/** A resolved cell plus its source, so callers can mark last-known posts. */
+export interface LocatedCell {
+  cell: string;
+  source: LocationSource;
+}
+
+/** Signed post tag marking a post published from a last-known cell.
+ * Readers ignore unknown tags safely, so older installs just never show
+ * the marker; the tag is part of the signed pre-image like any other. */
+export const LOCATION_SOURCE_TAG = 'location_source';
+
+/** Read the location source back out of a post's tags, if it carries one. */
+export function locationSourceFromTags(
+  tags: string[][] | undefined | null,
+): LocationSource | null {
+  if (!tags) return null;
+  for (const row of tags) {
+    if (row[0] === LOCATION_SOURCE_TAG && row[1] === 'last-known') {
+      return 'last-known';
+    }
+  }
+  return null;
+}
+
+/** Map any publish failure onto the code the compose:failed log line
+ * carries: the typed location code when it is one, else 'failed'. The
+ * code is an outcome name only, never content or coordinates. */
+export function failureCodeForPublishError(error: unknown): string {
+  if (error instanceof LocationError) return error.code;
+  return 'failed';
+}
 
 interface ExpoProviderOpts {
   timeoutMs?: number;
@@ -86,7 +144,9 @@ export class ExpoLocationProvider implements LocationProvider {
   private readonly now: () => number;
   private cached: { cell: string; atMs: number } | null = null;
   /** In-flight fresh fix, shared by concurrent callers (audit F39). */
-  private inflight: Promise<string> | null = null;
+  private inflight: Promise<LocatedCell> | null = null;
+  /** In-flight background refresh, deduped the same way. */
+  private revalidating: Promise<void> | null = null;
 
   constructor(opts: ExpoProviderOpts = {}) {
     this.timeoutMs = opts.timeoutMs ?? FIX_TIMEOUT_MS;
@@ -142,6 +202,17 @@ export class ExpoLocationProvider implements LocationProvider {
     return (await Location.requestForegroundPermissionsAsync()).status === 'granted';
   }
 
+  private validCoords(latitude: number, longitude: number): boolean {
+    return (
+      Number.isFinite(latitude) &&
+      Number.isFinite(longitude) &&
+      latitude >= -90 &&
+      latitude <= 90 &&
+      longitude >= -180 &&
+      longitude <= 180
+    );
+  }
+
   private async freshFix(
     Location: typeof ExpoLocationTypes,
   ): Promise<{ latitude: number; longitude: number }> {
@@ -156,20 +227,137 @@ export class ExpoLocationProvider implements LocationProvider {
       () => locationError('timeout', `no fix within ${this.timeoutMs}ms`),
     );
     const { latitude, longitude } = position.coords;
-    if (
-      !Number.isFinite(latitude) ||
-      !Number.isFinite(longitude) ||
-      latitude < -90 ||
-      latitude > 90 ||
-      longitude < -180 ||
-      longitude > 180
-    ) {
+    if (!this.validCoords(latitude, longitude)) {
       throw locationError('unavailable', 'non-finite/out-of-range coords');
     }
     return { latitude, longitude };
   }
 
-  async getCurrentCell(): Promise<string> {
+  /**
+   * The OS last known fix, or null when there is none, it is unusable,
+   * or the read itself fails or times out. This read never activates
+   * the provider, so it cannot hang the way getCurrentPositionAsync
+   * does on some Android builds (expo issue 33981: the first call
+   * succeeds, later calls hang indefinitely, and last-known keeps
+   * working for subsequent fetches). The timestamp is preserved so the
+   * caller can tell a current fix from a stale one; a missing or
+   * non-finite timestamp counts as stale, never as current.
+   */
+  private async readLastKnown(
+    Location: typeof ExpoLocationTypes,
+  ): Promise<{
+    latitude: number;
+    longitude: number;
+    timestampMs: number;
+  } | null> {
+    try {
+      if (typeof Location.getLastKnownPositionAsync !== 'function') {
+        return null;
+      }
+      const position = await withTimeout(
+        Location.getLastKnownPositionAsync(),
+        LAST_KNOWN_TIMEOUT_MS,
+        () => new Error('last-known timeout'),
+      );
+      if (!position || !position.coords) return null;
+      const { latitude, longitude } = position.coords;
+      if (!this.validCoords(latitude, longitude)) return null;
+      const timestampMs =
+        typeof position.timestamp === 'number' ? position.timestamp : NaN;
+      return { latitude, longitude, timestampMs };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The fresh path: a current fix, or the last resort fallback. Order
+   * matters. First the OS last known fix when it is within the cache
+   * window: that is a current fix for a 4.9 km cell, and reading it
+   * avoids the provider call that hangs on some Android builds. Then
+   * the live provider fix. Only when that race fails with timeout or
+   * unavailable does the fallback run: the OS last known fix at any
+   * age, else the app's own expired cache cell. Permission and
+   * services failures never reach this fallback (they throw earlier),
+   * and a fallback cell is never written back into the fresh cache.
+   */
+  private async freshLocated(
+    Location: typeof ExpoLocationTypes,
+  ): Promise<LocatedCell> {
+    const recent = await this.readLastKnown(Location);
+    if (
+      recent &&
+      Number.isFinite(recent.timestampMs) &&
+      this.now() - recent.timestampMs <= this.maxAgeMs
+    ) {
+      const cell = encodeGeohash(recent.latitude, recent.longitude, 5);
+      this.cached = { cell, atMs: this.now() };
+      return { cell, source: 'fresh' };
+    }
+    try {
+      const coords = await this.freshFix(Location);
+      const cell = encodeGeohash(coords.latitude, coords.longitude, 5);
+      this.cached = { cell, atMs: this.now() };
+      return { cell, source: 'fresh' };
+    } catch (error) {
+      const mapped =
+        error instanceof LocationError ? error : mapExpoError(error);
+      if (mapped.code !== 'timeout' && mapped.code !== 'unavailable') {
+        throw mapped;
+      }
+      const stale = await this.readLastKnown(Location);
+      if (stale) {
+        recordLocationEvent('fresh last-known');
+        return {
+          cell: encodeGeohash(stale.latitude, stale.longitude, 5),
+          source: 'last-known',
+        };
+      }
+      if (this.cached) {
+        recordLocationEvent('fresh last-known');
+        return { cell: this.cached.cell, source: 'last-known' };
+      }
+      throw mapped;
+    }
+  }
+
+  /**
+   * Background refresh for a cache hit past the revalidation threshold.
+   * Fire-and-forget and deduped: at most one refresh runs at a time,
+   * failures are logged and swallowed (the caller already got its
+   * cached cell), and a refresh only ever writes a current fix into
+   * the cache, never a stale one. The caller never awaits this.
+   */
+  private kickRevalidation(Location: typeof ExpoLocationTypes): void {
+    if (this.revalidating) return;
+    recordLocationEvent('revalidate started');
+    const run = (async (): Promise<void> => {
+      try {
+        const recent = await this.readLastKnown(Location);
+        let cell: string;
+        if (
+          recent &&
+          Number.isFinite(recent.timestampMs) &&
+          this.now() - recent.timestampMs <= this.maxAgeMs
+        ) {
+          cell = encodeGeohash(recent.latitude, recent.longitude, 5);
+        } else {
+          const coords = await this.freshFix(Location);
+          cell = encodeGeohash(coords.latitude, coords.longitude, 5);
+        }
+        this.cached = { cell, atMs: this.now() };
+        recordLocationEvent('revalidate ok');
+      } catch {
+        recordLocationEvent('revalidate failed');
+      }
+    })();
+    this.revalidating = run;
+    void run.finally(() => {
+      if (this.revalidating === run) this.revalidating = null;
+    });
+  }
+
+  async getLocatedCell(): Promise<LocatedCell> {
     const Location = this.loadLocation();
 
     // Permission is re-checked on EVERY call, before the cache is consulted:
@@ -196,7 +384,13 @@ export class ExpoLocationProvider implements LocationProvider {
 
     const cached = this.cached;
     if (cached && this.now() - cached.atMs <= this.maxAgeMs) {
-      return cached.cell;
+      // Stale-while-revalidate: serve at once, refresh in the background
+      // once the entry is past the threshold, so the next submit after
+      // expiry finds a fresh cache instead of a cold 15 second race.
+      if (this.now() - cached.atMs > REVALIDATE_AFTER_MS) {
+        this.kickRevalidation(Location);
+      }
+      return { cell: cached.cell, source: 'cached' };
     }
 
     // Dedupe concurrent resolutions: the cache above covers sequential
@@ -205,17 +399,13 @@ export class ExpoLocationProvider implements LocationProvider {
     // fix itself is shared, and the shared promise clears on settle so a
     // later failure can retry instead of reusing a rejection.
     if (this.inflight) return this.inflight;
-    const run = (async (): Promise<string> => {
-      let coords: { latitude: number; longitude: number };
+    const run = (async (): Promise<LocatedCell> => {
       try {
-        coords = await this.freshFix(Location);
+        return await this.freshLocated(Location);
       } catch (error) {
         if (error instanceof LocationError) throw error;
         throw mapExpoError(error);
       }
-      const cell = encodeGeohash(coords.latitude, coords.longitude, 5);
-      this.cached = { cell, atMs: this.now() };
-      return cell;
     })();
     this.inflight = run;
     try {
@@ -223,6 +413,10 @@ export class ExpoLocationProvider implements LocationProvider {
     } finally {
       if (this.inflight === run) this.inflight = null;
     }
+  }
+
+  async getCurrentCell(): Promise<string> {
+    return (await this.getLocatedCell()).cell;
   }
 }
 
@@ -300,15 +494,28 @@ export function requestLocationPermission(): Promise<boolean> {
 }
 
 /**
+ * The device's current geohash-5 cell, plus where it came from. The
+ * default provider tracks the source; test seam providers expose only
+ * getCurrentCell, so their cells report as 'fresh' (production always
+ * uses the Expo provider above, where the source is real).
+ */
+export async function getLocatedCell(): Promise<LocatedCell> {
+  const provider =
+    providerOverride ?? (defaultProvider ??= new ExpoLocationProvider());
+  if (provider instanceof ExpoLocationProvider) {
+    return provider.getLocatedCell();
+  }
+  return { cell: await provider.getCurrentCell(), source: 'fresh' };
+}
+
+/**
  * The device's current geohash-5 cell. Async: resolving a fix may prompt for
  * permission and wait on GPS. Fails loud with LocationError on any failure -
  * callers must surface the copy and keep the explicit-geohash5 override for
  * tests/dev.
  */
 export async function getLocationCell(): Promise<string> {
-  const provider =
-    providerOverride ?? (defaultProvider ??= new ExpoLocationProvider());
-  return provider.getCurrentCell();
+  return (await getLocatedCell()).cell;
 }
 
 /**
@@ -317,18 +524,32 @@ export async function getLocationCell(): Promise<string> {
  * same default provider publishPost uses, so by submit time the cache is
  * warm or the fix is already in flight and submit awaits that same
  * attempt through the provider's in-flight sharing. Never throws: a
- * warm-up failure stays silent here, submit retries and surfaces the
- * typed error then. When the grant is not already present, warming is
- * skipped entirely, so the OS permission dialog still only fires through
- * the composer's priming flow, never from opening the sheet. Nothing
- * about the fail-loud contract changes: no fake or default location, no
- * fix older than FIX_MAX_AGE_MS, same timeout and accuracy.
+ * warm-up failure is logged as an outcome line and submit retries and
+ * surfaces the typed error then. When the grant is not already present,
+ * warming is skipped entirely, so the OS permission dialog still only
+ * fires through the composer's priming flow, never from opening the
+ * sheet. Outcome lines carry outcome names only, never coordinates or
+ * cells, so the shared diagnostics log stays safe to share. Nothing
+ * about the fail-loud contract changes except the documented last-known
+ * fallback, which only runs after the fresh race fails.
  */
 export async function warmLocationCell(): Promise<void> {
   try {
     if ((await getLocationPermissionStatus()) !== 'granted') return;
-    await getLocationCell();
-  } catch {
-    // Silent by design: submit retries and reports the failure.
+    recordLocationEvent('warmup started');
+    const { source } = await getLocatedCell();
+    recordLocationEvent(
+      source === 'cached'
+        ? 'warmup served-cached'
+        : source === 'fresh'
+          ? 'warmup fresh-ok'
+          : 'warmup last-known',
+    );
+  } catch (error) {
+    recordLocationEvent(
+      error instanceof LocationError && error.code === 'unavailable'
+        ? 'warmup no-coordinates'
+        : 'warmup fresh-failed',
+    );
   }
 }

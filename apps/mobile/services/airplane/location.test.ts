@@ -85,15 +85,20 @@ describe('ExpoLocationProvider', () => {
     expect(Location.getCurrentPositionAsync).toHaveBeenCalledTimes(1);
   });
 
-  it('serves a fresh cached fix without hitting GPS again', async () => {    let now = 1_000_000;
+  it('serves a cached fix at once past the revalidation threshold and refreshes it in the background', async () => {
+    let now = 1_000_000;
     grantPermission();
     enableServices();
     fixAt();
     const provider = new ExpoLocationProvider({ now: () => now });
     await provider.getCurrentCell();
     now += FIX_MAX_AGE_MS - 1; // still within the documented window
+    // The serve itself waits for no fix: the cell comes from cache.
     await expect(provider.getCurrentCell()).resolves.toBe(BLR_CELL);
-    expect(Location.getCurrentPositionAsync).toHaveBeenCalledTimes(1);
+    // But past the 3 minute threshold the hit also kicked a background
+    // refresh, so the next call after expiry finds a fresh cache.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(Location.getCurrentPositionAsync).toHaveBeenCalledTimes(2);
   });
 
   it('never serves a fix past FIX_MAX_AGE_MS: it refetches', async () => {

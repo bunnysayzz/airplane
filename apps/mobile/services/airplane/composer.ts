@@ -17,7 +17,12 @@ import { getDevicePublicKey, signDeviceEvent } from './identity';
 import { getStore } from './store';
 import { notifyFeedListeners } from './feed';
 import { recordMessage } from './diagnostics';
-import { getLocationCell as resolveLocationCell } from './location';
+import {
+  getLocationCell as resolveLocationCell,
+  getLocatedCell,
+  LOCATION_SOURCE_TAG,
+  type LocationSource,
+} from './location';
 import {
   DISPLAY_NAME_TAG,
   getOwnDisplayName,
@@ -61,6 +66,12 @@ export interface PublishOpts {
    * and dropped when invalid, never allowed to fail the post.
    */
   displayName?: string | null;
+  /**
+   * Where the post's cell came from. Only 'last-known' adds a tag: the
+   * honest marker readers see on the card. Fresh and cached cells need
+   * no marker, and the geohash5 override path carries no source.
+   */
+  locationSource?: LocationSource;
 }
 
 /**
@@ -81,9 +92,15 @@ export async function getLocationCell(): Promise<string> {
  * signed claim and why older installs ignore it safely.
  */
 export function tagsForPublish(opts: PublishOpts): string[][] {
-  if (opts.displayName === undefined || opts.displayName === null) return [];
-  const normalized = normalizeDisplayName(opts.displayName);
-  return normalized === null ? [] : [[DISPLAY_NAME_TAG, normalized]];
+  const tags: string[][] = [];
+  if (opts.displayName !== undefined && opts.displayName !== null) {
+    const normalized = normalizeDisplayName(opts.displayName);
+    if (normalized !== null) tags.push([DISPLAY_NAME_TAG, normalized]);
+  }
+  if (opts.locationSource === 'last-known') {
+    tags.push([LOCATION_SOURCE_TAG, 'last-known']);
+  }
+  return tags;
 }
 
 /**
@@ -106,7 +123,17 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
   }
   // Location resolves here, OUTSIDE any stage wrapper: a LocationError must
   // propagate unwrapped so the UI maps it to location copy, never generic.
-  const geohash = opts.geohash5 ?? (await getLocationCell());
+  // The source travels with the post only as the last-known tag: a reader
+  // can tell the cell may be stale, and the tag is signed like any other.
+  let geohash: string;
+  let locationSource: LocationSource | undefined;
+  if (opts.geohash5) {
+    geohash = opts.geohash5;
+  } else {
+    const located = await getLocatedCell();
+    geohash = located.cell;
+    locationSource = located.source;
+  }
   // The display name resolves before signing, so it lands in the signed
   // tags. A KV failure here must not fail the post: the post simply
   // carries no name tag, and the memorable name still identifies it.
@@ -126,7 +153,7 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
       created_at: Math.floor(Date.now() / 1000),
       kind: EVENT_KIND_POST as EventKind,
       geohash,
-      tags: tagsForPublish({ ...opts, displayName }),
+      tags: tagsForPublish({ ...opts, displayName, locationSource }),
       content,
     });
   } catch (err) {

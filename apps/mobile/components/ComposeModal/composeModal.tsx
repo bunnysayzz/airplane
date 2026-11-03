@@ -29,6 +29,7 @@ import { captureError } from '../../src/sentry';
 import { publishPost, LocationError } from '../../services/airplane/composer';
 import { recordUiEvent } from '../../services/airplane/diagnostics';
 import {
+    failureCodeForPublishError,
     getLocationPermissionStatus,
     requestLocationPermission,
     warmLocationCell,
@@ -103,8 +104,16 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
     // The text the sheet opened with, to tell whether there's a draft to lose
     const initialText = useRef('');
 
-    // Swiping the sheet down closes it, asking first if there's a draft
+    // Swiping the sheet down closes it, asking first if there's a draft.
+    // While a publish is in flight the sheet never closes: discarding
+    // mid-spinner used to lose the draft and leave the publish outcome
+    // invisible, and the spinner always settles (15 second race or an
+    // error), so this guard never traps the user.
     const { drag, panHandlers, resetDrag } = useDragToDismiss(cancel => {
+        if (loading) {
+            cancel();
+            return;
+        }
         if (hasDraft({ text, initialText: initialText.current })) {
             dialog.alert(t('compose.discardTitle'), t('compose.discardMessage'), [
                 { text: t('compose.keepEditing'), style: 'cancel', onPress: () => cancel() },
@@ -126,8 +135,11 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
     });
 
     // Cancel and Android-back go through the same discard check as swipe-down,
-    // so a draft is never lost silently on any exit path.
+    // so a draft is never lost silently on any exit path. While a publish
+    // is in flight close is refused outright: the outcome dialog must
+    // stay reachable, and the draft must survive until it lands.
     const requestClose = () => {
+        if (loading) return;
         if (hasDraft({ text, initialText: initialText.current })) {
             dialog.alert(t('compose.discardTitle'), t('compose.discardMessage'), [
                 { text: t('compose.keepEditing'), style: 'cancel' },
@@ -199,6 +211,8 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             if (status === 'denied') {
                 // Already denied: re-firing the OS dialog is a no-op (and on
                 // Android a repeated nag), so go straight to the Settings path.
+                // Logged as a failure: the post genuinely did not go out.
+                recordUiEvent('compose:failed:permission-denied');
                 showLocationDeniedDialog();
                 return;
             }
@@ -220,9 +234,16 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
                         ],
                     );
                 });
-                if (!accepted) return;
+                if (!accepted) {
+                    // The user chose not to proceed: not a failure, but the
+                    // submit still needs a visible outcome in logs, or it
+                    // reads exactly like a failed submit with no line after.
+                    recordUiEvent('compose:declined');
+                    return;
+                }
                 if (!(await requestLocationPermission())) {
                     // Denied at the OS dialog: same graceful exit, no re-ask.
+                    recordUiEvent('compose:failed:permission-denied');
                     showLocationDeniedDialog();
                     return;
                 }
@@ -233,6 +254,12 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             onPublished?.(eventId);
             onClose();
         } catch (error: unknown) {
+            // Every publish failure lands here with its code, so a submit
+            // with no published line is diagnosable instead of ambiguous:
+            // timeout, permission-denied, services-disabled, unavailable,
+            // or failed for any other stage. The code is an outcome name
+            // only, never post text or coordinates.
+            recordUiEvent(`compose:failed:${failureCodeForPublishError(error)}`);
             console.error('Failed to publish post:', error);
             // Diagnostics only: reports the error name/message + publish
             // stage to Sentry. Never receives post text, location, pubkeys,

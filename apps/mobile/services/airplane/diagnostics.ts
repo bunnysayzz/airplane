@@ -577,6 +577,31 @@ function uiTargetLabel(targetId: string): string | null {
     return null;
 }
 
+/**
+ * Location outcome lines. The detail is a fixed outcome token from this
+ * union, never a coordinate, cell, or post text: the type makes it
+ * impossible for a call site to pass a coordinate through this function,
+ * so a location line in the shared log can never leak where the user is.
+ * Warm-up outcomes diagnose the publish cliff (a submit with no
+ * published line is otherwise indistinguishable from a pending submit);
+ * revalidate outcomes show whether the background refresh is running.
+ */
+export type LocationLogDetail =
+  | 'warmup started'
+  | 'warmup served-cached'
+  | 'warmup fresh-ok'
+  | 'warmup fresh-failed'
+  | 'warmup last-known'
+  | 'warmup no-coordinates'
+  | 'fresh last-known'
+  | 'revalidate started'
+  | 'revalidate ok'
+  | 'revalidate failed';
+
+export function recordLocationEvent(detail: LocationLogDetail): void {
+  logEvent('location', detail);
+}
+
 export function recordUiEvent(action: string, targetId?: string): void {
     if (!UI_ACTION_RE.test(action)) {
         logEvent('ui', 'tap invalid-action');

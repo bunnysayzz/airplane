@@ -87,6 +87,7 @@ import {
   recordDisplayNameFromTags,
   resolvePeerNames,
 } from './displayNames';
+import { locationSourceFromTags } from './location';
 
 /** Pure mapping: protocol FeedPost -> card view-model. Unit-tested.
  * worldConfirmed is looked up from storage (not in the signed payload).
@@ -105,6 +106,7 @@ export function toPostCardModel(
     authorLabel: authorLabelFor(post.event.pubkey),
     authorName: displayNameFromTags(post.event.tags) ?? memorableNameFor(post.event.pubkey),
     authorPubkeyHex: toHex(post.event.pubkey),
+    locationStale: locationSourceFromTags(post.event.tags) === 'last-known',
     body: post.event.content,
     geohash: post.event.geohash,
     views: post.views,
