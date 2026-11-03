@@ -158,6 +158,7 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
                         setLoadError(true);
                     }
                 }
+                return null;
             } finally {
                 setLoading(false);
                 setRefreshing(false);
