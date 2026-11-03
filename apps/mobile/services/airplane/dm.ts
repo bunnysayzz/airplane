@@ -158,12 +158,28 @@ export async function sendDm(peerHex: string, text: string): Promise<void> {
 }
 
 /**
+ * Launch start (rank 6): start the DM service at app launch, not only
+ * when Messages opens. getDmService calls start(), which subscribes
+ * plus one forced flush, and the service start also re-sends pending
+ * acks (rank 9). That is the whole launch cost: one subscribe plus
+ * one flush, plus the capped ack resend. This is not a background
+ * service: no new timer, no background task, and no periodic work is
+ * added. The outbox timer still arms only when a row is due.
+ * Callers must catch a rejected start: a launch failure must never
+ * break launch, and the next Messages open retries via getDmService.
+ */
+export async function startDmServiceAtLaunch(): Promise<void> {
+  await getDmService();
+}
+
+/**
  * Foreground flush for the outbox scheduler (P1-09): drains Sending and
  * Queued rows when the app returns to foreground, since timers do not
  * reliably fire while backgrounded. Forced, so rows queued with a future
- * backoff time still drain now that the user is back. Deliberately a
- * no-op when the service was never started, so a foreground event never
- * eagerly creates DM subscriptions for a user who never opened Messages.
+ * backoff time still drain now that the user is back. The never-started
+ * guard remains as a safety net for a failed launch start, but the
+ * normal path now starts at launch (rank 6), so foreground is a
+ * backstop, not the first start.
  */
 export async function flushDmOutboxIfStarted(force = false): Promise<void> {
   if (service) await service.flushOutbox(force);
@@ -174,6 +190,8 @@ export async function flushDmOutboxIfStarted(force = false): Promise<void> {
  * a backfill from the stored watermark, so messages and acks that arrived
  * while the app was backgrounded (or while a socket sat half-open) replay
  * instead of staying silently missed. Same no-op guard as the flush.
+ * The DM pool now also recovers half-open sockets and CLOSED
+ * subscriptions on its own (rank 4); this refresh stays as backstop.
  */
 export async function refreshDmSubscriptionIfStarted(): Promise<void> {
   if (service) await service.resubscribe();

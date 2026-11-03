@@ -24,8 +24,11 @@
 //             still drains when a transport returns, it does not Failed.
 //   Relayed   a relay accepted the envelope (OK). The relay holds it; the
 //             peer fetches it on subscribe/backfill. Not delivery: no peer
-//             has acked yet. Never retried (re-publishing the same event id
-//             is a no-op at the relay) and never Failed.
+//             has acked yet. Re-published only after a 24 hour ack window
+//             with no ack, at most 3 re-publishes, using the identical
+//             event id (a no-op at a relay that still holds it, and a
+//             recovery when the relay dropped it). Never Failed by time
+//             alone, and the label stays Relayed while the window runs.
 //   MeshSent  a BLE notify went out to at least one connected peer, but no
 //             peer app has acked yet. A notify resolving is a radio
 //             handoff, not delivery: the peer central may not have been
@@ -97,6 +100,20 @@ export interface DmMessageRow {
   attempts: number;
   /** Mesh sends without an ack yet (MeshSent rows only). */
   meshAttempts?: number;
+  /**
+   * Relay re-publishes already done for a Relayed row (rank 1). Absent
+   * on rows written before this field existed; those read as 0.
+   */
+  relayRepublishAttempts?: number;
+  /**
+   * Inbound rows only: true once an ack for this message left this
+   * device on at least one channel (relay OK or a BLE peer count above
+   * zero). This is not a sender confirmation: there is no ack of an
+   * ack, so the marker means the ack was sent, not that the sender
+   * processed it. Absent or false means the ack never left, so a
+   * service start re-sends it (rank 9).
+   */
+  ackSent?: boolean;
   nextAttemptAtMs: number;
   /**
    * Sender timestamp in epoch seconds (envelope.createdAt). Orders messages
@@ -319,6 +336,24 @@ export const DM_MESH_MAX_ATTEMPTS = 5;
 /** Backfill overlap on resubscribe, seconds: covers clock skew and relay
  *  event-time vs envelope-time drift. Dedup makes the replay safe. */
 export const DM_BACKFILL_OVERLAP_SEC = 300;
+/**
+ * Rank 1: ack window for a Relayed row, ms. A Relayed row is eligible
+ * for re-publish only once this window has passed with no ack. The
+ * row's nextAttemptAtMs carries the end of the current window, so the
+ * window survives restart through the store.
+ */
+export const DM_RELAYED_ACK_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Rank 1: re-publish attempts per Relayed row, after the first accept. */
+export const DM_RELAYED_MAX_REPUBLISH = 3;
+/**
+ * Rank 1: retry delay after a re-publish attempt that found no relay
+ * reachable at all. This does not burn the re-publish cap: an
+ * unreachable relay is not a relay judgement, so the next attempt
+ * stays due soon instead of waiting a full ack window.
+ */
+export const DM_RELAYED_UNREACHABLE_RETRY_MS = 120000;
+/** Rank 9: newest pending acks re-sent on one service start, cap. */
+export const DM_PENDING_ACK_RESEND_CAP = 100;
 
 /** Relay that always refuses (offline / relay down): outbox must queue, never drop. */
 export class FailingDmRelay implements DmRelayPort {
@@ -450,6 +485,11 @@ export class DmService {
     // Flush once on start, forced: rows queued before a restart must drain
     // now, not when their backoff timer would have fired.
     void this.flushOutbox(true).catch(() => {});
+    // Rank 9: acks lost before they left (app killed mid ack send, or
+    // both ack channels down) are re-sent now, before new traffic, so
+    // a sender stuck on Relayed or Failed can still upgrade on a late
+    // ack. Best effort and capped; acks that already left are skipped.
+    void this.resendPendingAcks().catch(() => {});
     // Backfill refinement, after the default subscribe above is live: when
     // the stored watermark is older than the relay default 24 h window,
     // re-subscribe from the watermark so a long absence still replays.
@@ -507,8 +547,9 @@ export class DmService {
 
   /**
    * One flush scheduler: a single timer for the earliest nextAttemptAtMs
-   * across Sending, Queued, and MeshSent rows, re-armed when the outbox
-   * changes (send, retry, delete) or when a flush attempts a row.
+   * across Sending, Queued, MeshSent, and due-for-republish Relayed
+   * rows, re-armed when the outbox changes (send, retry, delete) or
+   * when a flush attempts a row.
    * Clearing before and after the store reads keeps exactly one timer
    * live even when schedule calls overlap. Blocked conversations are
    * skipped, matching flushOutbox. Timers do not reliably fire while
@@ -528,7 +569,13 @@ export class DmService {
       const messages = await this.store.listMessages(conv.peerHex);
       for (const m of messages) {
         if (m.direction !== 'out') continue;
-        if (m.status !== 'Sending' && m.status !== 'Queued' && m.status !== 'MeshSent') continue;
+        // Relayed rows arm the timer for their re-publish window only
+        // while re-publishes remain; a capped Relayed row never arms.
+        if (m.status === 'Relayed') {
+          if ((m.relayRepublishAttempts ?? 0) >= DM_RELAYED_MAX_REPUBLISH) continue;
+        } else if (m.status !== 'Sending' && m.status !== 'Queued' && m.status !== 'MeshSent') {
+          continue;
+        }
         if (earliest === null || m.nextAttemptAtMs < earliest) earliest = m.nextAttemptAtMs;
       }
     }
@@ -544,6 +591,11 @@ export class DmService {
       },
       Math.max(0, earliest - now),
     );
+    // A Relayed re-publish window is 24 hours: that timer must not
+    // hold a Node process (tests, scripts) open for a day after the
+    // work is done. In React Native timers have no unref, so this is
+    // a no-op on device, where the timer still fires as before.
+    (this.flushTimer as unknown as { unref?: () => void }).unref?.();
   }
 
   /** Open (or create) a conversation with a peer. Own-initiated = inbox, never requests. */
@@ -621,11 +673,14 @@ export class DmService {
 
   /**
    * Flush the outbox. Per-conversation FIFO: within one conversation the
-   * oldest due message goes first and a failure stops that conversation's
-   * queue (other conversations are unaffected). Conversations are
-   * independent, so they flush concurrently (a slow first conversation
-   * no longer delays every other one). Concurrent callers share a single
-   * in-flight run, so two flushes can never publish the same row twice.
+   * oldest due message goes first and a transient failure stops that
+   * conversation's queue (other conversations are unaffected). A row
+   * that turns terminally Failed inside this flush does not block
+   * later rows to the same peer (rank 8): the loop continues past it.
+   * Conversations are independent, so they flush concurrently (a slow
+   * first conversation no longer delays every other one). Concurrent
+   * callers share a single in-flight run, so two flushes can never
+   * publish the same row twice.
    * Never silently drops: a message that exhausts its attempts becomes
    * Failed, a message with no transport becomes Queued, and a message a
    * relay accepted becomes Relayed, never Failed.
@@ -633,6 +688,9 @@ export class DmService {
    * on start, foreground, connectivity return, and BLE peer arrival, so a
    * transport returning early drains the queue instead of waiting out
    * the backoff timer. Timer flushes stay non-force (due rows only).
+   * Relayed rows are the one exception to force: a Relayed row is
+   * re-published only when its 24 hour ack window has passed (rank 1),
+   * never early on a forced flush.
    */
   async flushOutbox(force = false): Promise<void> {
     if (this.flushInFlight) return this.flushInFlight;
@@ -657,7 +715,17 @@ export class DmService {
         let changed = false;
         for (const m of messages) {
           if (m.direction !== 'out') continue;
-          if (m.status === 'Relayed' || m.status === 'Delivered' || m.status === 'Failed') continue;
+          if (m.status === 'Delivered' || m.status === 'Failed') continue;
+          if (m.status === 'Relayed') {
+            // Rank 1: re-publish only when the ack window has passed
+            // and re-publishes remain. Force never pulls this forward.
+            // A Relayed row never head-blocks later rows: the loop
+            // continues past it whatever the re-publish outcome is.
+            if ((m.relayRepublishAttempts ?? 0) >= DM_RELAYED_MAX_REPUBLISH) continue;
+            if (m.nextAttemptAtMs > now) continue;
+            if (await this.tryRepublishRelayed(m, now)) changed = true;
+            continue;
+          }
           if (m.status === 'MeshSent' && (m.meshAttempts ?? 0) >= DM_MESH_MAX_ATTEMPTS) {
             // Mesh sends exhausted without an ack: Failed, and the queue
             // continues past it (it is terminal for this row, not a head
@@ -672,10 +740,16 @@ export class DmService {
           // survives to re-seal from: tryPublish marks it Failed, and the
           // queue must continue past it instead of head-blocking on a
           // dead row. A transient publish failure still stops this
-          // conversation's queue.
+          // conversation's queue. Rank 8: a row that turns Failed
+          // inside tryPublish is terminal, so it also continues past
+          // instead of blocking later rows forever.
           const result = await this.tryPublish(m, now);
           changed = true;
-          if (!result.ok && !result.envelopeMissing) break; // FIFO head-of-line
+          // tryPublish mutates m.status in place; read it through the
+          // full union type, since the narrowed loop type above no
+          // longer covers the Failed value tryPublish can set.
+          const statusAfter = m.status as DmDelivery;
+          if (!result.ok && !result.envelopeMissing && statusAfter !== 'Failed') break;
         }
         return changed;
       }),
@@ -689,6 +763,52 @@ export class DmService {
     // re-arm forever without progress; the flush that made the timer
     // stale already re-armed for the new earliest attempt.
     if (changed) void this.scheduleFlush();
+  }
+
+  /**
+   * Rank 1: re-publish one Relayed row over relay only, with the
+   * identical stored envelope, so the relay event id is identical too
+   * (the pool caches the event by envelope bytes). No mesh fallback
+   * here: a Relayed row already reached a relay once, and a mesh
+   * re-send would downgrade a relay handoff to a radio handoff.
+   * Returns true when the row changed. A missing envelope is not
+   * re-sealed: a fresh envelope would carry a new delivery id and
+   * would not be the same send, so the row stays Relayed untouched.
+   * Unread counts cannot move on a re-publish: the recipient dedups
+   * by delivery id (persisted seen set), so a replay renders once
+   * with one unread increment, and a re-publish of an already stored
+   * message renders zero times.
+   */
+  private async tryRepublishRelayed(m: DmMessageRow, now: number): Promise<boolean> {
+    const envelope = m.envelope ?? this.outboxEnvelopes.get(m.id);
+    if (!envelope) return false;
+    let relayRes: DmRelayPublishResult = { accepted: false, rejected: false };
+    try {
+      relayRes = await this.relay.publish(envelope);
+    } catch {
+      relayRes = { accepted: false, rejected: false };
+    }
+    if (relayRes.accepted) {
+      m.status = 'Relayed';
+      m.relayRepublishAttempts = (m.relayRepublishAttempts ?? 0) + 1;
+      m.nextAttemptAtMs = now + DM_RELAYED_ACK_WINDOW_MS;
+      await this.store.updateMessage(m);
+      return true;
+    }
+    if (relayRes.rejected) {
+      // A relay judgement burns one re-publish and waits a fresh
+      // window: retrying the same rejected envelope at once helps no
+      // one, and the cap still bounds the total attempts.
+      m.relayRepublishAttempts = (m.relayRepublishAttempts ?? 0) + 1;
+      m.nextAttemptAtMs = now + DM_RELAYED_ACK_WINDOW_MS;
+      await this.store.updateMessage(m);
+      return true;
+    }
+    // Unreachable: no relay judgement, so the cap is not burned. The
+    // row stays Relayed and retries soon, on the next due flush.
+    m.nextAttemptAtMs = now + DM_RELAYED_UNREACHABLE_RETRY_MS;
+    await this.store.updateMessage(m);
+    return true;
   }
 
   private async tryPublish(
@@ -728,6 +848,8 @@ export class DmService {
     }
     if (relayRes.accepted) {
       m.status = 'Relayed';
+      m.relayRepublishAttempts = 0;
+      m.nextAttemptAtMs = now + DM_RELAYED_ACK_WINDOW_MS;
       await this.store.updateMessage(m);
       return { ok: true, envelopeMissing: false };
     }
@@ -782,6 +904,7 @@ export class DmService {
     m.status = 'Sending';
     m.attempts = 0;
     m.meshAttempts = 0;
+    m.relayRepublishAttempts = 0;
     m.nextAttemptAtMs = this.now();
     await this.store.updateMessage(m);
     this.emit();
@@ -860,7 +983,7 @@ export class DmService {
         lastDirection: 'in',
       });
       this.emit();
-      if (deliveryId !== undefined) void this.sendAck(senderHex, envelope, deliveryId).catch(() => {});
+      if (deliveryId !== undefined) void this.sendAckForRow(row).catch(() => {});
       return 'request';
     }
     const next: DmConversationRow = {
@@ -874,7 +997,7 @@ export class DmService {
     if (!existing.muted) next.unread = existing.unread + 1;
     await this.store.upsertConversation(next);
     this.emit();
-    if (deliveryId !== undefined) void this.sendAck(senderHex, envelope, deliveryId).catch(() => {});
+    if (deliveryId !== undefined) void this.sendAckForRow(row).catch(() => {});
     return existing.state === 'request' ? 'request' : 'inbox';
   }
 
@@ -886,22 +1009,74 @@ export class DmService {
    * resubscribe backfill can still surface a re-sent ack. Never sent for
    * blocked senders (receiveEnvelope drops those before this point) and
    * never a read receipt: it fires on store, not on thread open.
+   * Returns true when the ack left on at least one channel (relay OK
+   * or a BLE peer count above zero). A false return means the ack
+   * never left, so the row stays pending for resendPendingAcks.
    */
-  private async sendAck(senderHex: string, envelope: DmEnvelope, deliveryId: string): Promise<void> {
+  private async sendAck(senderHex: string, envelope: DmEnvelope, deliveryId: string): Promise<boolean> {
     const proof = dmAckProofForEnvelope(this.ownKeys().secretKey, envelope, deliveryId);
-    if (!proof) return;
+    if (!proof) return false;
     const ackEnvelope = sealDm(JSON.stringify({ dmAckFor: deliveryId, proof }), this.ownMeshHex(), senderHex);
+    let sent = false;
     try {
-      await this.relay.publishAck(ackEnvelope);
+      const res = await this.relay.publishAck(ackEnvelope);
+      if (res.accepted) sent = true;
     } catch {
       // Ack loss is not receipt loss: the message is already stored here.
     }
     if (this.mesh) {
       try {
-        await this.mesh.publish(ackEnvelope, 'ack');
+        const peers = await this.mesh.publish(ackEnvelope, 'ack');
+        if (peers > 0) sent = true;
       } catch {
         // Same as above: best-effort only.
       }
+    }
+    return sent;
+  }
+
+  /**
+   * Send the ack for one stored inbound row and persist the outcome.
+   * Only a sent ack marks the row: a failed ack leaves ackSent false,
+   * so a later service start re-sends it instead of assuming it left.
+   */
+  private async sendAckForRow(row: DmMessageRow): Promise<void> {
+    if (row.direction !== 'in' || row.deliveryId === undefined || !row.envelope) return;
+    const sent = await this.sendAck(row.peerHex, row.envelope, row.deliveryId);
+    if (sent && row.ackSent !== true) {
+      row.ackSent = true;
+      await this.store.updateMessage(row);
+    }
+  }
+
+  /**
+   * Rank 9: on service start, re-send acks for stored inbound messages
+   * whose ack never left this device. No wire change: the re-sent ack
+   * is the same kind 1060 sealed rumor, and the sender upgrades on a
+   * late ack, including from Failed. Bounded: newest pending acks
+   * first, capped per start, blocked conversations skipped, rows
+   * without a delivery id skipped (they cannot be acked), and rows
+   * whose ack already left skipped. A re-sent ack that still fails
+   * stays pending for the next start; it never blocks receipt, and
+   * it never touches unread counts (the message was already counted
+   * once at store time, and dedup keeps a replay from counting again).
+   */
+  async resendPendingAcks(): Promise<void> {
+    const convs = await this.store.listConversations();
+    const pending: DmMessageRow[] = [];
+    for (const conv of convs) {
+      if (conv.state === 'blocked') continue;
+      const messages = await this.store.listMessages(conv.peerHex);
+      for (const m of messages) {
+        if (m.direction !== 'in') continue;
+        if (m.deliveryId === undefined || !m.envelope) continue;
+        if (m.ackSent === true) continue;
+        pending.push(m);
+      }
+    }
+    pending.sort((a, b) => b.createdAtMs - a.createdAtMs);
+    for (const row of pending.slice(0, DM_PENDING_ACK_RESEND_CAP)) {
+      await this.sendAckForRow(row);
     }
   }
 

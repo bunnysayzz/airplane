@@ -32,10 +32,15 @@
 //   backfill from the last envelope seen (minus a 300 s overlap), so gaps
 //   are fetched, not lost. EOSE is never a gate: EVENT frames are
 //   delivered the moment they arrive, before or after any EOSE frame.
-// * a half-open socket (neither error nor close, just silent) is NOT
-//   detected here: there is no ping in v1. Recovery is the app layer
-//   re-subscribing on foreground and on connectivity return, which
-//   re-sends the REQ with the same backfill.
+// * a half-open socket (neither error nor close, just silent) is
+//   detected by a 90 second silence timer, ported from the post
+//   transport: any inbound frame resets it, and a silent socket is
+//   force-closed and reconnected, which re-sends the REQ with
+//   backfill. No ping is attempted: React Native WebSocket exposes
+//   no ping, so the post transport ping grace is deliberately not
+//   ported. A relay CLOSED for the live subscription triggers an
+//   immediate resubscribe on the same sockets, also with backfill.
+//   The app layer foreground refresh remains as a backstop.
 // * NIP-42 AUTH is not answered here: a relay that challenges with AUTH
 //   simply never delivers on that socket, and the other relays still do.
 //   Answering challenges is a follow-up (it needs a stable signing
@@ -57,6 +62,9 @@ export const DM_EVENT_KIND = 1059;
  */
 export const DM_ACK_EVENT_KIND = 1060;
 
+/** Silence interval for DM pool sockets, ms. Ported from the post transport. */
+export const DM_SILENCE_TIMEOUT_MS = 90000;
+
 export interface WsDmRelayOpts {
   relays?: string[];
   wsFactory?: (url: string) => WebSocketLike;
@@ -66,6 +74,12 @@ export interface WsDmRelayOpts {
   reconnectMs?: number;
   /** Cap for the exponential reconnect backoff, ms. Default 30000. */
   reconnectMaxMs?: number;
+  /**
+   * Silence interval, ms. Default 90000. A socket that receives no
+   * frame for this long is force-closed and reconnected. No ping is
+   * sent first: React Native WebSocket exposes no ping.
+   */
+  silenceTimeoutMs?: number;
   /** Allow private-network relay targets (explicit user-added list). */
   allowPrivateRelays?: boolean;
 }
@@ -178,6 +192,11 @@ export class WsDmRelay implements DmRelayPort {
   private readonly publishTimeoutMs: number;
   private readonly reconnectMs: number;
   private readonly reconnectMaxMs: number;
+  private readonly silenceTimeoutMs: number;
+  /** Last inbound frame time per relay (liveness proof for silence detection). */
+  private readonly lastFrameAtMs = new Map<string, number>();
+  /** Armed silence timer per relay. */
+  private readonly silenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly pool = new Map<string, PoolEntry>();
   private readonly publishWaiters = new Set<PublishWaiter>();
   /**
@@ -212,6 +231,78 @@ export class WsDmRelay implements DmRelayPort {
     this.publishTimeoutMs = opts.publishTimeoutMs ?? 5000;
     this.reconnectMs = opts.reconnectMs ?? 1000;
     this.reconnectMaxMs = opts.reconnectMaxMs ?? 30000;
+    this.silenceTimeoutMs = opts.silenceTimeoutMs ?? DM_SILENCE_TIMEOUT_MS;
+  }
+
+  /** Arm (or re-arm) the silence timer for one relay. */
+  private armSilenceTimer(url: string): void {
+    const old = this.silenceTimers.get(url);
+    if (old) clearTimeout(old);
+    const timer = setTimeout(() => {
+      this.silenceTimers.delete(url);
+      this.onSilenceTimeout(url);
+    }, this.silenceTimeoutMs);
+    // In Node (tests) an unrefed timer must not hold the process open
+    // for the full silence window after a test ends. React Native
+    // timers have no unref, so this is a no-op there.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.silenceTimers.set(url, timer);
+  }
+
+  private clearSilenceTimer(url: string): void {
+    const timer = this.silenceTimers.get(url);
+    if (timer) {
+      clearTimeout(timer);
+      this.silenceTimers.delete(url);
+    }
+  }
+
+  /**
+   * A relay went silent: force-close and let the normal drop path
+   * reconnect it (which re-sends the subscription with backfill).
+   * No ping grace: the platform WebSocket cannot send a ping, so a
+   * grace would only delay the recovery the timer exists to provide.
+   * A frame that arrived after the timer was armed but before it
+   * fired re-arms instead of closing a live socket.
+   */
+  private onSilenceTimeout(url: string): void {
+    const entry = this.pool.get(url);
+    if (!entry || !entry.ws) return;
+    const last = this.lastFrameAtMs.get(url) ?? 0;
+    if (Date.now() - last < this.silenceTimeoutMs) {
+      this.armSilenceTimer(url);
+      return;
+    }
+    const ws = entry.ws;
+    try {
+      ws.close();
+    } catch {
+      // fall through to the direct drop below
+    }
+    // If close did not fire onclose (some implementations do not),
+    // run the drop path directly so the relay is not left stale.
+    // When onclose already ran, entry.ws is null and drop is a no-op
+    // for this socket, because drop checks entry.ws identity first.
+    // The drop closure lives inside connect(); this method therefore
+    // only closes here, and the reconnect is driven by onclose or by
+    // the next publish/subscribe connect. To guarantee reconnect
+    // even without onclose, re-drive connect through the pool entry
+    // state below.
+    if (entry.ws === ws) {
+      entry.state = 'closed';
+      entry.ws = null;
+      this.clearSilenceTimer(url);
+      for (const w of [...entry.openWaiters]) w();
+      entry.openWaiters.clear();
+      for (const waiter of [...this.publishWaiters]) {
+        if (waiter.done || waiter.settled.has(url)) continue;
+        waiter.settled.set(url, 'failed');
+        if (waiter.settled.size >= this.relays.length) {
+          waiter.resolve({ accepted: false, rejected: false });
+        }
+      }
+      if (this.subActive) this.scheduleReconnect(url);
+    }
   }
 
   /** Publish to relays in parallel; true when ANY relay answers OK. */
@@ -366,14 +457,22 @@ export class WsDmRelay implements DmRelayPort {
       return entry;
     }
     entry.ws = ws;
+    this.lastFrameAtMs.set(url, Date.now());
+    this.armSilenceTimer(url);
     ws.onopen = () => {
       entry.state = 'open';
       entry.reconnectAttempts = 0;
+      this.lastFrameAtMs.set(url, Date.now());
+      this.armSilenceTimer(url);
       for (const w of [...entry.openWaiters]) w();
       entry.openWaiters.clear();
       if (this.subActive) this.sendSubscription(url);
     };
     ws.onmessage = ev => {
+      // Any frame proves the socket is alive: reset the silence window
+      // before parsing, so a malformed frame still counts as liveness.
+      this.lastFrameAtMs.set(url, Date.now());
+      this.armSilenceTimer(url);
       try {
         const data = JSON.parse(String(ev.data)) as unknown[];
         if (data[0] === 'OK' && typeof data[1] === 'string') {
@@ -413,7 +512,15 @@ export class WsDmRelay implements DmRelayPort {
             }
           }
         }
-        // EOSE, NOTICE, CLOSED, AUTH: never gate delivery, never crash.
+        if (data[0] === 'CLOSED' && this.subActive && data[1] === this.subId) {
+          // The relay killed the live subscription: resubscribe at once
+          // on every open socket. sendSubscription replays from the
+          // last envelope or ack seen minus overlap, so the gap
+          // replays instead of staying missed. This is the immediate
+          // recovery; the app foreground refresh stays as backstop.
+          for (const relayUrl of this.relays) this.sendSubscription(relayUrl);
+        }
+        // EOSE, NOTICE, AUTH: never gate delivery, never crash.
       } catch {
         // Malformed relay frame: ignore, never crash.
       }
@@ -422,6 +529,7 @@ export class WsDmRelay implements DmRelayPort {
       if (entry.ws !== ws) return;
       entry.state = 'closed';
       entry.ws = null;
+      this.clearSilenceTimer(url);
       for (const w of [...entry.openWaiters]) w();
       entry.openWaiters.clear();
       // Close the dead socket itself (a second close is a no-op, and a
