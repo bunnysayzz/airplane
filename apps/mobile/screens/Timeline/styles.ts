@@ -16,6 +16,19 @@ export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     list: {
         flex: 1,
     },
+    // Saved posts banner: a plain strip above the list, shown only
+    // while the live result is empty and saved cards are on screen.
+    cachedBanner: {
+        paddingVertical: 8,
+        paddingHorizontal: 16,
+        alignItems: 'center',
+        backgroundColor: colors.cardBackground,
+    },
+    cachedBannerText: {
+        color: colors.textSecondary,
+        fontSize: 13,
+        textAlign: 'center',
+    },
     // The "N new posts" pill floats over the top of the list
     newPostsWrap: {
         position: 'absolute',

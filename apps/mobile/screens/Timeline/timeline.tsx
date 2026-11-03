@@ -4,6 +4,14 @@ import { FlashList, FlashListRef } from '@shopify/flash-list';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { listFeedPage, subscribeFeed, type FeedPageCursor } from '../../services/airplane/feed';
+import {
+    hasCachedPostsForCells,
+    loadFeedCache,
+    resolveFeedDisplay,
+    saveFeedCache,
+    type FeedDisplayState,
+} from '../../services/airplane/feedCache';
+import { getKv } from '../../services/airplane/kv';
 import { toggleReshare } from '../../services/airplane/reshares';
 import { toggleStar } from '../../services/airplane/stars';
 import { trackViewability } from '../../services/airplane/viewTracker';
@@ -30,7 +38,8 @@ export const scrollListToTop = async (list: Pick<FlashListRef<PostCardModel>, 's
 interface TimelineProps {
     // The viewer's in-scope cells (own geohash-5 cell + 8 neighbours),
     // resolved by the hosting tab without prompting. Empty = no scope yet
-    // (location not granted), so the feed is empty until permission exists.
+    // (location not granted). An empty scope no longer wipes the feed:
+    // the persistent cache still shows saved posts (see feedCache).
     cells: string[];
     onPostPress?: (eventId: string) => void;
     // Opens the compose sheet (wired by the tab that hosts the timeline).
@@ -70,6 +79,34 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
     // boundary, so the cursor must never be derived from the last
     // visible card.
     const nextCursorRef = useRef<FeedPageCursor | null>(null);
+    // Persistent feed cache (see feedCache.ts): the last loaded cards,
+    // kept in a ref so an in flight load can fall back to them even
+    // before a state update lands. An empty live result never wipes
+    // the list: it shows these saved cards instead, with a banner.
+    const cachedRef = useRef<PostCardModel[]>([]);
+    const [displayState, setDisplayState] = useState<FeedDisplayState>('live');
+
+    // Load the saved feed once on mount. If the live query has not
+    // produced cards yet, the saved cards show immediately, so the
+    // feed is usable offline, with no peers, and across a relaunch.
+    useEffect(() => {
+        let alive = true;
+        loadFeedCache(getKv())
+            .then(cards => {
+                if (!alive) return;
+                cachedRef.current = cards;
+                if (cards.length > 0 && postsRef.current.length === 0) {
+                    setPosts(cards);
+                    setDisplayState('cached');
+                }
+            })
+            .catch(() => {
+                // Cache load failure leaves the live query as the source.
+            });
+        return () => {
+            alive = false;
+        };
+    }, []);
 
     const load = useCallback(
         async (mode: 'initial' | 'refresh' | 'more', cursor?: FeedPageCursor | null) => {
@@ -88,15 +125,38 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
                 });
                 nextCursorRef.current = page.nextCursor;
                 setHasMore(page.nextCursor !== null);
-                setPosts(current =>
-                    mode === 'more'
-                        ? [...current, ...page.cards.filter(c => !current.some(p => p.eventId === c.eventId))]
-                        : page.cards,
-                );
+                if (mode === 'more') {
+                    setPosts(current => [
+                        ...current,
+                        ...page.cards.filter(c => !current.some(p => p.eventId === c.eventId)),
+                    ]);
+                } else {
+                    // Feed cache: a live result merges at top and is
+                    // saved; an empty result keeps the current or saved
+                    // cards instead of blanking the list (see feedCache).
+                    const display = resolveFeedDisplay(page.cards, cachedRef.current, postsRef.current);
+                    setPosts(display.posts);
+                    setDisplayState(display.state);
+                    if (display.cacheToSave) {
+                        cachedRef.current = display.cacheToSave;
+                        void saveFeedCache(getKv(), display.cacheToSave);
+                    }
+                }
                 if (mode !== 'more') setPendingCount(0);
             } catch (error) {
                 console.error('Failed to load feed:', error);
-                if (mode !== 'more') setLoadError(true);
+                if (mode !== 'more') {
+                    // A failed query also falls back to saved cards
+                    // instead of an error screen when cards exist.
+                    if (postsRef.current.length > 0) {
+                        setDisplayState('cached');
+                    } else if (cachedRef.current.length > 0) {
+                        setPosts(cachedRef.current);
+                        setDisplayState('cached');
+                    } else {
+                        setLoadError(true);
+                    }
+                }
             } finally {
                 setLoading(false);
                 setRefreshing(false);
@@ -180,7 +240,20 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
     }, []);
     const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 60 });
 
-    const emptyMessage = t('timeline.empty');
+    // Three honest empty and cached states, kept distinct:
+    // - no scope yet (cells empty) and nothing saved: genuinely empty,
+    //   nothing was ever loaded here.
+    // - scope resolved (cells non empty) but no posts and nothing saved:
+    //   a new area with no posts yet.
+    // - saved cards showing while the live result is empty: cached
+    //   content, labelled as saved, never presented as live local posts.
+    //   When none of the saved cards belong to the current cells, the
+    //   banner says so instead of implying they are from this area.
+    const emptyMessage = cells.length === 0 ? t('timeline.empty') : t('timeline.emptyNewCell');
+    const cachedBannerText =
+        displayState === 'cached' && posts.length > 0 && cells.length > 0 && !hasCachedPostsForCells(posts, cells)
+            ? t('timeline.showingSavedOtherArea')
+            : t('timeline.showingSaved');
 
     const renderFooter = () => {
         if (!loadingMore) return null;
@@ -249,6 +322,11 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
                 </View>
             ) : (
                 <View style={styles.list}>
+                    {displayState === 'cached' && posts.length > 0 && (
+                        <View style={styles.cachedBanner}>
+                            <Text style={styles.cachedBannerText}>{cachedBannerText}</Text>
+                        </View>
+                    )}
                     {pendingCount > 0 && (
                         <NewPostsPill
                             label={tn('timeline.newPosts', pendingCount)}
