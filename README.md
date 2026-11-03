@@ -20,13 +20,19 @@ the network is gone.
 Posts are ranked by **views, not likes**: what people actually see rises,
 what nobody sees dies out.
 
-This README describes the app after the six track batch of November 2026:
-DM transport parity, feed new posts at top, private Saved messages,
-DM and feed polish, identity and display names, and the persistent feed
-cache. Those six branches merge first, in the order listed in
-[Merge order](#merge-order), and this docs branch merges last. Until a
-release is cut from the merged tree, the release APK does not contain
-this batch yet.
+This README describes the merged tree on main: the six track batch of
+November 2026 (DM transport parity, feed new posts at top, private
+Saved messages, DM and feed polish, identity and display names, and
+the persistent feed cache) plus the transport batch that followed it
+(BLE flood forwarding for posts, the durable post outbox, relay-first
+fanout with World confirmed on query hit only, DM service start at
+launch, DM Relayed re-publish, DM silence and head-of-line fixes,
+unread counts, and the last-known location fallback). No release has
+been cut from this merged tree yet, so no release APK contains this
+batch yet, and no version number is quoted for it here. Device proof
+for this batch is still pending: the two-phone checks below are the
+gate, and nothing in this README counts as proven until those checks
+pass on real phones.
 
 ## One feed, hybrid transport
 
@@ -40,14 +46,42 @@ copy of it reaches the relay network:
 - **World-confirmed** posts show a tiny 🌐. The icon means something
   because it is rare.
 
-Every post is signed on device with your Ed25519 key and sent over every
-transport available at the same time:
+The globe appears on a query hit only, never instantly on a relay OK.
+A relay OK means the relay accepted the envelope; it does not prove
+the relay still holds it. After a relay win, the app runs a WorldSync
+pass at once (instead of waiting up to 60 seconds for the next timer
+tick): the pass re-pushes the still-unconfirmed post and queries
+relays for it, and only a query hit confirms it. A relay that OKs
+then drops the event leaves no globe, and the post stays unconfirmed
+for later passes to re-push. The same rule covers direct wins: the
+globe arrives one query round trip later, by design. A relay OK is
+acceptance, not delivery, and never by itself a globe.
 
-- **BLE mesh**: always on. Phones relay posts hop by hop (controlled
-  flood, TTL 7) whether or not the internet exists.
-- **Nostr relays**: when the phone is online (tracked with NetInfo, no
-  Google Play Services). The app pushes unsynced posts, pulls new events,
-  and checks relays for its unconfirmed event IDs.
+Every post is signed on device with your Ed25519 key and sent through
+the ordered router, relay first, not over every transport at once:
+
+- **Nostr relays first**: when the phone is online (tracked with
+  NetInfo, no Google Play Services), the router tries relays first
+  with a 5 second first-OK deadline (1500 ms while the network state
+  is still unknown, so a dead hotspot cannot burn the full deadline
+  before mesh fallback). A relay win means BLE is never used at
+  publish time, even to a connected nearby peer. The app pushes
+  unsynced posts, pulls new events, and checks relays for its
+  unconfirmed event IDs.
+- **BLE mesh fallback**: when relays do not win, the post goes over
+  BLE to connected peers. BLE runs whenever the radio is up,
+  independent of the internet. Phones forward posts hop by hop
+  (controlled flood, TTL 7, see below), whether or not the internet
+  exists.
+- **Queued when neither can send**: a post that reaches no transport
+  is not lost. It is saved locally and queued in the durable post
+  outbox (see Features), and it drains later over BLE or relay.
+
+A hotspot is not a separate transport. A phone sharing its connection
+is just internet reachability (NetInfo) plus BLE: if the hotspot has
+upstream data, the relay leg runs; if it has none, reachability
+reports offline and the relay leg is skipped, exactly as on a dead
+Wi-Fi network.
 
 Dedup is by event ID (SHA-256 of the signed bytes), identical across BLE
 and Nostr, so a post arriving twice is one post.
@@ -80,14 +114,68 @@ broadcast), so it was removed.
   (ageHours+2)^1.5`. Log scaling dampens Sybil gaming; one countable
   view per (device, post, UTC day).
 - **Offline mesh relay**: BLE GATT controlled flood (TTL 7 hops, 50 to
-  500 ms relay jitter, 10k-entry seen-cache dedup), fragmented into
-  frames of at most 469 bytes.
-- **Store-and-forward**: posts live on device in SQLite; your post
-  propagates when peers show up. Being alone is the normal case, not an
-  error.
+  500 ms sampled relay jitter, 10k-entry seen-cache dedup), fragmented into
+  frames of at most 469 bytes. Flood forwarding is real: a bridge phone
+  that receives a post over BLE re-broadcasts it after one sampled
+  jitter to all connected peers except the peer it came from, with the
+  TTL decremented first and the forward dropped when the decremented
+  TTL reaches 0. The seen set is checked before forwarding, so a
+  duplicate overheard before the jitter fires cancels the scheduled
+  forward. Only kinds 1, 2, and 3 flood (posts, view receipts,
+  tombstones); stars and reshares are origin broadcast only and are
+  never re-flooded by a bridge. DM frames never forward: the feed
+  reassembler accepts only feed-channel frames, so a DM frame is
+  ignored before buffering and can never be flooded onward. The frame
+  format is unchanged, so older installs receive a forwarded post
+  exactly like an origin post but do not forward it onward; a mixed
+  network degrades gracefully instead of looping. See
+  [docs/spec/flood.md](docs/spec/flood.md).
+- **Store-and-forward, with a durable outbox**: posts live on device
+  in SQLite; your post propagates when peers show up. Being alone is
+  the normal case, not an error. Own posts are also queued in the
+  `post_outbox` table at save time, before fanout runs, so a kill
+  during fanout still leaves a retryable row. The outbox holds
+  delivery state only, never unsaved text. It drains over BLE on peer
+  arrival, at transport start, and on foreground radio re-validation,
+  oldest first; relay retry stays with WorldSync, which runs on a
+  fixed 60 second tick plus connectivity return, foreground return,
+  and immediately after a relay win, and drains unconfirmed posts
+  oldest first (at most 50 per pass). The drain never sends over BLE
+  first while online, because that would break relay-first order;
+  World confirmation deletes the outbox row.
+- **Honest card states, and a saved toast**: after publish, the toast
+  says "Post saved". That confirms the local save only, not delivery.
+  Delivery lives on the feed card: the globe when a relay query hit
+  confirms World (see above), "Unsent" on your own post while its
+  outbox row reached no transport, and neither mark while the row is
+  still fresh (a pending row counts as Unsent only after 10 seconds,
+  so a fanout still in flight does not flash Unsent) or while it was
+  handed to the radio over BLE and still awaits World. A card handed
+  to the radio is never called delivered: a GATT notify can resolve
+  even with no peer app subscribed, and there is no BLE ack frame for
+  posts in this batch, so "handed to radio" is the strongest honest
+  wording. The post BLE ack frame is a follow-up, not shipped work.
+- **Last-known location fallback**: when the fresh fix fails with a
+  timeout or an unavailable provider, and only then, the post falls
+  back to a real previously seen area: the OS last-known position at
+  any age, else the app's own expired cache cell. The fallback cell
+  is never written back into the fresh cache, never invented, and
+  permission or services failures never reach it (those still fail
+  the post). A fallback post carries the signed
+  `["location_source", "last-known"]` tag, and its feed card shows
+  "Last known area", so readers can tell the cell may be stale.
+  Older installs ignore the tag and show no marker.
+- **Cell scoping is display scoping, not delivery scoping**: the feed
+  list shows your geohash-5 cell plus its 8 neighbours. A far post
+  can still be relay-delivered and stored (a bridge forwards
+  regardless of cell, and relays do not know your feed scope), but
+  it stays invisible in the feed list by design. That is not a lost
+  post; it is a post outside the area you asked to see.
 - **Connectivity-aware transport**: NetInfo wiring starts Nostr and
   WorldSync when online and stops them when offline; BLE keeps running
-  either way.
+  either way. A hotspot with no upstream data reports reachability
+  false, so the relay leg is skipped and the app behaves as offline,
+  with BLE only.
 - **New posts at top**: while you are scrolled down, new arrivals pile up
   behind an "N new posts" pill instead of yanking the list. Tapping the
   pill snapshots the on-screen post IDs, refreshes, pages ranked pages
@@ -135,8 +223,8 @@ than it proves:
 |---|---|---|
 | Sending | Sending | An attempt is in flight. Never a final state. |
 | Queued | Queued, waiting for a transport | No transport exists right now. Retried, never Failed while no transport exists. |
-| Relayed | Sent to relay, not delivered yet | A relay accepted the envelope. The relay holds it; no peer has confirmed it yet. Never re-published, never Failed. |
-| MeshSent | Sent over BLE, not delivered yet | A BLE notify went out to a connected peer, but no peer app has acked yet. Re-attempted; 5 sends without an ack end in Failed. |
+| Relayed | Sent to relay, not delivered yet | A relay accepted the envelope. The relay holds it; no peer has confirmed it yet. Re-published with the identical envelope (same event ID) only after a 24 hour ack window with no ack, at most 3 re-publishes. A re-publish that finds no relay reachable does not burn the cap; the row stays Relayed and retries soon. A re-publish that a relay accepts or rejects burns one attempt and starts a fresh 24 hour window. A Relayed row past its cap with no ack still stays Relayed: it has no Failed state by time alone. The label stays Relayed while the window runs. |
+| MeshSent | Sent over BLE, not delivered yet | A BLE notify went out to a connected peer, but no peer app has acked yet. Re-attempted when due (30 seconds) or on force flush; a relay success upgrades it to Relayed; 5 mesh sends without an ack end in Failed. |
 | Delivered | Delivered | Only on a verified peer ack. See below. |
 | Failed | Failed, tap to retry | Hard failures exhausted. Tap to retry re-queues the message. |
 
@@ -144,6 +232,50 @@ Sending is optimistic: the row is stored and the send returns at once,
 and a background flush does the work. A flush is forced when the app
 returns to the foreground, when connectivity returns, and when the BLE
 peer count changes from 0 to N or back.
+
+The DM service starts at app launch, not only when Messages opens.
+Launch cost is one subscribe plus one forced flush, plus the capped
+pending-ack resend below. This is not a background service: no new
+timer, no background task, and no periodic work is added. The outbox
+timer still arms only when a row is due.
+
+Half-open sockets are now detected, not waited out. A 90 second
+silence timer runs per relay on both the post and DM relay paths: any
+inbound frame resets it, and a silent socket is force-closed and
+reconnected, which re-sends the subscription with backfill. React
+Native WebSocket exposes no ping, so there is no ping grace on the DM
+path: the timer closes the socket instead of delaying recovery. A
+relay CLOSED for the live subscription triggers an immediate
+resubscribe on the same sockets, also with backfill, and the app
+foreground refresh remains as a backstop.
+
+Head-of-line is fixed per conversation: a row that turns terminally
+Failed inside a flush does not block later rows to the same peer; the
+flush continues past it. A transient failure (Queued, or a MeshSent
+retry still due) still stops that conversation's queue, so order is
+kept while a transport is merely slow. Other conversations flush
+concurrently and keep doing so.
+
+Lost-ack resend: when a message is stored, the recipient sends its ack
+and records whether the ack left on at least one channel (relay OK or
+a BLE peer count above zero). There is no ack of an ack, so that marker
+means the ack was sent, not that the sender processed it. On service
+start, the recipient re-sends acks for stored inbound messages whose
+ack never left, newest first, capped at 100 per start, skipping
+blocked conversations and rows without a delivery ID. A re-sent ack
+upgrades the sender on a late ack, including from Failed, with no wire
+change, and never touches unread counts.
+
+Unread counts: each DM row shows its own unread pill, and the Messages
+tab badge shows the numeric total for inbox conversations only, with
+muted conversations excluded and requests excluded (requests carry
+their own row pills). Opening a thread marks that conversation read,
+and messages arriving while the thread is open are read on sight, so
+they do not stay counted after you leave the thread. Counts are
+persisted with dedup by delivery ID (persisted seen set, surviving
+restart), so a re-publish or a relay replay renders once and counts
+once, never inflating the count. Own messages and Saved notes never
+count.
 
 **Delivered means acked, not read.** A peer app sends an ack when it
 stores the message, not when the user opens the thread. Each send carries
@@ -222,10 +354,10 @@ not the primary channel.
 **Android:** install the APK from
 [GitHub Releases](https://github.com/bunnysayzz/airplane/releases).
 Verify the download against the published `SHA256SUMS.txt` before
-installing. The latest release at the time of writing is v0.1.16; the
-batch described above lands in a release only after the six feature
-branches and this docs branch merge and a new release is cut, so check
-the release notes for the batch before testing it from a release APK.
+installing. The batch described above has no release yet: it lands in
+a release only after this docs branch merges and a new release is cut,
+so check the release notes for the batch before testing it from a
+release APK. Until then, the release APK does not contain this batch.
 
 Android will warn about unknown sources. That is expected for a sideloaded
 app. Import the releases page in
@@ -244,7 +376,8 @@ Android is the relay backbone.
 
 This is the gate for the batch. Lab devices racked apart and emulators
 with no radio cannot prove BLE discovery, so these checks need two
-physical phones in range. Run them on the merged tree, in this order:
+physical phones in range, plus a third phone as a bridge for check 10.
+Run them on the merged tree, in this order:
 
 1. **Peers connected on both phones.** Both phones show the other as a
    connected BLE peer.
@@ -270,6 +403,45 @@ physical phones in range. Run them on the merged tree, in this order:
 8. **Username DM start.** On phone B, type the phone A author's name in
    the Messages input and start a DM from the match, without pasting a
    key. Confirm a never-seen name does not resolve.
+9. **Outbox drain and Unsent.** With no peers and no internet, post on
+   phone A and confirm the card shows Unsent and the toast said only
+   "Post saved". Kill and relaunch, then bring phone B into range
+   (still offline) and confirm the post drains over BLE and the
+   Unsent mark clears.
+10. **Bridge flood, offline.** With three phones in a line (A sees B,
+    B sees C, A does not see C) and the internet off everywhere, post
+    on A and confirm the post reaches C through B, and a post from C
+    reaches A the same way. Confirm a DM sent on the same setup does
+    not hop: DMs stay direct-peer only.
+11. **Globe on query hit only.** Online, post on phone A and confirm
+    the globe does not appear instantly on the relay OK; it appears
+    after the follow-up WorldSync query round trip. Then, if a relay
+    can be made to drop the event before the query, confirm no globe
+    appears for it.
+12. **Relay-first, not parallel.** Online with a BLE peer connected,
+    post on phone A and confirm the Diagnostics record shows the relay
+    stage winning and BLE never attempted at publish time for that
+    post.
+13. **Unread pills, badge, read on sight.** Send a DM to phone B while
+    B is not in the thread and confirm B's row pill and the Messages
+    tab badge both count it. Open the thread on B and confirm both
+    counts clear, and a message arriving while the thread is open does
+    not stay counted after leaving it. Restart B and confirm a relay
+    replay of the same message does not inflate the count.
+14. **Last-known marker.** With a fresh fix unavailable (provider
+    timeout or unavailable, not a permission denial), post and confirm
+    the card shows "Last known area". Confirm a permission denial
+    still fails the post instead of falling back.
+15. **Far post stored but feed-invisible.** Relay a post from a cell
+    far outside phone B's 9-cell scope and confirm it does not appear
+    in B's feed list, by design, even though it was relay-delivered.
+
+Two timed behaviours are not practical one-session phone checks and
+are gated on code plus timed observation instead: the 24 hour DM
+Relayed re-publish window with its 3-attempt cap (unreachable relays
+must not burn the cap), and the 90 second relay silence timer with
+CLOSED resubscribe. Do not claim either as phone-proven from a short
+session.
 
 ## Build from source
 
@@ -330,15 +502,32 @@ of at most 469 bytes), flood (TTL 7, jitter 50 to 500 ms, seen-cache LRU
 Posts and DMs share the BLE fragment layer but not the channel. Fragment
 headers carry a channel flag: 0 is feed, 1 is DM. Each reassembler
 accepts only its own channel, so DM frames never reach the feed path.
-Posts flood hop by hop with the ordered router; DMs go only to directly
-connected peers in v1, with no multi-hop.
+Posts flood hop by hop (kinds 1, 2, and 3 only, TTL decremented before
+forwarding, seen-set dedup, sampled jitter, ingress peer excluded);
+DMs go only to directly connected peers in v1, with no multi-hop.
+
+The post router is ordered, relay first. A relay win ends the publish:
+BLE is never attempted for that post at publish time, even to a
+connected peer. Only a relay loss, rejection, or timeout falls through
+to BLE, and only no transport at all reports queued. The queued report
+is not storage: the durable post outbox owns persistence and drain
+(see Features). A hotspot is not a transport stage in this router;
+it is NetInfo reachability plus BLE.
 
 Relays use pooled sockets with parallel publish and a 5 second first-OK
 deadline: the first relay OK settles the publish, and an explicit relay
 rejection settles it at once instead of waiting out the deadline.
-Subscriptions resubscribe live with backfill from the last envelope or
-ack seen, minus a 300 second overlap; the first subscribe replays at
-most the last 24 hours.
+WorldSync runs on a fixed 60 second tick plus connectivity return,
+foreground return, and immediately after a relay win; each pass pushes
+unconfirmed posts oldest first (at most 50 per pass) and queries relays
+for them, and only a query hit confirms World. DM subscriptions
+resubscribe live with backfill from the last envelope or ack seen,
+minus a 300 second overlap; the first subscribe replays at most the
+last 24 hours. Both relay paths run a 90 second silence timer with
+force-close and reconnect, and immediate resubscribe on CLOSED. The
+DM service starts at app launch (one subscribe plus one forced flush,
+plus capped pending-ack resend), not only when Messages opens; that
+is not a background service.
 
 ### Identity
 
@@ -404,30 +593,52 @@ discovered by surprise.
 **What this app does not promise.** Encryption of post contents. Metadata
 protection against a local radio observer. Protection from a relay
 knowing your IP. Takedown power over copies other phones or relays made.
-Sender authentication for DMs: see Limitations.
+Sender authentication for DMs: see Limitations. A display name is a
+signed claim from a key, not proof of who someone is offline, and a
+relay OK or a globe is acceptance or a query hit, not delivery proof
+and not identity proof: do not treat either as authenticated identity
+or as proof a peer received anything.
 
 ## Status and limitations
 
-Stated plainly, not hidden. The six track branches are CI green and
-branch-only; device proof on the merged tree is pending, and the
-two-phone checks above are the gate. Nothing in this section is a
+Stated plainly, not hidden. The six tracks plus the transport batch
+are merged on main; device proof on the merged tree is pending, and
+the two-phone checks above are the gate. Nothing in this section is a
 roadmap promise with a date.
 
-- **DM sender authentication still open.** The rumor sender pubkey is
-  an unsigned claim: anyone can seal a rumor to a recipient, the same
-  property as NIP-17. Abuse is handled by the Requests folder and block,
-  not by authentication. A signed-DM fix would break interop with
-  existing installs and needs a user decision.
+- **DM sender authentication still open (P0-3, separate decision).**
+  The rumor sender pubkey is an unsigned claim: anyone can seal a
+  rumor to a recipient, the same property as NIP-17. Abuse is handled
+  by the Requests folder and block, not by authentication. A signed-DM
+  fix would break interop with existing installs and needs a user
+  decision. Display names and relay acceptance are not a substitute:
+  see Privacy model.
 - **Multi-hop DM absent.** DMs reach directly connected peers only in
   v1. A peer two hops away is reachable by relay, not by BLE.
-- **NIP-42 AUTH unanswered.** A relay that challenges with AUTH gets no
-  answer; AUTH is never allowed to gate delivery or crash the app.
-- **Half-open socket detection absent.** No ping in v1, so a socket
-  that goes silent without an error or a close is not detected here.
-  Recovery is at the app layer.
-- **Relayed rows never re-published, with no ack timeout.** A row that
-  reached a relay stays Relayed until an ack arrives, however long that
-  takes. Re-publishing the same event ID would be a no-op at the relay.
+- **NIP-42 AUTH unanswered (separate decision).** A relay that
+  challenges with AUTH gets no answer; AUTH is never allowed to gate
+  delivery or crash the app.
+- **Half-open sockets: silence timer, no ping.** A 90 second silence
+  timer force-closes and reconnects a silent relay socket on both the
+  post and DM paths, and CLOSED triggers immediate resubscribe. React
+  Native WebSocket exposes no ping, so no ping is sent on the DM path.
+- **Relayed re-publish is capped, not endless.** A Relayed row
+  re-publishes only after a 24 hour ack window, at most 3 times, with
+  the identical envelope; unreachable relays do not burn the cap. A
+  capped Relayed row with no ack stays Relayed, with no Failed state
+  by time alone.
+- **Post BLE ack frame absent (follow-up).** There is no BLE ack for
+  posts, so BLE post delivery is reported only as handed to radio,
+  never as delivered. A post BLE ack frame is follow-up work, not
+  shipped in this batch.
+- **Replay pagination and per-peer watermarks absent (follow-up).**
+  Replay past 500 and per-peer watermarks are not in this batch; the
+  current bounds are the 24 hour first-subscribe window and the
+  300 second resubscribe overlap below.
+- **Foreground service absent (T4, separate decision).** There is no
+  Android foreground service for background relay in this batch; the
+  DM service starting at launch is app-launch wiring, not a
+  background service.
 - **Backfill window limits.** First subscribe replays at most the last
   24 hours; resubscribe backfills from the last envelope or ack minus
   300 seconds. Anything older than relay retention is still missed.
@@ -450,36 +661,28 @@ roadmap promise with a date.
 - **iOS limits.** Background BLE is OS-throttled; iOS participates
   opportunistically and Android is the relay backbone.
 
-## Merge order
+## Merged tree
 
-The six feature branches merge in this order, then this docs branch:
-
-1. DM transport parity (transport foundation; its delivery states
-   supersede the polish track's "Sent to relay" wording).
-2. Identity and display names (label changes touch the DM wrapper and
-   the Messages screen the later tracks also touch).
-3. Saved messages (adds the Saved row to the Messages screen).
-4. Feed new posts at top (Timeline and feed paging).
-5. Feed persistent cache (also touches Timeline; resolve it against the
-   new-posts Timeline and verify the Saved pinning behaviour over the
-   cached list on the merged tree).
-6. DM and feed polish, with its items resolved to the merged truth: the
-   Messages tab line is rewritten to relay plus BLE and persistent
-   SQLite storage (not "relay only, session only"), the "Sent to relay"
-   wording is dropped as subsumed by the Track 1 states, and the
-   "No messages yet." empty state is kept.
-7. This docs branch, last.
+The six feature branches and the transport batch (publish fix, DM
+unread counts, DM transport, post transport, router, and draft
+persistence) are merged on main, and this docs branch describes that
+merged tree. The old "Sent to relay" wording is subsumed by the DM
+states table above and is not a state. This docs branch merges after
+the code branches; it changes docs only, no code, no version, no
+release.
 
 ## Documentation
 
 - [`docs/dm-transport.md`](docs/dm-transport.md): DM relay plus BLE
-  transport, delivery states, acks, SQLite DM store, interop
+  transport, delivery states, Relayed re-publish, acks, unread counts,
+  SQLite DM store, interop
 - [`docs/identity.md`](docs/identity.md): Ed25519 keys, memorable names,
   signed display names, username messaging, generated avatars
 - [`docs/self-messages.md`](docs/self-messages.md): Saved notes store,
   limits, durability, privacy at rest
 - [`docs/feed.md`](docs/feed.md): new posts at top, persistent feed
-  cache, honest UI states, retention caps
+  cache, durable post outbox and Unsent, World on query hit only,
+  last-known marker, honest UI states, retention caps
 - [`docs/blueprint/hybrid-single-feed-plan.md`](docs/blueprint/hybrid-single-feed-plan.md):
   the single-feed hybrid design (current)
 - [`docs/blueprint/ARCHITECTURE.md`](docs/blueprint/ARCHITECTURE.md):

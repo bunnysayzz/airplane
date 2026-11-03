@@ -45,8 +45,12 @@ Notes:
 - The durable post outbox (packages/storage, MIGRATION_007) is the
   delivery side of the same story: own posts are enqueued on save,
   drain over BLE on peer arrival (oldest first), retry over relay via
-  WorldSync (age-ordered), and show 'Unsent' on the feed card while
-  they reached no transport, instead of a silent missing globe.
+  WorldSync (age-ordered, at most 50 per pass), and show 'Unsent' on
+  the feed card while they reached no transport (or while a pending
+  row is older than 10 seconds), instead of a silent missing globe.
+  The BLE drain never runs relay retry itself: relay retry stays
+  with WorldSync, so a drain while online cannot break relay-first
+  order. A BLE-handed row shows neither globe nor Unsent.
 - TTL is decremented **before** forwarding (`decrementTtl`, floors at 0), so
   an event with `DEFAULT_TTL = 7` is relayed at most 7 times along any path.
   Termination is guaranteed: TTL strictly decreases per hop and seen-caches
@@ -68,11 +72,14 @@ Notes:
 
 ## 4. Scoping
 
-Events carry a precision-5 geohash cell. A node relays and displays an event
-only when its cell is the node's own cell or one of the 8 neighbors
-(`isInScope`). Scope is advisory for relay (a node MAY relay out-of-scope
-events to keep the mesh connected - policy lives in the app layer); it is
-mandatory for display.
+Events carry a precision-5 geohash cell. Display is scope-mandatory:
+the feed list shows an event only when its cell is the node's own cell
+or one of the 8 neighbors (`isInScope`). Relay is scope-blind, not
+scope-gated: a bridge forwards a BLE-received flood-kind event
+regardless of its cell, which keeps the mesh connected and is why a
+far post can be relay-delivered and stored yet stay invisible in the
+feed list by design. Scope is advisory for relay in exactly that
+sense; it never blocks a forward.
 
 ## 5. Tombstones
 

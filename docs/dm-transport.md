@@ -134,6 +134,30 @@ change. A re-sent ack never touches unread counts: the message was
 already counted once at store time, and dedup keeps a replay from
 counting again.
 
+## Unread counts
+
+Each conversation row shows its own unread pill, and the Messages tab
+badge shows the numeric total for inbox conversations only, with
+muted conversations excluded and requests excluded (requests carry
+their own row pills). Muted conversations still receive messages;
+only the badge does not move for them.
+
+Opening a thread marks that conversation read, and messages arriving
+while the thread is open are read on sight: the thread subscription
+marks read after each refresh, so a message received while viewing
+does not stay counted after leaving the thread. Opening a request
+also clears its unread count, even though requests never feed the tab
+badge.
+
+Counts are persisted with dedup by delivery ID in the store seen set,
+which survives restart. The same send delivered twice (two relays,
+relay plus BLE, relay replay) renders once, with one unread increment;
+a re-publish of an already stored message renders zero times and
+counts zero times. A re-sent ack never touches unread counts: the
+message was already counted once at store time. Own messages and
+Saved notes never count. A blocked sender's messages are dropped
+before any row exists, so they count nowhere.
+
 ## SQLite DM store
 
 DMs live in the SQLite database `airplane.db`, separate from the public
@@ -200,4 +224,5 @@ of an already seen envelope cannot resurrect a deleted conversation.
   a Relayed row past its cap with no ack still stays Relayed: it has
   no Failed state by time alone.
 - Backfill is bounded: 24 hours on first subscribe, last envelope or
-  ack minus 300 seconds on resubscribe.
+  ack minus 300 seconds on resubscribe. Replay pagination past 500
+  and per-peer watermarks are follow-up work, not in this batch.

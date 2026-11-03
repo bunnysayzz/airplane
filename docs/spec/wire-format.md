@@ -35,12 +35,12 @@ confused with a full event.
 - **`id`** = `SHA-256(canonical pre-image)` (32 bytes).
 - **`sig`** = `ed25519_sign(secretKey, id)` (64 bytes, over the id - not the
   pre-image - so verifiers hash once and compare).
-- Verification = recompute `id` from fields 1–6, constant-time-compare with
+- Verification = recompute `id` from fields 1 to 6, constant-time-compare with
   field 0, then `ed25519_verify(sig, id, pubkey)`.
 
 ## 3. Content rules
 
-- Posts (`kind=1`): content NFC-normalized, **1–280 Unicode characters**
+- Posts (`kind=1`): content NFC-normalized, **1 to 280 Unicode characters**
   (counted as code points, not UTF-16 units, not bytes).
 - View receipts (`kind=2`): content MUST be `""`; `tags` MUST be
   `[["e", "<64-char lowercase hex post id>"]]`.
@@ -67,13 +67,13 @@ Encoded events larger than one BLE frame are split. Every fragment carries an
 | Offset | Field    | Type | Meaning                                              |
 |--------|----------|------|------------------------------------------------------|
 | 0      | `magic`  | u8   | `0xA1`                                               |
-| 1–4    | `msgTag` | u32  | first 4 bytes of the event `id` (reassembly key)     |
-| 5–6    | `total`  | u16  | fragment count (≥ 1)                                 |
-| 7–8    | `index`  | u16  | this fragment's index, 0-based (`< total`)           |
+| 1 to 4 | `msgTag` | u32  | first 4 bytes of the event `id` (reassembly key)     |
+| 5 to 6 | `total`  | u16  | fragment count (at least 1)                                 |
+| 7 to 8 | `index`  | u16  | this fragment's index, 0-based (`< total`)           |
 | 9      | `ttl`    | u8   | remaining flood TTL stamped by the sender            |
-| 10     | `flags`  | u8   | reserved, MUST be 0                                  |
+| 10     | `flags`  | u8   | channel: 0 is feed, 1 is DM                          |
 
-- `FRAG_WIRE_MAX` = 469 bytes per frame → payload ≤ **458 bytes**/fragment.
+- `FRAG_WIRE_MAX` = 469 bytes per frame, so payload is at most **458 bytes** per fragment.
 - Reassembly key is `msgTag`; frames may arrive out of order or duplicated.
 - Incomplete reassembly buffers are dropped after `REASSEMBLY_TIMEOUT_MS` =
   30000 ms.
@@ -86,3 +86,10 @@ Encoded events larger than one BLE frame are split. Every fragment carries an
 *is* the version). Any future breaking change bumps `PROTO_VER`, adds a new
 documented layout, and requires an ADR. Receivers treat undecodable bytes as
 opaque and drop them.
+
+- Each reassembler accepts only its own channel, so feed frames never
+  reach the DM path and DM frames never reach the feed path. DM frames
+  therefore never flood onward: the feed reassembler ignores them
+  before buffering. Old installs reject flags 1 at parse and silently
+  drop BLE DM frames instead of misreading them. Any flags value other
+  than 0 or 1 is malformed.
