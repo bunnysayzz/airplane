@@ -126,15 +126,15 @@ async function schemaVersion(port: DatabasePort): Promise<number[]> {
 }
 
 describe('migrate', () => {
-  test('idempotent: running twice is a no-op, MAX(version) = 6', async () => {
+  test('idempotent: running twice is a no-op, MAX(version) = 7', async () => {
     const { port } = await migratedDb();
     await OpSqliteStore.migrate(port);
     await OpSqliteStore.migrate(port);
-    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     const max = await port.query<{ v: number }>(`SELECT MAX(version) AS v FROM schema_version`);
-    expect(max[0].v).toBe(6);
-    // Tables from all six migrations exist.
-    for (const t of ['events', 'world_confirmed', 'tombstones', 'star_events', 'star_known_posts', 'reshare_events', 'schema_version']) {
+    expect(max[0].v).toBe(7);
+    // Tables from all seven migrations exist.
+    for (const t of ['events', 'world_confirmed', 'tombstones', 'star_events', 'star_known_posts', 'reshare_events', 'post_outbox', 'schema_version']) {
       const rows = await port.query<{ name: string }>(
         `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
         [t],
@@ -143,7 +143,7 @@ describe('migrate', () => {
     }
   });
 
-  test('upgrade path: legacy 001-only DB keeps its data, reaches version 6', async () => {
+  test('upgrade path: legacy 001-only DB keeps its data, reaches version 7', async () => {
     const db = new DatabaseSync(':memory:');
     openDbs.push(db);
     const port = makePort(db, false);
@@ -157,7 +157,7 @@ describe('migrate', () => {
 
     await OpSqliteStore.migrate(port);
 
-    expect(await schemaVersion(port)).toEqual([2, 3, 4, 5, 6]); // 001 was legacy, not re-recorded
+    expect(await schemaVersion(port)).toEqual([2, 3, 4, 5, 6, 7]); // 001 was legacy, not re-recorded
     const got = await store.getEvent(bytesToHex(e.id));
     expect(got).not.toBeNull();
     expect(got!.content).toBe('legacy post'); // no data wipe
@@ -192,7 +192,7 @@ describe('migrate', () => {
 
     await expect(OpSqliteStore.migrate(port)).resolves.toBeUndefined();
 
-    expect(await schemaVersion(port)).toEqual([3, 4, 5, 6]);
+    expect(await schemaVersion(port)).toEqual([3, 4, 5, 6, 7]);
     const got = await store.getEvent(bytesToHex(e.id));
     expect(got!.content).toBe('era-002 post');
     expect(await store.isWorldConfirmed(bytesToHex(e.id))).toBe(true);
@@ -202,15 +202,17 @@ describe('migrate', () => {
     const db = new DatabaseSync(':memory:');
     openDbs.push(db);
     const port = makePort(db, false);
-    await OpSqliteStore.migrate(port); // v6, healthy
+    await OpSqliteStore.migrate(port); // v7, healthy
     // Simulate a kill after the 004 DDL committed but before its version
-    // row landed: drop the 004, 005, and 006 rows so MAX(version) drops
-    // to 3. Re-running migrate must succeed (IF NOT EXISTS) and re-record.
+    // row landed: drop the 004, 005, 006, and 007 rows so MAX(version)
+    // drops to 3. Re-running migrate must succeed (IF NOT EXISTS) and
+    // re-record.
     await port.exec(`DELETE FROM schema_version WHERE version = 4`);
     await port.exec(`DELETE FROM schema_version WHERE version = 5`);
     await port.exec(`DELETE FROM schema_version WHERE version = 6`);
+    await port.exec(`DELETE FROM schema_version WHERE version = 7`);
     await expect(OpSqliteStore.migrate(port)).resolves.toBeUndefined();
-    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     const store = new OpSqliteStore(port);
     const e = makeEvent({ seed: 103 });
     await expect(store.getEvent(bytesToHex(e.id))).resolves.toBeNull();
@@ -238,7 +240,7 @@ describe('migrate', () => {
       NOW,
     ]);
     await expect(OpSqliteStore.migrate(port)).resolves.toBeUndefined();
-    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     const store = new OpSqliteStore(port);
     expect(await store.isWorldConfirmed(bytesToHex(e.id))).toBe(true);
   });
@@ -275,17 +277,17 @@ describe('migrate', () => {
     openDbs.push(db);
     const port = makePort(db, false);
     await Promise.all([OpSqliteStore.migrate(port), OpSqliteStore.migrate(port)]);
-    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     // A later migrate after the shared run settles still works.
     await OpSqliteStore.migrate(port);
-    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 
   test('a database from a newer build fails fast with a clear error', async () => {
     const { port } = await migratedDb();
-    await port.exec(`INSERT INTO schema_version (version, applied_at) VALUES (7, ?)`, [NOW]);
+    await port.exec(`INSERT INTO schema_version (version, applied_at) VALUES (8, ?)`, [NOW]);
     await expect(OpSqliteStore.migrate(port)).rejects.toThrow(
-      /database version 7 is newer than this app supports \(max 6\)/,
+      /database version 8 is newer than this app supports \(max 7\)/,
     );
   });
 
@@ -311,15 +313,16 @@ describe('migrate', () => {
     const db = new DatabaseSync(':memory:');
     openDbs.push(db);
     const port = makePort(db, false);
-    await OpSqliteStore.migrate(port); // v6, healthy
+    await OpSqliteStore.migrate(port); // v7, healthy
     // Force a re-migration of 003 by deleting its version row (and the
-    // later 004, 005, and 006 rows, so the runner re-enters the upgrade
-    // path instead of returning early): the CREATE TABLE must fail and
+    // later 004, 005, 006, and 007 rows, so the runner re-enters the
+    // upgrade path instead of returning early): the CREATE TABLE must fail and
     // roll back, since the tombstones table already exists.
     await port.exec(`DELETE FROM schema_version WHERE version = 3`);
     await port.exec(`DELETE FROM schema_version WHERE version = 4`);
     await port.exec(`DELETE FROM schema_version WHERE version = 5`);
     await port.exec(`DELETE FROM schema_version WHERE version = 6`);
+    await port.exec(`DELETE FROM schema_version WHERE version = 7`);
     await expect(OpSqliteStore.migrate(port)).rejects.toThrow(/already exists/i);
     expect(await schemaVersion(port)).toEqual([1, 2]); // 003 not recorded
     // Earlier migrations' data still intact.
@@ -786,15 +789,16 @@ describe('upsertPeer', () => {
 });
 
 describe('stars (MIGRATION_004)', () => {
-  test('upgrade path: versioned v3 DB reaches version 6', async () => {
+  test('upgrade path: versioned v3 DB reaches version 7', async () => {
     const { port } = await migratedDb();
     await port.exec(`DROP TABLE star_events`);
     await port.exec(`DROP TABLE star_known_posts`);
     await port.exec(`DELETE FROM schema_version WHERE version = 4`);
     await port.exec(`DELETE FROM schema_version WHERE version = 5`);
     await port.exec(`DELETE FROM schema_version WHERE version = 6`);
+    await port.exec(`DELETE FROM schema_version WHERE version = 7`);
     await OpSqliteStore.migrate(port);
-    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     for (const t of ['star_events', 'star_known_posts']) {
       const rows = await port.query<{ name: string }>(
         `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
@@ -924,13 +928,14 @@ describe('reshare_events (kind 5, T19, MIGRATION_005)', () => {
     };
   }
 
-  test('upgrade path: versioned v4 DB reaches version 6', async () => {
+  test('upgrade path: versioned v4 DB reaches version 7', async () => {
     const { port } = await migratedDb();
     await port.exec(`DROP TABLE reshare_events`);
     await port.exec(`DELETE FROM schema_version WHERE version = 5`);
     await port.exec(`DELETE FROM schema_version WHERE version = 6`);
+    await port.exec(`DELETE FROM schema_version WHERE version = 7`);
     await OpSqliteStore.migrate(port);
-    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     const rows = await port.query<{ name: string }>(
       `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reshare_events'`,
     );
@@ -964,5 +969,40 @@ describe('reshare_events (kind 5, T19, MIGRATION_005)', () => {
     const untagged = makeReshare(42, 'b'.repeat(64), NOW);
     untagged.tags = [];
     await expect(store.saveReshareEvent(untagged)).rejects.toThrow(/\["e"/);
+  });
+});
+
+describe('post outbox (MIGRATION_007, SQLite)', () => {
+  test('round-trip, oldest first, World confirmation deletes the row', async () => {
+    const { port } = await migratedDb();
+    const store = new OpSqliteStore(port);
+    const newer = makeEvent({ seed: 71, createdAt: NOW });
+    const older = makeEvent({ seed: 72, createdAt: NOW - 600 });
+    for (const e of [newer, older]) await store.saveEvent(e);
+    for (const e of [newer, older]) {
+      await store.enqueuePostOutbox(bytesToHex(e.id), e.created_at);
+    }
+    await store.enqueuePostOutbox(bytesToHex(newer.id), newer.created_at);
+    const rows = await store.listPostOutbox();
+    expect(rows.map((r) => r.eventId)).toEqual([bytesToHex(older.id), bytesToHex(newer.id)]);
+    expect(rows[0]).toMatchObject({ attempts: 0, status: 'pending' });
+    await store.markPostOutboxAttempt(bytesToHex(older.id), 'unsent');
+    const statuses = await store.listPostOutboxStatuses([bytesToHex(older.id)]);
+    expect(statuses.get(bytesToHex(older.id))).toBe('unsent');
+    await store.markWorldConfirmed(bytesToHex(older.id));
+    expect((await store.listPostOutbox()).map((r) => r.eventId)).toEqual([bytesToHex(newer.id)]);
+    expect(await store.getUnconfirmed()).toEqual([bytesToHex(newer.id)]);
+  });
+
+  test('upgrade from a v6 database creates the outbox table', async () => {
+    const { port } = await migratedDb();
+    await port.exec(`DROP TABLE post_outbox`);
+    await port.exec(`DELETE FROM schema_version WHERE version = 7`);
+    await OpSqliteStore.migrate(port);
+    expect(await schemaVersion(port)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    const rows = await port.query<{ name: string }>(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'post_outbox'`,
+    );
+    expect(rows).toHaveLength(1);
   });
 });

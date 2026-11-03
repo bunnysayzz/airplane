@@ -32,6 +32,21 @@ Notes:
 - `shouldRelay(seen, eventId, ttl)` returns false when the event was already
   seen **or** `ttl <= 0`. Callers MUST insert the id into `seen` when they
   relay (the check alone does not record).
+- BLE forwarding is live in `BleTransport` (packages/transport/src/hybrid.ts):
+  a verified BLE-received flood-kind event (post, receipt, tombstone) is
+  re-broadcast after a sampled jitter to all connected peers except the
+  ingress peer, with TTL decremented first and dropped when the
+  decremented TTL reaches 0. A duplicate overheard before the jitter
+  fires cancels the scheduled forward. DM frames (flags 1) never reach
+  this path: the feed reassembler accepts only flags 0, so a DM frame
+  is ignored before buffering and can never be flooded onward. Frame
+  format is unchanged, so older installs receive forwarded posts but do
+  not forward them, and a mixed network degrades gracefully.
+- The durable post outbox (packages/storage, MIGRATION_007) is the
+  delivery side of the same story: own posts are enqueued on save,
+  drain over BLE on peer arrival (oldest first), retry over relay via
+  WorldSync (age-ordered), and show 'Unsent' on the feed card while
+  they reached no transport, instead of a silent missing globe.
 - TTL is decremented **before** forwarding (`decrementTtl`, floors at 0), so
   an event with `DEFAULT_TTL = 7` is relayed at most 7 times along any path.
   Termination is guaranteed: TTL strictly decreases per hop and seen-caches

@@ -190,3 +190,25 @@ DROP INDEX IF EXISTS idx_seen_at;
 DROP INDEX IF EXISTS idx_logs_ts;
 DROP INDEX IF EXISTS idx_world_confirmed_at;
 `;
+
+/**
+ * MIGRATION_007 - Durable post outbox (transport post fixes).
+ *
+ * `post_outbox` holds one row per own kind-1 post, from save until
+ * World confirmation. It is delivery state only, never a draft store:
+ * it references posts already saved in `events`, never unsaved text.
+ * World confirmation deletes the row (see markWorldConfirmed), and
+ * prune deletes it with its expired post. Drain order is created_at
+ * ASC, so the oldest unsent post drains first.
+ */
+export const MIGRATION_007 = `
+CREATE TABLE IF NOT EXISTS post_outbox(
+  event_id       BLOB PRIMARY KEY,
+  created_at     INTEGER NOT NULL,
+  queued_at      INTEGER NOT NULL,
+  attempts       INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at INTEGER,
+  status         TEXT NOT NULL CHECK(status IN ('pending', 'ble-sent', 'unsent'))
+);
+CREATE INDEX IF NOT EXISTS idx_post_outbox_created ON post_outbox(created_at ASC, event_id ASC);
+`;

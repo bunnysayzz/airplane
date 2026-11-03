@@ -26,6 +26,13 @@ export interface PostCardModel {
   score: number;
   /** True when the post's event ID has been confirmed on a Nostr relay. */
   worldConfirmed: boolean;
+  /**
+   * True when this is the device's own post and its durable outbox
+   * row says it reached no transport yet (or its fan-out never
+   * reported). World confirmation always wins over this flag.
+   * Absent (old cached cards) reads as false.
+   */
+  unsent?: boolean;
   /** Author mesh pubkey hex (DM address). Absent for synthetic/test cards. */
   authorPubkeyHex?: string;
   // --- RESHARE (delimited) ---

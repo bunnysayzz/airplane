@@ -6,6 +6,17 @@
 // phones with internet silently relay posts to Nostr (no opt-in tag,
 // no per-post approval). World status is tracked client-side via
 // worldConfirmed in storage, not via a signed tag.
+//
+// ONE DRAFT STORY: there is exactly one draft and one delivery queue,
+// and they never compete. The modal text is the draft: it lives only
+// in modal state, the discard guard blocks close while a publish is
+// in flight, and discarding (or a kill) before save loses the text.
+// Once save succeeds, the text is no longer a draft: the signed post
+// is in the events table and its delivery lives in the durable post
+// outbox (storage post_outbox), which survives kill and relaunch and
+// drains over BLE on peer arrival and over relay via WorldSync. The
+// outbox never holds unsaved text, and the modal never re-saves a
+// post that already has an outbox row.
 
 import {
   normalizeContent,
@@ -163,6 +174,18 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
     await getStore().saveEvent(event);
   } catch (err) {
     throw new PublishError('save', err);
+  }
+  // Enqueue the saved post for delivery retry BEFORE fan-out runs, so
+  // a kill during fan-out still leaves a queued row: the post is
+  // saved, so it must be retryable, not silently unsent. Enqueue is
+  // idempotent and best-effort: a store failure here must not fail
+  // a post that is already saved and about to fan out.
+  try {
+    await getStore().enqueuePostOutbox(toHex(event.id), event.created_at);
+  } catch {
+    // The fan-out below still runs; the row is re-created only if
+    // the store recovers, and WorldSync still retries unconfirmed
+    // posts over relay regardless of the outbox.
   }
   // Fan out via hybrid transport (BLE + Nostr when online). Non-blocking;
   // the post is already in the local feed. publishViaTransport itself

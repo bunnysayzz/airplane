@@ -15,7 +15,10 @@ import {
   DEFAULT_TTL,
   FRAG_WIRE_MAX,
   REASSEMBLY_TIMEOUT_MS,
+  decrementTtl,
   fragment,
+  parseHeader,
+  sampleJitterMs,
   Reassembler,
   type Hex64,
   type SignedEvent,
@@ -45,8 +48,28 @@ export class BleTransport {
   private readonly ttl: number;
   private readonly verify: ((event: SignedEvent) => boolean) | undefined;
   private readonly onDedupDrop: ((peerId: string) => void) | undefined;
+  private readonly onFloodForward: ((eventId: Hex64, peerCount: number, ttl: number) => void) | undefined;
+  private readonly floodForwardDelayMs: number | undefined;
+  private readonly floodJitterRand: (() => number) | undefined;
+  private readonly floodForwardEnabled: boolean;
   private unsubscribe: (() => void) | null = null;
   private lastPurgeMs = 0;
+  /**
+   * TTL stamped on the first fragment seen for a pending reassembly
+   * tag. Every fragment of one event carries the same TTL (fragment()
+   * stamps it on all of them), so the first frame's TTL is the
+   * event's ingress TTL. The reassembler itself returns only bytes,
+   * so the TTL is captured here before reassembly, not after.
+   */
+  private readonly frameTtl = new Map<number, number>();
+  /**
+   * Flood forwards scheduled but not yet sent, by event id hex. A
+   * duplicate overheard from another peer before the jitter fires
+   * cancels the scheduled forward (overhear suppression): another
+   * relay already carried this event onward, so re-sending it would
+   * only add storm traffic.
+   */
+  private readonly pendingForwards = new Map<Hex64, ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly port: TransportPort,
@@ -68,11 +91,36 @@ export class BleTransport {
        * decision reads it; it only feeds the diagnostics counters.
        */
       onDedupDrop?: (peerId: string) => void;
+      /**
+       * Called when a flood forward actually sends to at least one
+       * peer. Diagnostics hook only; no routing decision reads it.
+       */
+      onFloodForward?: (eventId: Hex64, peerCount: number, ttl: number) => void;
+      /**
+       * Test seam: fixed flood-forward delay in ms, replacing the
+       * sampled jitter. Production callers never pass this.
+       */
+      floodForwardDelayMs?: number;
+      /**
+       * Random source for the flood jitter sample. Defaults to
+       * Math.random via sampleJitterMs.
+       */
+      floodJitterRand?: () => number;
+      /**
+       * Flood forwarding switch. Defaults to true: a bridge phone
+       * re-broadcasts BLE posts it receives. Set false only for
+       * callers that must never relay (no production caller does).
+       */
+      floodForwardEnabled?: boolean;
     },
   ) {
     this.ttl = opts?.ttl ?? DEFAULT_TTL;
     this.verify = opts?.verify;
     this.onDedupDrop = opts?.onDedupDrop;
+    this.onFloodForward = opts?.onFloodForward;
+    this.floodForwardDelayMs = opts?.floodForwardDelayMs;
+    this.floodJitterRand = opts?.floodJitterRand;
+    this.floodForwardEnabled = opts?.floodForwardEnabled ?? true;
   }
 
   /** Start listening for inbound frames. Idempotent. */
@@ -84,6 +132,16 @@ export class BleTransport {
       if (nowMs - this.lastPurgeMs > REASSEMBLY_TIMEOUT_MS) {
         this.reassembler.purge(nowMs);
         this.lastPurgeMs = nowMs;
+      }
+      // Capture the ingress TTL before reassembly discards it. DM
+      // frames never reach this point: this reassembler accepts only
+      // the feed channel (flags 0), so a flags-1 DM frame is ignored
+      // before buffering and can never be flooded onward here.
+      try {
+        const header = parseHeader(frame);
+        if (!this.frameTtl.has(header.msgTag)) this.frameTtl.set(header.msgTag, header.ttl);
+      } catch {
+        // malformed header: the reassembler push below drops it
       }
       let eventBytes: Uint8Array | null;
       try {
@@ -98,6 +156,13 @@ export class BleTransport {
       } catch {
         return; // malformed event - drop
       }
+      // The tag lookup uses the first fragment's tag, which is the
+      // event id prefix by construction (fragment() tags from the
+      // event id). Fall back to the origin TTL when the tag is
+      // unknown (should not happen for a completed reassembly).
+      const tag = ((event.id[0] << 24) | (event.id[1] << 16) | (event.id[2] << 8) | event.id[3]) >>> 0;
+      const ingressTtl = this.frameTtl.get(tag) ?? this.ttl;
+      this.frameTtl.delete(tag);
       if (this.verify) {
         let ok = false;
         try {
@@ -109,10 +174,19 @@ export class BleTransport {
       }
       const idHex = toHex(event.id);
       if (this.seen.has(idHex)) {
+        // Loop suppression, plus overhear suppression: a duplicate
+        // heard from another peer before our jitter fired means
+        // another relay already carried this event onward.
+        const pending = this.pendingForwards.get(idHex);
+        if (pending !== undefined) {
+          clearTimeout(pending);
+          this.pendingForwards.delete(idHex);
+        }
         this.onDedupDrop?.(peerId); // loop suppression
         return;
       }
       this.seen.add(idHex);
+      this.scheduleFloodForward(event, peerId, ingressTtl);
       for (const h of this.handlers) {
         try {
           h(event, peerId);
@@ -128,6 +202,60 @@ export class BleTransport {
       this.unsubscribe();
       this.unsubscribe = null;
     }
+    for (const timer of this.pendingForwards.values()) clearTimeout(timer);
+    this.pendingForwards.clear();
+    this.frameTtl.clear();
+  }
+
+  /**
+   * Flood forward for one BLE-received event (docs/spec/flood.md §2).
+   * Runs only for the flood kinds (posts, receipts, tombstones):
+   * interaction events (stars, reshares) are origin-broadcast only
+   * and are never re-flooded by a bridge, and DM frames can never
+   * reach this code at all (the reassembler accepts only flags 0).
+   * The forward TTL is the ingress TTL decremented first; a
+   * decremented TTL of 0 means this was the last hop, so the event
+   * is delivered locally but not forwarded. The ingress peer is
+   * excluded (split horizon: never send an event back to the peer
+   * it came from). The send waits one sampled jitter so duplicate
+   * suppression wins in dense clusters; a duplicate overheard in
+   * that window cancels the forward (see the seen branch in start).
+   * Frame format is unchanged, so an older install receives a
+   * forwarded post exactly like an origin post but does not forward
+   * it onward: a mixed network degrades gracefully, it does not loop.
+   */
+  private scheduleFloodForward(event: SignedEvent, ingressPeerId: string, ingressTtl: number): void {
+    if (!this.floodForwardEnabled) return;
+    if (event.kind !== 1 && event.kind !== 2 && event.kind !== 3) return;
+    const idHex = toHex(event.id);
+    const nextTtl = decrementTtl(ingressTtl);
+    if (nextTtl <= 0) return;
+    if (this.pendingForwards.has(idHex)) return;
+    const delay = this.floodForwardDelayMs ?? sampleJitterMs(this.floodJitterRand);
+    const timer = setTimeout(() => {
+      this.pendingForwards.delete(idHex);
+      void (async () => {
+        let peers: string[];
+        try {
+          peers = this.port.connectedPeerIds?.() ?? [];
+        } catch {
+          peers = [];
+        }
+        const targets = peers.filter((p) => p !== ingressPeerId);
+        if (targets.length === 0) return;
+        const sent = await this.broadcast(event, targets, nextTtl);
+        if (sent > 0) this.onFloodForward?.(idHex, sent, nextTtl);
+      })().catch(() => {
+        // A forward failure is local only: the event was already
+        // delivered to handlers, and no retry is scheduled here.
+      });
+    }, delay);
+    this.pendingForwards.set(idHex, timer);
+  }
+
+  /** Scheduled flood forwards not yet sent (test seam). */
+  get pendingFloodForwardCount(): number {
+    return this.pendingForwards.size;
   }
 
   /**
@@ -138,14 +266,14 @@ export class BleTransport {
    * Returns the count of peers that completed without error, so the
    * router can tell "sent to N peers" from "failed on every peer".
    */
-  async broadcast(event: SignedEvent, peerIds: string[]): Promise<number> {
+  async broadcast(event: SignedEvent, peerIds: string[], ttl: number = this.ttl): Promise<number> {
     const bytes = encodeEvent(event);
     this.seen.add(toHex(event.id));
     let sent = 0;
     for (const peerId of peerIds) {
       try {
         const frameSize = this.port.frameSizeFor?.(peerId) ?? FRAG_WIRE_MAX;
-        const frames = fragment(bytes, this.ttl, frameSize);
+        const frames = fragment(bytes, ttl, frameSize);
         for (const frame of frames) {
           await this.port.send(peerId, frame);
         }
@@ -244,9 +372,11 @@ export const DEFAULT_RELAY_DEADLINE_MS = 5000;
  *
  * Outbound: `publish` routes through the stages in order. It reports the
  * winning stage and status but does NOT persist a queued result: the
- * durable outbox with retry and drain is a later track (R5). A queued
- * result means "reported, not stored"; callers must not treat it as
- * a delivery promise.
+ * durable post outbox (storage post_outbox table, MIGRATION_007) is
+ * owned by the app layer, which enqueues a saved post before fan-out
+ * and updates its status from the RouteResult. A queued result from
+ * this router alone means "reported, not stored"; callers must not
+ * treat it as a delivery promise unless they enqueued it first.
  */
 export class HybridTransport {
   private readonly seen = new SeenCache();
@@ -387,7 +517,7 @@ export class HybridTransport {
   /**
    * Mesh stage. Broadcasts to the given peers, or reports queued when
    * there is no peer to send to. Queued is a report, not storage: the
-   * durable outbox (R5) owns persistence, retry, and drain.
+   * app-owned durable outbox owns persistence, retry, and drain.
    */
   private async attemptMesh(
     event: SignedEvent,
@@ -423,6 +553,20 @@ export class HybridTransport {
       relayTried: relay.tried,
       relayDetail: relay.detail,
     };
+  }
+
+  /**
+   * Mesh-only send for the durable post outbox drain. Broadcasts
+   * one already-saved event to the given BLE peers at origin TTL
+   * and returns the peer count that completed, without running the
+   * ordered router and without re-emitting the event locally (the
+   * event is already in the feed). Relay retry stays with
+   * WorldSync: this path exists so a post queued while offline can
+   * still reach a peer that arrives later, even while offline.
+   */
+  async sendOverMesh(event: SignedEvent, blePeerIds: string[]): Promise<number> {
+    if (blePeerIds.length === 0) return 0;
+    return this.ble.broadcast(event, blePeerIds);
   }
 
   /** Subscribe to deduplicated inbound posts from any source. */

@@ -70,4 +70,4 @@ export {
 } from './displayNames';
 export { memorableNameFor, nameWithoutSuffix } from './names';
 export { getKv } from './kv';
-export { startTransport, stopTransport, publishViaTransport, pruneExpiredStore } from './transport';
+export { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox } from './transport';

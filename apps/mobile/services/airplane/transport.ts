@@ -508,6 +508,10 @@ export async function revalidateBleRadio(): Promise<void> {
       syncDiagnosticsAdapterState();
     }
   }
+  // Foreground return with a live radio is a drain moment: peers may
+  // have arrived while backgrounded, and the mesh poll edge only
+  // fires on a 0 to N change it observed while running.
+  if (bleRadioState === 'on') void drainPostOutbox().catch(() => {});
 }
 
 /**
@@ -661,6 +665,10 @@ export async function startTransport(): Promise<void> {
   // the first prune a long-lived install has ever run, so it deletes
   // rows past the designed 24 h window on first launch after this change.
   await pruneExpiredStore();
+  // Startup outbox drain: a post queued before a kill or relaunch
+  // gets its BLE re-send now if peers are already connected; otherwise
+  // the mesh poll edge catches the next peer arrival.
+  void drainPostOutbox().catch(() => {});
 }
 
 /** Clear any pending scan retry timer and reset the backoff. Never throws. */
@@ -838,9 +846,12 @@ export function subscribeMeshStatus(cb: () => void): () => void {
     // BLE peer arrival is a transport return for the DM outbox: a queued
     // DM drains over mesh now, not when its backoff timer would fire.
     // Edge-triggered (0 to N) so a steady peer set does not re-flush
-    // every poll and burn outbox attempts.
+    // every poll and burn outbox attempts. The same edge drains the
+    // post outbox over BLE: a post queued with no peers gets its
+    // BLE re-send when a peer nears, without waiting for internet.
     if (prevMeshPeers === 0 && next.peersNearby > 0) {
       void flushDmOutboxIfStarted(true).catch(() => {});
+      void drainPostOutbox().catch(() => {});
     }
     prevMeshPeers = next.peersNearby;
   }, 2000);
@@ -1039,6 +1050,59 @@ export async function stopTransport(): Promise<void> {
   syncDiagnosticsAdapterState();
 }
 
+/**
+ * Drain the durable post outbox over BLE, oldest first.
+ *
+ * Runs on BLE peer arrival (see subscribeMeshStatus), at transport
+ * start, and on foreground radio re-validation: exactly the moments
+ * a new peer set may exist. Relay retry is deliberately NOT done
+ * here: WorldSync owns relay retry on its 60 second tick and on
+ * connectivity return, and a BLE drain while online would break the
+ * relay-first order by sending over BLE first. This drain is the
+ * offline path: queued own posts reach a peer that arrives later.
+ *
+ * Each row is re-checked against the store before sending (the event
+ * may have expired or been World-confirmed since the row was listed),
+ * and a missing event removes its row instead of stalling the drain.
+ * A send marks the row 'ble-sent'; a send to connected peers that
+ * completes on none marks it 'unsent'. No peers means no attempt at
+ * all: the row waits for the next peer-arrival edge, not a timer.
+ * Returns the count of rows sent to at least one peer. Never throws.
+ */
+export async function drainPostOutbox(): Promise<number> {
+  if (!hybrid) return 0;
+  const peers = blePeerIdsForPublish(blePort?.port);
+  if (peers.length === 0) return 0;
+  let sentRows = 0;
+  try {
+    const store = getStore();
+    const rows = await store.listPostOutbox();
+    for (const row of rows) {
+      const event = await store.getEvent(row.eventId).catch(() => null);
+      if (!event) {
+        await store.removePostOutbox(row.eventId).catch(() => {});
+        continue;
+      }
+      if (await store.isWorldConfirmed(row.eventId).catch(() => false)) {
+        await store.removePostOutbox(row.eventId).catch(() => {});
+        continue;
+      }
+      const sent = await hybrid.sendOverMesh(event, peers).catch(() => 0);
+      if (sent > 0) {
+        sentRows += 1;
+        await store.markPostOutboxAttempt(row.eventId, 'ble-sent').catch(() => {});
+      } else {
+        await store.markPostOutboxAttempt(row.eventId, 'unsent').catch(() => {});
+      }
+    }
+  } catch {
+    // A drain failure must never break the caller (mesh poll, start,
+    // or foreground): the rows stay queued for the next trigger.
+  }
+  if (sentRows > 0) notifyFeedListeners();
+  return sentRows;
+}
+
 /** Publish a local event through the ordered router (R4). */
 export async function publishViaTransport(event: SignedEvent): Promise<RouteResult> {
   if (!hybrid) await startTransport();
@@ -1055,6 +1119,29 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
     await getStore()
       .markWorldConfirmed(toHex(event.id))
       .catch(() => {});
+  }
+  // Outbox status follows the router result, for kind-1 posts only
+  // (stars and reshares also flow through this router, but they are
+  // not outbox posts). A relay win already deleted the row via
+  // markWorldConfirmed, so the remove here is idempotent cleanup;
+  // a mesh send keeps the row as 'ble-sent' (still awaiting World);
+  // a queued result marks it 'unsent', which is what the feed card
+  // shows instead of a silent missing globe. A store failure here
+  // must never change the publish result or its diagnostics.
+  if (event.kind === EVENT_KIND_POST) {
+    const store = getStore();
+    const idHex = toHex(event.id);
+    try {
+      if (result.transport === 'relay') {
+        await store.removePostOutbox(idHex);
+      } else if (result.transport === 'mesh') {
+        await store.markPostOutboxAttempt(idHex, 'ble-sent');
+      } else {
+        await store.markPostOutboxAttempt(idHex, 'unsent');
+      }
+    } catch {
+      // Outbox bookkeeping is secondary to the publish result.
+    }
   }
   const nowMs = Date.now();
   // Diagnostics record exactly the stages the router actually ran: a

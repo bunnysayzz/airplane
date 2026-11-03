@@ -250,6 +250,12 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             }
             const eventId = await publishPost(text, {});
             recordUiEvent('compose:published', eventId);
+            // Save-first toast: this confirms the post is saved
+            // locally, not that it reached a peer or a relay. Delivery
+            // state lives on the feed card: a World globe when a relay
+            // confirms it, 'Unsent' while the outbox still holds it.
+            // The two never disagree because they report different
+            // stages, and the toast copy says saved, not published.
             dialog.toast(t('compose.posted'));
             onPublished?.(eventId);
             onClose();

@@ -9,7 +9,7 @@ import type {
   PeerInfo,
   UnixSec,
 } from '@airplane/protocol';
-import type { StorePort, KvPort, ListFeedOpts } from './ports';
+import type { StorePort, KvPort, ListFeedOpts, PostOutboxRow, PostOutboxStatus } from './ports';
 
 /** Default post retention: 24 h (blueprint §5.5). */
 export const DEFAULT_RETENTION_SEC = 24 * 3600;
@@ -133,6 +133,8 @@ export class MemoryEventStore implements StorePort {
   private readonly starKnownPosts = new Set<Hex64>();
   /** Stored reshare events by id hex (kind 5 lives apart from events). */
   private readonly reshareEvents = new Map<Hex64, SignedEvent>();
+  /** Durable post outbox rows by event id hex (MIGRATION_007 mirror). */
+  private readonly postOutbox = new Map<Hex64, PostOutboxRow>();
 
   constructor(opts: MemoryEventStoreOpts = {}) {
     this.retentionSec = opts.retentionSec ?? DEFAULT_RETENTION_SEC;
@@ -366,6 +368,7 @@ export class MemoryEventStore implements StorePort {
       // expired post set only: star/reshare rows for live posts, and
       // pending tombstones for posts that never arrived, survive.
       this.worldConfirmed.delete(postHex);
+      this.postOutbox.delete(postHex);
       this.starKnownPosts.delete(postHex);
       for (const [idHex, event] of this.starEvents) {
         if (taggedPostId(event) === postHex) this.starEvents.delete(idHex);
@@ -382,6 +385,7 @@ export class MemoryEventStore implements StorePort {
     if (!this.worldConfirmed.has(key)) {
       this.worldConfirmed.set(key, Math.floor(Date.now() / 1000));
     }
+    this.postOutbox.delete(key);
   }
 
   async isWorldConfirmed(eventId: Hex64): Promise<boolean> {
@@ -406,6 +410,67 @@ export class MemoryEventStore implements StorePort {
       if (row.expiresAt <= now) continue; // expired posts need no relay push
       if (this.worldConfirmed.has(idHex)) continue;
       out.push(idHex);
+    }
+    // Age-ordered drain: oldest post first, id tiebreak.
+    out.sort((a, b) => {
+      const aRow = this.events.get(a) as { event: SignedEvent };
+      const bRow = this.events.get(b) as { event: SignedEvent };
+      if (aRow.event.created_at !== bRow.event.created_at) {
+        return aRow.event.created_at - bRow.event.created_at;
+      }
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+    return out;
+  }
+
+  // Durable post outbox (MIGRATION_007 mirror). See ports.ts.
+
+  async enqueuePostOutbox(eventId: Hex64, createdAt: UnixSec): Promise<void> {
+    const key = eventId.toLowerCase();
+    if (this.postOutbox.has(key)) return;
+    this.postOutbox.set(key, {
+      eventId: key,
+      createdAt,
+      queuedAt: Math.floor(Date.now() / 1000),
+      attempts: 0,
+      lastAttemptAt: null,
+      status: 'pending',
+    });
+  }
+
+  async listPostOutbox(): Promise<PostOutboxRow[]> {
+    const now = Math.floor(Date.now() / 1000);
+    const out: PostOutboxRow[] = [];
+    for (const row of this.postOutbox.values()) {
+      const eventRow = this.events.get(row.eventId);
+      if (!eventRow) continue;
+      if (eventRow.event.kind !== 1) continue;
+      if (eventRow.deleted) continue;
+      if (eventRow.expiresAt <= now) continue;
+      if (this.worldConfirmed.has(row.eventId)) continue;
+      out.push({ ...row });
+    }
+    out.sort((a, b) => a.createdAt - b.createdAt || (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
+    return out;
+  }
+
+  async markPostOutboxAttempt(eventId: Hex64, status: PostOutboxStatus): Promise<void> {
+    const row = this.postOutbox.get(eventId.toLowerCase());
+    if (!row) return;
+    row.attempts += 1;
+    row.lastAttemptAt = Math.floor(Date.now() / 1000);
+    row.status = status;
+  }
+
+  async removePostOutbox(eventId: Hex64): Promise<void> {
+    this.postOutbox.delete(eventId.toLowerCase());
+  }
+
+  async listPostOutboxStatuses(ids: Hex64[]): Promise<Map<Hex64, PostOutboxStatus>> {
+    const out = new Map<Hex64, PostOutboxStatus>();
+    for (const id of ids) {
+      const row = this.postOutbox.get(id.toLowerCase());
+      if (row) out.set(row.eventId, row.status);
     }
     return out;
   }

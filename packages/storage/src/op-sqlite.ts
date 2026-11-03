@@ -21,8 +21,8 @@ import type {
   UnixSec,
 } from '@airplane/protocol';
 import { EVENT_KIND_STAR } from '@airplane/protocol';
-import type { StorePort, DatabasePort, ListFeedOpts } from './ports';
-import { MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006 } from './schema';
+import type { StorePort, DatabasePort, ListFeedOpts, PostOutboxRow, PostOutboxStatus } from './ports';
+import { MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006, MIGRATION_007 } from './schema';
 import {
   DEFAULT_RETENTION_SEC,
   RECEIPT_DAY_BUCKET_SEC,
@@ -267,10 +267,11 @@ export class OpSqliteStore implements StorePort {
    *
    * - `schema_version` is bootstrapped with CREATE TABLE IF NOT EXISTS (not
    *   a numbered migration) and MAX(version) is read as the current level.
-   * - v == 6: no-op (re-running migrate on an up-to-date DB is safe).
-   * - v > 6: throws a clear "database is newer than this app" error
+   * - v == 7: no-op (re-running migrate on an up-to-date DB is safe).
+   * - v > 7: throws a clear "database is newer than this app" error
    *   instead of silently accepting a schema this build does not know.
-   * - v == 5: apply 006 (feed index). v == 4: apply 005, 006.
+   * - v == 6: apply 007 (post outbox). v == 5: apply 006, 007.
+   *   v == 4: apply 005, 006, 007.
    * - v == 0: legacy pre-versioning DBs are detected via sqlite_master:
    *   no `events` table -> fresh install (apply 001, 002, 003, 004, 005, 006);
    *   `events` without `world_confirmed` -> 001-only install (apply 002,
@@ -335,20 +336,26 @@ export class OpSqliteStore implements StorePort {
       });
     };
 
-    if (v > 6) {
+    if (v > 7) {
       throw new Error(
-        `database version ${v} is newer than this app supports (max 6): ` +
+        `database version ${v} is newer than this app supports (max 7): ` +
           `the database was created by a newer app version; update the app instead of opening it here`,
       );
     }
-    if (v === 6) return;
+    if (v === 7) return;
+    if (v === 6) {
+      await applyMigration(7, MIGRATION_007);
+      return;
+    }
     if (v === 5) {
       await applyMigration(6, MIGRATION_006);
+      await applyMigration(7, MIGRATION_007);
       return;
     }
     if (v === 4) {
       await applyMigration(5, MIGRATION_005);
       await applyMigration(6, MIGRATION_006);
+      await applyMigration(7, MIGRATION_007);
       return;
     }
     if (v === 0) {
@@ -367,6 +374,7 @@ export class OpSqliteStore implements StorePort {
       await applyMigration(4, MIGRATION_004);
       await applyMigration(5, MIGRATION_005);
       await applyMigration(6, MIGRATION_006);
+      await applyMigration(7, MIGRATION_007);
       return;
     }
     if (v === 1) {
@@ -375,6 +383,7 @@ export class OpSqliteStore implements StorePort {
       await applyMigration(4, MIGRATION_004);
       await applyMigration(5, MIGRATION_005);
       await applyMigration(6, MIGRATION_006);
+      await applyMigration(7, MIGRATION_007);
       return;
     }
     if (v === 2) {
@@ -382,12 +391,14 @@ export class OpSqliteStore implements StorePort {
       await applyMigration(4, MIGRATION_004);
       await applyMigration(5, MIGRATION_005);
       await applyMigration(6, MIGRATION_006);
+      await applyMigration(7, MIGRATION_007);
       return;
     }
-    // v === 3 falls through: only 004, 005, and 006 remain.
+    // v === 3 falls through: only 004, 005, 006, and 007 remain.
     await applyMigration(4, MIGRATION_004);
     await applyMigration(5, MIGRATION_005);
     await applyMigration(6, MIGRATION_006);
+    await applyMigration(7, MIGRATION_007);
   }
 
   async saveEvent(e: SignedEvent): Promise<void> {
@@ -714,6 +725,10 @@ export class OpSqliteStore implements StorePort {
         [nowSec],
       );
       await this.db.exec(
+        `DELETE FROM post_outbox WHERE event_id IN (${expired})`,
+        [nowSec],
+      );
+      await this.db.exec(
         `DELETE FROM tombstones WHERE target_id IN (${expired})`,
         [nowSec],
       );
@@ -739,6 +754,8 @@ export class OpSqliteStore implements StorePort {
        ON CONFLICT(event_id) DO NOTHING`,
       [hexToBytes(eventId), now],
     );
+    // World confirmation settles delivery: the outbox row is done.
+    await this.db.exec(`DELETE FROM post_outbox WHERE event_id = ?`, [hexToBytes(eventId)]);
   }
 
   async isWorldConfirmed(eventId: Hex64): Promise<boolean> {
@@ -766,10 +783,87 @@ export class OpSqliteStore implements StorePort {
        WHERE e.kind = 1 AND e.deleted = 0 AND e.expires_at > ?
          AND NOT EXISTS (
            SELECT 1 FROM world_confirmed w WHERE w.event_id = e.id
-         )`,
+         )
+       ORDER BY e.created_at ASC, e.id ASC`,
       [now],
     );
     return rows.map((r) => bytesToHex(r.id));
+  }
+
+  // ------------------------------------------------------------------
+  // Durable post outbox (MIGRATION_007). See ports.ts for the contract.
+  // ------------------------------------------------------------------
+
+  async enqueuePostOutbox(eventId: Hex64, createdAt: number): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    await this.db.exec(
+      `INSERT OR IGNORE INTO post_outbox
+         (event_id, created_at, queued_at, attempts, last_attempt_at, status)
+       VALUES (?, ?, ?, 0, NULL, 'pending')`,
+      [hexToBytes(eventId.toLowerCase()), createdAt, now],
+    );
+  }
+
+  async listPostOutbox(): Promise<PostOutboxRow[]> {
+    const now = Math.floor(Date.now() / 1000);
+    const rows = await this.db.query<{
+      event_id: Uint8Array;
+      created_at: number;
+      queued_at: number;
+      attempts: number;
+      last_attempt_at: number | null;
+      status: PostOutboxStatus;
+    }>(
+      `SELECT o.event_id, o.created_at, o.queued_at, o.attempts,
+              o.last_attempt_at, o.status
+       FROM post_outbox o
+       JOIN events e ON e.id = o.event_id
+       WHERE e.kind = 1 AND e.deleted = 0 AND e.expires_at > ?
+         AND NOT EXISTS (
+           SELECT 1 FROM world_confirmed w WHERE w.event_id = o.event_id
+         )
+       ORDER BY o.created_at ASC, o.event_id ASC`,
+      [now],
+    );
+    return rows.map((r) => ({
+      eventId: bytesToHex(r.event_id),
+      createdAt: r.created_at,
+      queuedAt: r.queued_at,
+      attempts: r.attempts,
+      lastAttemptAt: r.last_attempt_at,
+      status: r.status,
+    }));
+  }
+
+  async markPostOutboxAttempt(eventId: Hex64, status: PostOutboxStatus): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    await this.db.exec(
+      `UPDATE post_outbox
+       SET attempts = attempts + 1, last_attempt_at = ?, status = ?
+       WHERE event_id = ?`,
+      [now, status, hexToBytes(eventId.toLowerCase())],
+    );
+  }
+
+  async removePostOutbox(eventId: Hex64): Promise<void> {
+    await this.db.exec(`DELETE FROM post_outbox WHERE event_id = ?`, [
+      hexToBytes(eventId.toLowerCase()),
+    ]);
+  }
+
+  async listPostOutboxStatuses(ids: Hex64[]): Promise<Map<Hex64, PostOutboxStatus>> {
+    const out = new Map<Hex64, PostOutboxStatus>();
+    if (ids.length === 0) return out;
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = await this.db.query<{
+      event_id: Uint8Array;
+      status: PostOutboxStatus;
+    }>(
+      `SELECT event_id, status FROM post_outbox WHERE event_id IN (${placeholders})`,
+      ids.map((id) => hexToBytes(id.toLowerCase())),
+    );
+    for (const row of rows) out.set(bytesToHex(row.event_id), row.status);
+    return out;
   }
 
   // ------------------------------------------------------------------
