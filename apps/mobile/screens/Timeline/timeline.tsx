@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, RefreshControl, Text, View } from 'react-
 import { FlashList, FlashListRef } from '@shopify/flash-list';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { listFeedPage, subscribeFeed, type FeedPageCursor } from '../../services/airplane/feed';
+import { extractNewPostCards, listFeedPage, subscribeFeed, type FeedPage, type FeedPageCursor } from '../../services/airplane/feed';
 import { toggleReshare } from '../../services/airplane/reshares';
 import { toggleStar } from '../../services/airplane/stars';
 import { trackViewability } from '../../services/airplane/viewTracker';
@@ -72,7 +72,7 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
     const nextCursorRef = useRef<FeedPageCursor | null>(null);
 
     const load = useCallback(
-        async (mode: 'initial' | 'refresh' | 'more', cursor?: FeedPageCursor | null) => {
+        async (mode: 'initial' | 'refresh' | 'more', cursor?: FeedPageCursor | null): Promise<FeedPage | null> => {
             if (mode === 'initial') setLoading(true);
             if (mode === 'refresh') setRefreshing(true);
             if (mode === 'more') setLoadingMore(true);
@@ -94,9 +94,11 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
                         : page.cards,
                 );
                 if (mode !== 'more') setPendingCount(0);
+                return page;
             } catch (error) {
                 console.error('Failed to load feed:', error);
                 if (mode !== 'more') setLoadError(true);
+                return null;
             } finally {
                 setLoading(false);
                 setRefreshing(false);
@@ -155,11 +157,43 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
         };
     }, [load]);
 
+    // Pill tap: a ranked refresh alone does not put fresh posts at the
+    // top. Fresh posts score zero (no views yet) while every viewed post
+    // scores above zero, so the ranked page puts them below all viewed
+    // posts, and past page 1 when a page of viewed posts exists. The tap
+    // therefore snapshots the on screen ids first, refreshes, then moves
+    // the cards that are new to this view to the top and scrolls there.
+    // When no new card is on page 1, later ranked pages are searched
+    // (without changing the list or the pagination cursor) until a new
+    // card is found or the pages run out, so a new post past page 1 is
+    // still surfaced. Pagination state keeps pointing at page 1, and
+    // load-more dedup drops a pinned card if its ranked page arrives
+    // later, so no post is lost or duplicated.
     const showNewPosts = useCallback(async () => {
         recordUiEvent('feed:new-posts');
-        await load('refresh');
+        const beforeIds = new Set(postsRef.current.map(post => post.eventId));
+        const page = await load('refresh');
+        if (!page || beforeIds.size === 0) {
+            scrollListToTop(listRef.current);
+            return;
+        }
+        let fresh = extractNewPostCards(beforeIds, page.cards);
+        let cursor = page.nextCursor;
+        while (fresh.length === 0 && cursor !== null) {
+            const nextPage = await listFeedPage({
+                cells,
+                limit: PAGE_LIMIT,
+                cursor,
+            });
+            fresh = extractNewPostCards(beforeIds, nextPage.cards);
+            cursor = nextPage.nextCursor;
+        }
+        if (fresh.length > 0) {
+            const freshIds = new Set(fresh.map(card => card.eventId));
+            setPosts(current => [...fresh, ...current.filter(card => !freshIds.has(card.eventId))]);
+        }
         scrollListToTop(listRef.current);
-    }, [load]);
+    }, [load, cells]);
 
     // Pagination guard: the state flag only lands after re-render, so two
     // rapid onEndReached firings can both pass it and append the same page

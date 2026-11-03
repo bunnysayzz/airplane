@@ -167,6 +167,36 @@ export async function listFeedPage(opts: FeedPageOpts): Promise<FeedPage> {
 }
 
 /**
+ * New posts for a pill tap: cards in a refreshed page that were not on
+ * screen before the refresh, newest first.
+ *
+ * Why this exists: the feed is ranked by score, and a fresh post has zero
+ * views, so its score is zero while every viewed post scores above zero.
+ * A plain ranked refresh therefore puts fresh posts below every viewed
+ * post, and past page 1 when more than a page of viewed posts exists.
+ * The pill tap must not trust ranked position for fresh posts: it takes
+ * the cards that are new to this view and puts them at the top, and the
+ * ranked order of everything else is untouched.
+ *
+ * An empty before set means a first load, not a tap over an existing
+ * list, so nothing is treated as new and the ranked page is kept as is.
+ * The input list is not mutated: the fresh cards are sorted in a copy.
+ */
+export function extractNewPostCards(
+  beforeIds: ReadonlySet<string>,
+  cards: PostCardModel[],
+): PostCardModel[] {
+  if (beforeIds.size === 0) return [];
+  const fresh = cards.filter(card => !beforeIds.has(card.eventId));
+  fresh.sort((a, b) => {
+    if (b.createdAtMs !== a.createdAtMs) return b.createdAtMs - a.createdAtMs;
+    if (b.eventId === a.eventId) return 0;
+    return b.eventId > a.eventId ? 1 : -1;
+  });
+  return fresh;
+}
+
+/**
  * Map ranked store rows to cards (star/reshare views, World confirmation).
  * Shared by the single-page and globally ranked paths.
  */
