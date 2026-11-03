@@ -72,7 +72,11 @@ rule above is the only disambiguation. A display name is also not a
 proof of who someone is offline: it is a signed claim from a key, and
 the key itself is the identity. If a key is burned, the name attached to
 the old key does not transfer to a new person; it simply stops being
-asserted by new posts from that key.
+asserted by new posts from that key. Likewise, a relay accepting an
+envelope (a relay OK) or a World globe on a post is not identity proof
+and not delivery proof: acceptance and a query hit say a relay held a
+copy, nothing about who holds the key offline or whether a peer
+received anything.
 
 ## Message by username
 

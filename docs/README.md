@@ -20,10 +20,10 @@ Status tags: current (the live design or process), draft (incomplete by its own 
 | [`spec/wire-format.md`](spec/wire-format.md) | Event encoding spec - **source of truth** for `packages/protocol` (code follows spec) | current |
 | [`spec/flood.md`](spec/flood.md) | Controlled-flood relay spec: TTL, jitter, seen-cache dedup, fragments | current |
 | [`spec/ble-gatt.md`](spec/ble-gatt.md) | BLE GATT transport spec: service and characteristic layout, discovery, datagrams | current |
-| [`dm-transport.md`](dm-transport.md) | DM relay plus BLE transport, honest delivery states, acks, SQLite DM store, interop | current |
+| [`dm-transport.md`](dm-transport.md) | DM relay plus BLE transport, honest delivery states, Relayed re-publish, acks, unread counts, SQLite DM store, interop | current |
 | [`identity.md`](identity.md) | Ed25519 keys, memorable names, signed display names, username messaging, generated avatars | current |
 | [`self-messages.md`](self-messages.md) | Saved notes: device only store, limits, durability across burn, plaintext at rest | current |
-| [`feed.md`](feed.md) | New posts at top, persistent feed cache, honest UI states, retention caps | current |
+| [`feed.md`](feed.md) | New posts at top, persistent feed cache, durable post outbox and Unsent, World on query hit only, last-known marker, honest UI states, retention caps | current |
 | [`adr/0001-template.md`](adr/0001-template.md) | ADR template - use it for every new architecture decision | current |
 | [`release-runbook.md`](release-runbook.md) | How releases are cut: tagging, signing, checksums, GitHub Releases plus Obtainium plus TestFlight *(landing - in progress)* | current |
 | [`threat-model.md`](threat-model.md) | Security posture. Currently a P1 DRAFT stub; the full threat model lands in P4 | draft |

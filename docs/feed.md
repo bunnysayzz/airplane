@@ -1,10 +1,13 @@
-# Feed: new posts at top, and the persistent cache
+# Feed: new posts at top, the persistent cache, and delivery states
 
-Two feed behaviours changed in this batch, and they interact: new posts
-at top (how fresh cards join the list) and the persistent cache (what
-the list shows when the live query comes back empty). This doc describes
-both, and the merged interaction to verify: the Saved row pinning
-behaviour over the cached list on the merged tree.
+Feed behaviour on the merged tree covers new posts at top (how fresh
+cards join the list), the persistent cache (what the list shows when
+the live query comes back empty), and the delivery states that ride on
+the cards themselves: the durable post outbox and Unsent, World
+confirmed on query hit only, the last-known area marker, and honest
+BLE wording. The merged interaction to verify on real phones is the
+Saved row pinning behaviour over the cached list, plus the new card
+states below.
 
 ## New posts at top
 
@@ -108,6 +111,87 @@ not be found" on the detail route, even though the card still shows in
 the feed list. The feed list is what the cache preserves; the detail
 route is not cached. This gap is listed in the README limitations.
 
+## Durable post outbox and Unsent
+
+Own posts are queued in the `post_outbox` table at save time, before
+fanout runs, so a kill during fanout still leaves a retryable row.
+The table holds delivery state only, never unsaved text: one row per
+own kind-1 post, with status `pending`, `ble-sent`, or `unsent`, and
+World confirmation deletes the row. The outbox drains over BLE on
+peer arrival, at transport start, and on foreground radio re-validation,
+oldest first, re-checking each row against the store first (a missing
+or World-confirmed event removes its row instead of stalling the
+drain). Relay retry is not done by the drain: WorldSync owns relay
+retry on its 60 second tick plus connectivity return, foreground
+return, and immediately after a relay win, oldest first, at most 50
+unconfirmed posts per pass. A BLE drain while online would break
+relay-first order, so the drain is the offline path.
+
+The feed card reports the outbox state, and only for the author's own
+posts (another phone's post in the feed is already delivered to this
+phone by definition):
+
+- `unsent`: the card shows "Unsent". That is the state when the router
+  reached no transport, or when a pending row is older than 10
+  seconds (a fanout still in flight inside the 5 second router
+  deadline does not flash Unsent).
+- `ble-sent`: the card shows neither globe nor Unsent. The post was
+  handed to the radio and still awaits World.
+- World-confirmed: the globe wins over Unsent. A row that was never
+  enqueued (inbound posts, old installs) shows neither state.
+
+After publish, the toast says "Post saved". That confirms the local
+save only. Delivery lives on the card, as above, so the two never
+disagree: they report different stages.
+
+## World confirmed on query hit only
+
+The globe appears only when a relay query hit returns the post, never
+instantly on a relay OK. A relay OK means acceptance; a relay can OK
+then drop the event before any peer fetches it. After a relay win, the
+app runs a WorldSync pass at once instead of waiting up to 60 seconds
+for the next tick: the pass re-pushes the still-unconfirmed post and
+queries for it, and only a hit confirms it. A dropped event leaves no
+globe and stays unconfirmed for later passes to re-push. Relay
+observation is not deduplicated for confirmation: the hook runs for
+every relay-sourced event, including duplicates, so a query hit
+confirming a post this phone already published is not swallowed by the
+seen cache that publish time populated. BLE observation never
+confirms World.
+
+## Last-known area marker
+
+When the fresh fix fails with a timeout or an unavailable provider,
+and only then, the post falls back to a real previously seen area:
+the OS last-known position at any age, else the app's own expired
+cache cell. The fallback cell is never written back into the fresh
+cache, never invented, and permission or services failures never reach
+it. A fallback post carries the signed `["location_source",
+"last-known"]` tag, and its feed card shows "Last known area". Older
+installs ignore the tag and show no marker. Fresh and cached cells
+carry no marker and need none.
+
+## Cell scoping and far posts
+
+The feed list shows the device geohash-5 cell plus its 8 neighbours.
+Delivery is not scoped the same way: a bridge forwards posts
+regardless of cell (see [spec/flood.md](spec/flood.md)), and relays
+do not know the feed scope, so a far post can be relay-delivered and
+stored yet stay invisible in the feed list by design. That is not a
+lost post. The detail route lookup itself is unscoped, which is why a
+cached card whose store row expired can still be listed while its
+detail route reports it missing (see the known gap below).
+
+## Honest BLE wording
+
+A completed BLE broadcast is reported as handed to radio, never as
+delivered. A GATT notify can resolve even with no peer app subscribed,
+and there is no BLE ack frame for posts in this batch, so no BLE post
+status may claim peer delivery. The post BLE ack frame is a follow-up,
+not shipped work. DM delivery is different: Delivered there means a
+verified peer ack, never a notify. See
+[dm-transport.md](dm-transport.md).
+
 ### Merged interaction to verify
 
 The new-posts track and the cache track both touch Timeline, and the
@@ -117,4 +201,7 @@ over a cached list (not over a blanked list), a refresh that returns
 nothing keeps the merged list, and the cached banner appears only when
 the shown cards actually came from the cache. If a pill tap ever blanks
 a cached list on the merged tree, that is a merge regression in
-Timeline, not a behaviour of either track alone.
+Timeline, not a behaviour of either track alone. Verify the card
+states alongside it: Unsent on a no-transport own post, neither mark
+on a BLE-handed post, globe only after a query hit, and "Last known
+area" only on a fallback post.
