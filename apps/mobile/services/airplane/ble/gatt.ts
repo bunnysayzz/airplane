@@ -3,21 +3,33 @@
 //
 // Roles: every phone is BOTH central and peripheral.
 //   - Central (react-native-ble-manager 12.6.0): scan, connect, GATT client.
-//     Writes frames to the peer's RX characteristic; receives the peer's
-//     frames via notifications on its TX characteristic.
+//     Reads the peer IDENT, writes a hello datagram, and subscribes to
+//     the peer TX characteristic, so peer notifies arrive as central
+//     notifications through the codegen emitter (works on new-arch
+//     builds).
 //   - Peripheral (react-native-multi-ble-peripheral 0.1.8): advertise +
-//     GATT server. Receives frames as writes to our RX characteristic;
-//     sends frames via TX notifications (broadcast to all subscribed
-//     centrals - see limitation below).
+//     GATT server. Sends frames via TX notifications (broadcast to all
+//     subscribed centrals - see limitation below).
 //
-// Connection rule: on discovering a peer tag, the phone whose own tag is
-// lexicographically smaller (or equal) initiates the central connection.
-// Deterministic, so one connection exists per pair in the common case.
+// Connection rule: on discovering a peer tag, BOTH sides initiate the
+// central connection, giving crossed central links. The old tie-break
+// (only the smaller tag connects) stranded the larger-tag side: it
+// never attempted a connection, and the peripheral side could not
+// register the inbound link anyway, because the peripheral library
+// reports inbound writes through the legacy bridge event emitter,
+// which does not deliver on new-arch builds (same failure class as
+// the old ble-manager legacy discovery subscription). A central write
+// to the peer RX therefore "succeeds" at the radio while the peer app
+// layer never sees it, so send() notifies on our own TX instead and
+// the peer central receives it; the mesh dedupes by event ID on
+// non-target peers.
 //
 // Identity: advertise tag = first 8 bytes of the Ed25519 pubkey (discovery
 // hint). Full peerId (64-char hex pubkey) is resolved after connect - the
-// central reads our IDENT characteristic, and writes a hello datagram so
-// the peripheral side learns the central's identity + ATT MTU.
+// central reads our IDENT characteristic. The hello datagram is still
+// written (kept for runtimes where peripheral write events do arrive),
+// but on current builds the peripheral side never learns the central
+// identity from it, so no send path may depend on inbound writes.
 //
 // Port-layer framing (below the protocol fragment layer): every send() frame
 // is wrapped as u16be(len) || kind || payload and chunked to (link MTU - 3)
@@ -28,15 +40,25 @@
 // method fails closed (descriptive Error or inert no-op) and NEVER crashes
 // the app. The transport manager catches and runs Nostr-only.
 //
-// RADIO-UNVERIFIED: implemented against the libraries' published sources
-// and unit tests with fake adapters. No two physical devices exist in this
-// environment, so no over-the-air frame has ever flowed through this code.
-// Multi-phone interop stays an open item for Tuba's two-phone test.
+// FIELD-PROVEN 2026-11-03 (two-phone run, v0.1.15): discovery, central
+// connect, IDENT read, and TX subscription all work over the air, but
+// the peripheral side never sees an inbound write: the larger-tag phone
+// logged hundreds of sightings and zero peer-connected lines while the
+// smaller-tag phone sent frames "over BLE" that never arrived. That run
+// is why send() uses TX notify and why both sides connect.
 //
 // Known limitations (honest):
 // - TX notify() broadcasts to ALL subscribed centrals; send() to one
-//   peripheral-role peer also reaches the others. The mesh dedupes by event
-//   ID (SeenCache), so this wastes bandwidth, not correctness.
+//   peer also reaches the others. The mesh dedupes by event ID
+//   (SeenCache), so this wastes bandwidth, not correctness.
+// - A notify resolves successfully even with no subscriber yet, so a
+//   post published in the first seconds after discovery, before the
+//   peer central subscribes to our TX, can be lost on BLE without an
+//   error. The phone check for this design waits for a peer-connected
+//   line on both phones before posting.
+// - Peripheral-role inbound writes never arrive on new-arch builds
+//   (legacy bridge emitter, see above), so peripheral-role conns only
+//   exist in tests or on runtimes where that emitter works.
 // - BLE transport: no retry backoff at all for connect or send (no
 //   timeout or backoff timer exists in this layer as of this writing).
 //   Retry behaviour for the other transports, stated so no reader has to
@@ -88,7 +110,6 @@ import {
   MESH_TX_CHAR_UUID,
   DatagramReassembler,
   chunkBytes,
-  compareTags,
   encodeDatagram,
   encodeHello,
   parseHello,
@@ -591,17 +612,21 @@ export class GattBlePort implements TransportPort {
     }
     if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) return;
     if (this.bleIndex.has(id) || this.pendingConnects.has(id)) return; // already connecting/connected
-    // Tie-break: smaller (or equal) tag initiates the central connection.
-    if (this.ownTag && compareTags(this.ownTag, tag) <= 0) {
-      void this.connectCentral(id, tag).catch((err) => {
-        // Auto-connect failures used to be swallowed with an empty catch
-        // and, with allowDuplicates false, the peer was never retried for
-        // the session. Record a stage-tagged failure and schedule exactly
-        // one bounded retry; the retry itself stays silent on failure.
-        recordConnectFailure(`auto-connect ${id}: ${err instanceof Error ? err.message : String(err)}`);
-        this.scheduleAutoConnectRetry(id, tag);
-      });
-    }
+    // Both sides initiate: the old smaller-tag tie-break left the
+    // larger-tag side with no connection and no way to get one, because
+    // the inbound link it waited for never registers (peripheral write
+    // events do not arrive on new-arch builds). Crossed central links
+    // give each side a TX subscription on the other, which is what
+    // send() notifies on. Still bounded by the peer limit above and by
+    // the connecting/connected dedup above.
+    void this.connectCentral(id, tag).catch((err) => {
+      // Auto-connect failures used to be swallowed with an empty catch
+      // and, with allowDuplicates false, the peer was never retried for
+      // the session. Record a stage-tagged failure and schedule exactly
+      // one bounded retry; the retry itself stays silent on failure.
+      recordConnectFailure(`auto-connect ${id}: ${err instanceof Error ? err.message : String(err)}`);
+      this.scheduleAutoConnectRetry(id, tag);
+    });
   }
 
   /**
@@ -767,32 +792,23 @@ export class GattBlePort implements TransportPort {
     if (!conn) throw new Error(`ble: unknown peer ${peerId}`);
     const datagram = encodeDatagram(DATAGRAM_FRAME, frame);
     const chunkSize = Math.max(conn.mtu - ATT_OVERHEAD, 1);
-    if (conn.role === 'central') {
-      const central = this.deps.central;
-      if (!central) throw new Error('ble: central role unavailable');
-      for (const chunk of chunkBytes(datagram, chunkSize)) {
-        // RX declares WRITE_NO_RESPONSE: frame chunks go without-response
-        // (no per-chunk round trip), falling back to with-response writes
-        // when the native shape lacks the method.
-        if (central.writeWithoutResponse) {
-          await withBleTimeout(
-            central.writeWithoutResponse(conn.bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk),
-            BLE_TIMEOUT_MS.write,
-            'frame write',
-          );
-        } else {
-          await withBleTimeout(central.write(conn.bleId, MESH_SERVICE_UUID, MESH_RX_CHAR_UUID, chunk), BLE_TIMEOUT_MS.write, 'frame write');
-        }
-        recordFragmentsSent(peerId, 1);
-      }
-      recordPacketSent(peerId);
-      return;
-    }
+    // Send on our own TX characteristic, whatever the conn role. A
+    // central write to the peer RX is never delivered to the peer app
+    // layer on new-arch builds: the peripheral library reports inbound
+    // writes through the legacy bridge emitter, which does not deliver,
+    // so a write that "succeeds" is a silent loss (proven 2026-11-03:
+    // one phone logged BLE sends the other never received). TX notify
+    // reaches the peer central, which receives it through the codegen
+    // notification emitter. The conn still gates the send (unknown peer
+    // throws) and sizes the chunks; the peer must have completed its
+    // central connect to us (and so subscribed to our TX) for the
+    // notify to land. NOTE: notify() broadcasts to ALL subscribed
+    // centrals (library limitation); non-target peers drop the frames
+    // at the mesh layer via event-ID dedup. Bandwidth-inefficient, not
+    // incorrect. Failing closed when our advertiser is down is honest:
+    // without it there is no TX to notify on.
     const peripheral = this.peripheral;
     if (!peripheral) throw new Error('ble: peripheral role unavailable');
-    // NOTE: notify() broadcasts to ALL subscribed centrals (library
-    // limitation); non-target peers drop the frames at the mesh layer via
-    // event-ID dedup. Bandwidth-inefficient, not incorrect.
     for (const chunk of chunkBytes(datagram, chunkSize)) {
       await withBleTimeout(peripheral.notify(chunk), BLE_TIMEOUT_MS.notify, 'notify');
       recordFragmentsSent(peerId, 1);

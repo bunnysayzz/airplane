@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // GattBlePort tests with fake native adapters (no radio, no native modules).
-// Covers: advertise/scan lifecycle, tie-break auto-connect, identity
-// exchange both directions, MTU-aware ATT chunking, datagram reassembly,
-// provisional peer ids, disconnect/close, and fail-closed null adapters.
+// Covers: advertise/scan lifecycle, crossed auto-connect (both sides
+// initiate), identity exchange both directions, MTU-aware ATT chunking,
+// datagram reassembly, provisional peer ids, disconnect/close, and
+// fail-closed null adapters.
 // A final block verifies the real adapter delegation with jest.mock factories.
 
 import { toHex } from '@airplane/protocol';
@@ -309,15 +310,21 @@ describe('discovery + central connect flow', () => {
     await port.close();
   });
 
-  test('larger own tag does not auto-connect (waits for inbound)', async () => {
+  test('larger own tag also auto-connects (crossed links, no tie-break)', async () => {
     const { deps, central } = makeDeps();
+    central.identHex = toHex(SMALLER_PUB);
     const port = new GattBlePort(deps);
     await port.advertise(OWN_HEX); // own tag 0x0a.. > peer 0x09..
     await port.scan(() => {});
     central.discoverCb!({ id: 'ble-9', rssi: -70, tag: peerTagOf(SMALLER_PUB) });
     await tick(50);
-    expect(central.connects).toEqual([]);
-    expect(port.peerCount).toBe(0);
+    // The old tie-break left the larger-tag side waiting for an inbound
+    // hello that never arrives on new-arch builds (peripheral write
+    // events do not deliver), so it never connected. Both sides now
+    // initiate, giving crossed central links.
+    expect(central.connects).toEqual(['ble-9']);
+    expect(port.peerCount).toBe(1);
+    await port.close();
   });
 
   test('non-mesh advertisements are ignored', async () => {
@@ -457,7 +464,7 @@ describe('extractTag (native discover shapes)', () => {
   });
 });
 
-describe('send/receive over the central role', () => {
+describe('send over notify, receive over central notifications', () => {
   const MESH_RX = 'b44060bc-7918-4e95-aabd-fe08327ad228';
 
   async function connectedPort() {
@@ -483,24 +490,26 @@ describe('send/receive over the central role', () => {
     expect(central.notificationsStarted).toEqual(['ble-1']);
   });
 
-  test('send chunks frames to (mtu - 3) ATT PDUs', async () => {
-    const { port, central } = await connectedPort();
+  test('send notifies on our TX (no central writes for frames)', async () => {
+    const { port, central, peripheral } = await connectedPort();
     const frame = new Uint8Array(1200).map((_, i) => i & 0xff);
-    // Frame chunks go out without-response (F-P2-9); hello writes stay
-    // in central.writes, so chunking is asserted on the without-response log.
+    // Frames go out as TX notifies, never as central writes: a write to
+    // the peer RX is never delivered to the peer app layer on new-arch
+    // builds, so a "sent" write was a silent loss (proven 2026-11-03).
     await port.send(PEER_HEX, frame);
-    const newWrites = central.writesWithoutResponse;
     // datagram = 2 (len) + 1 (kind) + 1200; chunk size 509 -> 3 chunks
-    expect(newWrites).toHaveLength(3);
-    expect(newWrites.every((w) => w.chunk.length <= 512 - ATT_OVERHEAD)).toBe(true);
-    expect(newWrites.every((w) => w.char === MESH_RX)).toBe(true);
+    expect(peripheral.notified).toHaveLength(3);
+    expect(peripheral.notified.every((c) => c.length <= 512 - ATT_OVERHEAD)).toBe(true);
     // Reassemble: exactly one FRAME datagram with the original bytes.
-    const r = new DatagramReassembler();
-    const dgs: Uint8Array[] = [];
-    for (const w of newWrites) dgs.push(...r.push(w.chunk));
+    const dgs = peripheral.notifiedDatagrams();
     expect(dgs).toHaveLength(1);
     expect(dgs[0][0]).toBe(DATAGRAM_FRAME);
     expect(dgs[0].slice(1)).toEqual(frame);
+    // No frame chunk went out as a central write: writes hold the hello only.
+    expect(central.writesWithoutResponse).toHaveLength(0);
+    const frameWrites = central.writtenDatagrams(MESH_RX).filter((dg) => dg[0] === DATAGRAM_FRAME);
+    expect(frameWrites).toHaveLength(0);
+    await port.close();
   });
 
   test('send to unknown peer throws (fail closed)', async () => {
@@ -1030,9 +1039,9 @@ describe('stopAdvertise failure ordering (audit F-P2-7)', () => {
   });
 });
 
-describe('writeWithoutResponse for frame chunks (audit F-P2-9)', () => {
-  test('send uses without-response writes for frame chunks, hello keeps with-response writes', async () => {
-    const { deps, central } = makeDeps();
+describe('notify send for frame chunks (supersedes audit F-P2-9)', () => {
+  test('send notifies frames; hello keeps with-response writes', async () => {
+    const { deps, central, peripheral } = makeDeps();
     const port = new GattBlePort(deps);
     await port.advertise(OWN_HEX);
     await port.scan(() => {});
@@ -1041,10 +1050,80 @@ describe('writeWithoutResponse for frame chunks (audit F-P2-9)', () => {
     const helloWrites = central.writes.length;
     const frame = new Uint8Array(100).map((_, i) => i & 0xff);
     await port.send(PEER_HEX, frame);
-    // Hello went out with-response; the frame went without-response.
+    // Hello went out with-response; the frame went out as TX notifies.
+    // F-P2-9 assumed central writes are delivered; the 2026-11-03 field
+    // run proved they are not on new-arch builds, so writes are no
+    // longer used for frames at all.
     expect(central.writes.length).toBe(helloWrites);
-    expect(central.writesWithoutResponse.length).toBeGreaterThan(0);
-    expect(central.writesWithoutResponse.every((w) => w.char === 'b44060bc-7918-4e95-aabd-fe08327ad228')).toBe(true);
+    expect(central.writesWithoutResponse).toHaveLength(0);
+    expect(peripheral.notifiedDatagrams()).toHaveLength(1);
+    await port.close();
+  });
+});
+
+describe('crossed links: both directions over notify', () => {
+  test('two ports exchange frames over TX notify (radio hop simulated)', async () => {
+    // Port A (own 0x0a..) and port B (own 0x0b..): each discovers the
+    // other and connects as central, giving crossed links. Frames then
+    // travel A TX notify -> B central notification and back. The radio
+    // hop itself is the native layer: feeding A notified chunks into B
+    // notifyCb stands in for it, and asserts the port layer produces
+    // notifies on send and reassembles notifies on receive.
+    const depsA = makeDeps();
+    const depsB = makeDeps();
+    depsA.central.identHex = PEER_HEX;
+    depsB.central.identHex = OWN_HEX;
+    const portA = new GattBlePort(depsA.deps);
+    const portB = new GattBlePort(depsB.deps);
+    await portA.advertise(OWN_HEX);
+    await portB.advertise(PEER_HEX);
+    await portA.scan(() => {});
+    await portB.scan(() => {});
+    // A discovers B (tag 0x0b..) and B discovers A (tag 0x0a..): both
+    // initiate, tie-break or not.
+    depsA.central.discoverCb!({ id: 'ble-b', rssi: -50, tag: PEER_TAG });
+    depsB.central.discoverCb!({ id: 'ble-a', rssi: -50, tag: peerTagOf(OWN_PUB) });
+    await tick(50);
+    expect(portA.connectedPeerIds()).toEqual([PEER_HEX]);
+    expect(portB.connectedPeerIds()).toEqual([OWN_HEX]);
+    // A -> B: A notifies, B central receives.
+    const receivedB: { peerId: string; bytes: Uint8Array }[] = [];
+    portB.onReceive((peerId, bytes) => receivedB.push({ peerId, bytes }));
+    const frameAB = new Uint8Array([1, 2, 3, 4]);
+    await portA.send(PEER_HEX, frameAB);
+    expect(depsA.central.writesWithoutResponse).toHaveLength(0);
+    for (const chunk of depsA.peripheral.notified) {
+      depsB.central.notifyCb!({ id: 'ble-a', value: chunk });
+    }
+    expect(receivedB).toEqual([{ peerId: OWN_HEX, bytes: frameAB }]);
+    // B -> A: reverse direction over the same crossed links.
+    const receivedA: { peerId: string; bytes: Uint8Array }[] = [];
+    portA.onReceive((peerId, bytes) => receivedA.push({ peerId, bytes }));
+    const frameBA = new Uint8Array([9, 8]);
+    await portB.send(OWN_HEX, frameBA);
+    expect(depsB.central.writesWithoutResponse).toHaveLength(0);
+    for (const chunk of depsB.peripheral.notified) {
+      depsA.central.notifyCb!({ id: 'ble-b', value: chunk });
+    }
+    expect(receivedA).toEqual([{ peerId: PEER_HEX, bytes: frameBA }]);
+    await portA.close();
+    await portB.close();
+  });
+
+  test('central send without an advertiser throws (no silent write)', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    // Advertiser down: the central conn survives (see stopAdvertise),
+    // but there is no TX to notify on, so send must fail loudly rather
+    // than fall back to a write nobody receives.
+    await port.stopAdvertise();
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    await expect(port.send(PEER_HEX, new Uint8Array([1]))).rejects.toThrow(/peripheral role unavailable/);
     await port.close();
   });
 });

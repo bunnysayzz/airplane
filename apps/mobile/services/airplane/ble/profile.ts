@@ -2,9 +2,11 @@
 // BLE GATT profile for the Airplane mesh (v1, Android only).
 //
 // One GATT service per phone, acting as peripheral. Every phone is BOTH a
-// central (scans, connects, writes frames) and a peripheral (advertises,
-// serves frames) - the tie-break rule in gatt.ts keeps one connection per
-// pair.
+// central (scans, connects, subscribes to peer TX) and a peripheral
+// (advertises, notifies frames). Both sides connect as central, giving
+// crossed links; frames travel as TX notifies, never as RX writes (see
+// gatt.ts: RX writes are never delivered to the peer app layer on
+// new-arch builds).
 //
 //   Service MESH_SERVICE_UUID (primary)
 //   - MESH_RX_CHAR_UUID    write, write-without-response : central -> peripheral datagrams
