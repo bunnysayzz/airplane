@@ -8,7 +8,7 @@ import { SettingsProvider } from '../src/lib/settingsContext';
 import { DialogHost } from '../components/Dialog/dialogHost';
 import { startTransport, stopTransport, pruneExpiredStore } from '../services/airplane';
 import { revalidateBleRadio } from '../services/airplane/transport';
-import { flushDmOutboxIfStarted, refreshDmSubscriptionIfStarted } from '../services/airplane/dm';
+import { flushDmOutboxIfStarted, refreshDmSubscriptionIfStarted, startDmServiceAtLaunch } from '../services/airplane/dm';
 import { checkForUpdateOnLaunch } from '../src/lib/updateCheck';
 import { friendlyErrorMessage } from '../src/lib/errorCopy';
 import { recordUiEvent } from '../services/airplane/diagnostics';
@@ -91,9 +91,9 @@ export default function RootLayout() {
           if (state === 'active') void revalidateBleRadio().catch(() => {});
           // P1-09: timers do not reliably fire while backgrounded, so a
           // foreground return also drains the DM outbox and replays missed
-          // DMs and acks (both no-ops if the DM service was never started,
-          // so this never creates subscriptions for a user who never
-          // opened Messages).
+          // DMs and acks. The DM service now normally starts at launch
+          // (rank 6), so this is a backstop, not the first start; the
+          // never-started guards below stay for a failed launch start.
           if (state === 'active') {
             void flushDmOutboxIfStarted(true).catch(() => {});
             void refreshDmSubscriptionIfStarted().catch(() => {});
@@ -105,6 +105,14 @@ export default function RootLayout() {
         const task = InteractionManager.runAfterInteractions(() => {
             startTransport().catch(() => {});
         });
+        // Rank 6: start the DM service at launch, same after-first-paint
+        // slot. Cost is one subscribe plus one forced flush (plus the
+        // capped pending-ack resend inside start); no background service
+        // is created. A failed launch start is non-fatal: the next
+        // Messages open retries through getDmService.
+        const dmTask = InteractionManager.runAfterInteractions(() => {
+            startDmServiceAtLaunch().catch(() => {});
+        });
         // T14: update check, same deal - after first paint, fire-and-forget.
         // A failed check, no network, or a bad response never breaks launch;
         // the updater module resolves those to "no update" instead of throwing.
@@ -115,6 +123,7 @@ export default function RootLayout() {
             appStateSub.remove();
             stopDiagnosticsLogFile();
             task.cancel();
+            dmTask.cancel();
             updateTask.cancel();
             // Root unmount is rare on mobile, but if it happens the NetInfo
             // listener, sync timer and relay sockets must not leak.

@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS dm_messages (
   ack_proof TEXT,
   sender_created_at_sec INTEGER,
   mesh_attempts INTEGER NOT NULL DEFAULT 0,
+  relay_republish_attempts INTEGER NOT NULL DEFAULT 0,
+  ack_sent INTEGER NOT NULL DEFAULT 0,
   created_at_ms INTEGER NOT NULL,
   status TEXT NOT NULL,
   attempts INTEGER NOT NULL,
@@ -96,6 +98,8 @@ interface MessageDbRow {
   ack_proof: string | null;
   sender_created_at_sec: number | null;
   mesh_attempts: number;
+  relay_republish_attempts: number | null;
+  ack_sent: number | null;
   created_at_ms: number;
   status: string;
   attempts: number;
@@ -145,6 +149,8 @@ function messageFromRow(row: MessageDbRow): DmMessageRow {
     status: row.status as DmMessageRow['status'],
     attempts: row.attempts,
     meshAttempts: row.mesh_attempts,
+    relayRepublishAttempts: row.relay_republish_attempts ?? 0,
+    ackSent: row.ack_sent === 1,
     nextAttemptAtMs: row.next_attempt_at_ms,
   };
   const envelope = parseEnvelope(row.envelope_json);
@@ -172,6 +178,20 @@ export class SqliteDmStore implements DmStorePort {
         for (const statement of MIGRATION_SQL.split(';')) {
           const sql = statement.trim();
           if (sql) await this.db.exec(sql);
+        }
+        // Upgrade for tables created before the rank 1 and rank 9
+        // columns: SQLite has no ADD COLUMN IF NOT EXISTS, so a
+        // duplicate-column error means the column is already there
+        // and is ignored. Any other error still fails the migration.
+        for (const sql of [
+          'ALTER TABLE dm_messages ADD COLUMN relay_republish_attempts INTEGER NOT NULL DEFAULT 0',
+          'ALTER TABLE dm_messages ADD COLUMN ack_sent INTEGER NOT NULL DEFAULT 0',
+        ]) {
+          try {
+            await this.db.exec(sql);
+          } catch (e) {
+            if (!(e instanceof Error) || !/duplicate column/i.test(e.message)) throw e;
+          }
         }
       })();
       this.ready.catch(() => {
@@ -231,8 +251,9 @@ export class SqliteDmStore implements DmStorePort {
     await this.db.exec(
       `INSERT INTO dm_messages
         (id, peer_hex, direction, sealed, envelope_json, plain_text, delivery_id, ack_proof,
-         sender_created_at_sec, mesh_attempts, created_at_ms, status, attempts, next_attempt_at_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         sender_created_at_sec, mesh_attempts, relay_republish_attempts, ack_sent,
+         created_at_ms, status, attempts, next_attempt_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         m.id,
         m.peerHex,
@@ -244,6 +265,8 @@ export class SqliteDmStore implements DmStorePort {
         m.ackProof ?? null,
         m.senderCreatedAtSec ?? null,
         m.meshAttempts ?? 0,
+        m.relayRepublishAttempts ?? 0,
+        m.ackSent === true ? 1 : 0,
         m.createdAtMs,
         m.status,
         m.attempts,
@@ -266,7 +289,8 @@ export class SqliteDmStore implements DmStorePort {
     await this.db.exec(
       `UPDATE dm_messages SET peer_hex = ?, direction = ?, sealed = ?, envelope_json = ?,
         plain_text = ?, delivery_id = ?, ack_proof = ?, sender_created_at_sec = ?,
-        mesh_attempts = ?, created_at_ms = ?, status = ?, attempts = ?, next_attempt_at_ms = ?
+        mesh_attempts = ?, relay_republish_attempts = ?, ack_sent = ?,
+        created_at_ms = ?, status = ?, attempts = ?, next_attempt_at_ms = ?
        WHERE id = ?`,
       [
         m.peerHex,
@@ -278,6 +302,8 @@ export class SqliteDmStore implements DmStorePort {
         m.ackProof ?? null,
         m.senderCreatedAtSec ?? null,
         m.meshAttempts ?? 0,
+        m.relayRepublishAttempts ?? 0,
+        m.ackSent === true ? 1 : 0,
         m.createdAtMs,
         m.status,
         m.attempts,

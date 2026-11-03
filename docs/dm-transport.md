@@ -50,9 +50,13 @@ missed.
 
 NIP-42 AUTH is not answered: a relay that challenges with AUTH gets no
 answer, and AUTH never gates delivery and never crashes the app.
-Half-open socket detection is absent in v1: there is no ping, so a
-socket that goes silent without an error or a close is not detected
-here. Recovery is at the app layer.
+Half-open socket detection uses a 90 second silence timer, ported from
+the post transport: any inbound frame resets it, and a silent socket is
+force-closed and reconnected, which re-sends the subscription with
+backfill. No ping is sent: React Native WebSocket exposes no ping, so
+there is no ping grace. A relay CLOSED for the live subscription
+triggers an immediate resubscribe on the same sockets, also with
+backfill. The app layer foreground refresh remains as a backstop.
 
 ## BLE transport
 
@@ -76,7 +80,7 @@ Relayed, below.
 |---|---|---|
 | Sending | Sending | An attempt is in flight, or a hard failure is being retried inside the attempt cap. Never a final state. |
 | Queued | Queued, waiting for a transport | The last attempt found no transport at all (relays unreachable and no BLE peers). Retried without an attempt cap: offline for hours still drains when a transport returns, it does not Failed. |
-| Relayed | Sent to relay, not delivered yet | A relay accepted the envelope. Never re-published (re-publishing the same event ID is a no-op at the relay) and never Failed. No ack timeout: it stays Relayed until an ack arrives. |
+| Relayed | Sent to relay, not delivered yet | A relay accepted the envelope. Re-published with the identical event ID only after a 24 hour ack window with no ack, at most 3 re-publishes. A re-publish is a no-op at a relay that still holds the event, and a recovery when the relay dropped it. Never Failed by time alone, and the label stays Relayed while the window runs. A re-publish never inflates unread counts: the recipient dedups by delivery ID. |
 | MeshSent | Sent over BLE, not delivered yet | A BLE notify went out to at least one connected peer. Re-attempted when due (30 seconds) or on force flush; a relay success upgrades it to Relayed; 5 mesh sends without an ack end in Failed. |
 | Delivered | Delivered | Only on a verified peer ack. See Acks below. |
 | Failed | Failed, tap to retry | Hard failures exhausted, or mesh sends exhausted without an ack. Tap to retry re-queues the message, resets attempts, and sends again. |
@@ -84,6 +88,19 @@ Relayed, below.
 A late ack still upgrades any state to Delivered, including Failed.
 A row in Relayed or MeshSent is a handoff, not a trap: it stays visible
 with its "not delivered yet" label until an ack arrives.
+
+Per-conversation head-of-line: a row that turns terminally Failed
+inside a flush does not block later rows to the same peer; the flush
+continues past it. A transient failure (Queued, or a MeshSent retry
+still due) still stops that conversation's queue, so order is kept
+while a transport is merely slow. Other conversations already flush
+concurrently and keep doing so.
+
+Service start: the DM service starts at app launch, not only when
+Messages opens. Launch cost is one subscribe plus one forced flush
+(plus the capped pending-ack resend below). This is not a background
+service: no new timer, no background task, and no periodic work is
+added. The outbox timer still arms only when a row is due.
 
 The polish track's old "Sent to relay" wording is subsumed by this
 table. Do not reintroduce it as a state: Relayed already carries that
@@ -105,6 +122,18 @@ kind 1059, and old installs subscribe to 1059 only, so they never see
 acks. An ack is never inferred from message text: a 1059 message whose
 text happens to look like ack JSON is still just a message.
 
+Lost-ack resend: when a message is stored, the recipient sends its ack
+and records whether the ack left on at least one channel (relay OK or
+a BLE peer count above zero). There is no ack of an ack, so this
+marker means the ack was sent, not that the sender processed it. On
+service start, the recipient re-sends acks for stored inbound messages
+whose ack never left, newest first, capped at 100 per start, skipping
+blocked conversations and rows without a delivery ID. A re-sent ack
+upgrades the sender on a late ack, including from Failed, with no wire
+change. A re-sent ack never touches unread counts: the message was
+already counted once at store time, and dedup keeps a replay from
+counting again.
+
 ## SQLite DM store
 
 DMs live in the SQLite database `airplane.db`, separate from the public
@@ -114,7 +143,8 @@ post store. Tables:
   blocked), mute, unread count, last message time, last sealed payload,
   and last direction.
 - `dm_messages`: one row per message, with the sealed payload, the full
-  sendable envelope, delivery ID, ack proof, status, and attempt counts.
+  sendable envelope, delivery ID, ack proof, status, and attempt counts,
+  plus the Relayed re-publish count and the inbound ack-sent marker.
   Retention is the newest 1000 messages per conversation.
 - `dm_seen`: delivery IDs already seen, with peer and time.
 
@@ -164,7 +194,10 @@ of an already seen envelope cannot resurrect a deleted conversation.
 - DM sender authentication: the rumor sender pubkey is an unsigned
   claim. A signed-DM fix would break interop and needs a user decision.
 - Multi-hop DM: direct connected peers only in v1.
-- NIP-42 AUTH unanswered, and no ping for half-open sockets in v1.
-- Relayed rows have no ack timeout and are never re-published.
+- NIP-42 AUTH unanswered. Half-open detection is now a silence timer
+  with no ping, by platform limit, not a ping.
+- Relayed rows re-publish after a 24 hour ack window, capped at 3, but
+  a Relayed row past its cap with no ack still stays Relayed: it has
+  no Failed state by time alone.
 - Backfill is bounded: 24 hours on first subscribe, last envelope or
   ack minus 300 seconds on resubscribe.

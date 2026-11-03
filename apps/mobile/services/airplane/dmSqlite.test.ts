@@ -33,6 +33,8 @@ interface MsgRow {
   ack_proof: string | null;
   sender_created_at_sec: number | null;
   mesh_attempts: number;
+  relay_republish_attempts: number;
+  ack_sent: number;
   created_at_ms: number;
   status: string;
   attempts: number;
@@ -50,6 +52,7 @@ class FakeDb implements DatabasePort {
     this.statements.push(sql);
     const p = params as (string | number | null)[];
     if (sql.startsWith('CREATE TABLE') || sql.startsWith('CREATE INDEX')) return;
+    if (sql.startsWith('ALTER TABLE')) return;
     if (sql.startsWith('INSERT INTO dm_conversations')) {
       const row: ConvRow = {
         peer_hex: p[0] as string,
@@ -77,10 +80,12 @@ class FakeDb implements DatabasePort {
         ack_proof: p[7] as string | null,
         sender_created_at_sec: p[8] as number | null,
         mesh_attempts: p[9] as number,
-        created_at_ms: p[10] as number,
-        status: p[11] as string,
-        attempts: p[12] as number,
-        next_attempt_at_ms: p[13] as number,
+        relay_republish_attempts: p[10] as number,
+        ack_sent: p[11] as number,
+        created_at_ms: p[12] as number,
+        status: p[13] as string,
+        attempts: p[14] as number,
+        next_attempt_at_ms: p[15] as number,
       };
       this.msgs.set(row.id, row);
       return;
@@ -95,7 +100,7 @@ class FakeDb implements DatabasePort {
       return;
     }
     if (sql.startsWith('UPDATE dm_messages')) {
-      const id = p[13] as string;
+      const id = p[15] as string;
       const row = this.msgs.get(id);
       if (!row) return;
       row.peer_hex = p[0] as string;
@@ -107,10 +112,12 @@ class FakeDb implements DatabasePort {
       row.ack_proof = p[6] as string | null;
       row.sender_created_at_sec = p[7] as number | null;
       row.mesh_attempts = p[8] as number;
-      row.created_at_ms = p[9] as number;
-      row.status = p[10] as string;
-      row.attempts = p[11] as number;
-      row.next_attempt_at_ms = p[12] as number;
+      row.relay_republish_attempts = p[9] as number;
+      row.ack_sent = p[10] as number;
+      row.created_at_ms = p[11] as number;
+      row.status = p[12] as string;
+      row.attempts = p[13] as number;
+      row.next_attempt_at_ms = p[14] as number;
       return;
     }
     if (sql.startsWith('DELETE FROM dm_conversations')) {
@@ -271,6 +278,30 @@ describe('SqliteDmStore', () => {
       senderCreatedAtSec: 777,
     });
     expect(await store.lastInboundCreatedAtSec()).toBe(777);
+  });
+
+  test('round-trips the Relayed re-publish count and the inbound ack-sent marker', async () => {
+    const db = new FakeDb();
+    const store = new SqliteDmStore(db);
+    await store.addMessage({ ...outRow('m2', 1000), status: 'Relayed', relayRepublishAttempts: 2 });
+    await store.addMessage({
+      id: 'in3',
+      peerHex: PEER,
+      direction: 'in',
+      sealed: 'sealed-in',
+      envelope: { ...ENVELOPE, recipientHex: 'a'.repeat(64) },
+      createdAtMs: 2000,
+      status: 'Delivered',
+      attempts: 0,
+      nextAttemptAtMs: 2000,
+      senderCreatedAtSec: 888,
+      ackSent: true,
+    });
+    const rows = await store.listMessages(PEER);
+    expect(rows.find(r => r.id === 'm2')?.relayRepublishAttempts).toBe(2);
+    expect(rows.find(r => r.id === 'in3')?.ackSent).toBe(true);
+    await store.updateMessage({ ...rows.find(r => r.id === 'm2') as DmMessageRow, relayRepublishAttempts: 3 });
+    expect((await store.listMessages(PEER)).find(r => r.id === 'm2')?.relayRepublishAttempts).toBe(3);
   });
 
   test('delete removes the conversation and messages but keeps seen ids', async () => {
