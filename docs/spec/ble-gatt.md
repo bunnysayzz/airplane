@@ -14,11 +14,11 @@ Every phone is **both** central and peripheral at all times:
 
 | Role | Library | Duties |
 |------|---------|--------|
-| Central | `react-native-ble-manager` 12.6.0 | scan, connect, GATT client: writes frames to the peer's RX characteristic; receives the peer's frames via notifications on the peer's TX characteristic |
+| Central | `react-native-ble-manager` 12.6.0 | scan, connect, GATT client: sends frames via notifications on our own TX characteristic; receives the peer's frames via notifications on the peer's TX characteristic |
 | Peripheral | `react-native-multi-ble-peripheral` 0.1.8 | advertise + GATT server: receives frames as writes to our RX characteristic; sends frames via TX notifications |
 
-One connection per pair: on discovering a peer tag, the phone whose own tag
-is lexicographically smaller (or equal) initiates the central connection.
+Crossed links: on discovering a peer tag, both phones initiate a central
+connection, so each side sends via notifications on its own TX characteristic.
 The tag is the first 8 bytes of the Ed25519 pubkey — a discovery hint, never
 identity.
 
