@@ -146,6 +146,13 @@ let syncTimer: ReturnType<typeof setInterval> | null = null;
  * exactly one breadcrumb for the device-check log trail.
  */
 let lastOnline: boolean | null = null;
+/**
+ * True once any connectivity state has been applied (listener or fetch).
+ * False before the first state and forever when the NetInfo module fails
+ * to load: that is the router's unknown-network state, which gets the
+ * shortened relay deadline instead of the full one (see startTransport).
+ */
+let connectivityKnown = false;
 let blePort: { port: TransportPort; close: () => Promise<void> } | null = null;
 let bleScanUnsub: (() => void) | null = null;
 /**
@@ -420,6 +427,20 @@ async function runSync(): Promise<void> {
   }
 }
 
+/**
+ * Run one WorldSync pass on demand. Rank 13, foreground trigger: the
+ * same pass the connectivity return trigger runs, so a backgrounded
+ * post recovers on foreground return without a connectivity flap.
+ * Cheap by construction: WorldSync shares an in-flight pass, so
+ * concurrent callers (timer, connectivity, foreground) coalesce, and
+ * the pass is a no-op while offline or before transport start. It
+ * does not restart relay sockets on its own; the connectivity path
+ * owns socket lifecycle.
+ */
+export async function runWorldSyncPass(): Promise<void> {
+  await runSync();
+}
+
 /** Subscribe the transport to native adapter-state events from the port. */
 function registerAdapterStateListener(): void {
   const port = blePort?.port as GattBlePort | null | undefined;
@@ -566,6 +587,41 @@ export async function startTransport(): Promise<void> {
       // state yet, or no NetInfo module) still routes on the live
       // socket fact, so builds without NetInfo keep relay working.
       networkValidated: () => lastOnline !== false,
+      // Rank 14, dead-hotspot deadline. Why unknown cannot be resolved
+      // faster from code: NetInfo reports isInternetReachable as null
+      // until its own reachability check lands, and it offers no
+      // synchronous reachability query; the first listener fire or
+      // fetch resolution is the earliest signal the app can get. The
+      // app already maps that null to offline (wireConnectivity uses
+      // !!isInternetReachable), so a null never lingers as unknown in
+      // lastOnline: with the module loaded, a dead hotspot resolves
+      // reachability false, the sockets stop, and the relay stage is
+      // skipped at once with no deadline burn at all. The residual
+      // unknown window is pre-first-state (and module-missing, where
+      // no state ever arrives); a publish in that window runs on the
+      // live socket fact with the shortened 1500 ms deadline instead
+      // of the full 5000 ms, so a dead upstream cannot stall mesh
+      // fallback for the full deadline. The actual null window on a
+      // real dead hotspot still needs a device measurement (see the
+      // phone checks): the platform may resolve it faster or slower
+      // than the app can observe, and code cannot distinguish that.
+      // A half-open socket while the network is known online is a
+      // separate case and still burns the full deadline; that is the
+      // silence-timer problem, not this rank.
+      networkUnknown: () => !connectivityKnown,
+      unknownNetworkDeadlineMs: 1500,
+      // Rank 5, World honesty: every relay-sourced event at ingress,
+      // including duplicates dropped by the seen cache, confirms
+      // World. A post this phone published is in the seen cache from
+      // publish time, so a relay query hit returning it is a duplicate
+      // by id by definition; without this hook that hit would be
+      // swallowed and a query-hit confirmation could never fire for
+      // own posts in the same launch. BLE observations never confirm.
+      onRelayObserved: (event) => {
+        void getStore()
+          .markWorldConfirmed(toHex(event.id))
+          .catch(() => {});
+      },
     },
   );
   if (pendingSubscribeCells) {
@@ -959,6 +1015,7 @@ export function setRelaySubscribeCells(cells: string[]): void {
 function applyConnectivity(online: boolean): void {
   if (online === lastOnline) return;
   lastOnline = online;
+  connectivityKnown = true;
   if (online) {
     addBreadcrumb('transport: connectivity online');
     void hybrid?.nostr.start();
@@ -1019,6 +1076,7 @@ export async function stopTransport(): Promise<void> {
   netUnsub?.();
   netUnsub = null;
   lastOnline = null;
+  connectivityKnown = false;
   clearScanRetry();
   bleScanUp = false;
   try {
@@ -1047,14 +1105,23 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
   // BLE - only Nostr - even with phones connected over GATT.
   const blePeersAtPublish = blePeerIdsForPublish(blePort?.port);
   const result = await hybrid!.publish(event, blePeersAtPublish);
-  // Relay OK is the confirmation: mark it now instead of waiting for
-  // the post to be observed back over a subscription, which left the
-  // globe dark and WorldSync re-pushing every minute. The inbound
-  // observation path still confirms other phones' relaying.
-  if (result.transport === 'relay') {
-    await getStore()
-      .markWorldConfirmed(toHex(event.id))
-      .catch(() => {});
+  // Rank 5, World honesty: a direct relay OK no longer confirms World
+  // at once. A relay can OK an envelope and then drop it before any
+  // peer fetches it, and the old code left the sender showing the
+  // globe for a post no relay holds. World now sets only when the post
+  // is observed back from a relay: either a subscription replay or a
+  // WorldSync query hit (see onRelayObserved in startTransport, which
+  // fires even for seen-cache duplicates, and confirmListener for
+  // first-time relay arrivals). The accepted cost is honest: the globe
+  // appears one query round trip later instead of instantly on OK.
+  // So the round trip does not wait up to 60 s for the next timer
+  // tick, a relay win for a post triggers one WorldSync pass here:
+  // the pass re-pushes the still-unconfirmed post and queries for it,
+  // and the query hit confirms it only if a relay still holds it. A
+  // relay that dropped the event before the query yields no hit, no
+  // globe, and the post stays unconfirmed for later passes to re-push.
+  if (result.transport === 'relay' && event.kind === EVENT_KIND_POST) {
+    void runSync();
   }
   const nowMs = Date.now();
   // Diagnostics record exactly the stages the router actually ran: a
@@ -1086,7 +1153,13 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
         transport: 'ble',
         atMs: nowMs,
         outcome: 'ok',
-        detail: `sent to ${result.blePeers} connected peers (no peer ack in current transport)`,
+        // Rank 7, honest BLE wording: a completed GATT notify is a
+        // radio handoff, not peer delivery. A notify resolves even
+        // with no peer central subscribed, and there is no BLE ack
+        // for posts, so no BLE status may claim delivery. The post
+        // BLE ack frame is a separate follow-up and is not in this
+        // batch.
+        detail: `handed to radio for ${result.blePeers} connected peers (radio handoff only, no peer receipt signal)`,
       });
     } else if (blePeersAtPublish.length > 0) {
       // Peers were connected but the router reports queued, so every
@@ -1116,7 +1189,7 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
       result.transport === 'relay'
         ? 'relayed'
         : result.transport === 'mesh'
-          ? 'sent over BLE'
+          ? 'handed to radio over BLE'
           : 'not delivered to any transport',
   });
   return result;
