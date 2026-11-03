@@ -101,6 +101,9 @@ export const en = {
     // Airplane's single feed
     feed: 'Feed',
     empty: 'Nothing here yet - be the first to post.',
+    emptyNewCell: 'No posts in this area yet.',
+    showingSaved: 'Showing saved posts.',
+    showingSavedOtherArea: 'No posts in this area yet. Showing saved posts from other areas.',
     emptyHome: 'No posts on your home timeline yet!',
     emptyLocal: 'No posts on your local timeline yet!',
     emptyFederated: 'No posts on your federated timeline yet!',
