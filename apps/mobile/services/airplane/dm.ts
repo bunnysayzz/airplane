@@ -26,7 +26,7 @@ import {
 } from '@airplane/transport';
 import { getDeviceKeypair, onIdentityChange } from './identity';
 import { loadRelayUrls } from '../../src/lib/relays';
-import { authorLabelFor } from './names';
+import { formatPeerName } from './displayNames';
 
 let service: DmService | null = null;
 let servicePromise: Promise<DmService> | null = null;
@@ -71,10 +71,17 @@ export async function getDmService(): Promise<DmService> {
   return servicePromise;
 }
 
-/** Anonymous label for a DM peer, same as feed author labels. */
+/**
+ * Display label for a DM peer: the signed display name when this device
+ * knows one, else the memorable name WITHOUT the hex suffix. A suffix
+ * appears only when the registry knows another peer with the same base
+ * name (see displayNames.ts). The full label and full key stay visible
+ * on the Identity screen and in the thread details view. Kept as the
+ * label function (not a new name) so every DM surface changes together.
+ */
 export function dmPeerLabel(peerHex: string): string {
   const bytes = dmFromHex(peerHex);
-  if (bytes && bytes.length === 32) return authorLabelFor(bytes);
+  if (bytes && bytes.length === 32) return formatPeerName(peerHex.toLowerCase());
   return 'anon·' + peerHex.slice(0, 4);
 }
 

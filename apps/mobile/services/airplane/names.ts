@@ -31,7 +31,25 @@ export const NAME_NOUNS = [
 
 /** Stable, anonymous display name for an author pubkey. */
 export function authorLabelFor(pubkey: Uint8Array): string {
+  return `${memorableNameFor(pubkey)}·${toHex(pubkey).slice(0, 4)}`;
+}
+
+/**
+ * The memorable part of {@link authorLabelFor}, without the hex suffix.
+ * Wordlists are untouched, so this maps exactly like the full label minus
+ * the suffix: same pubkey, same words, forever.
+ */
+export function memorableNameFor(pubkey: Uint8Array): string {
   const adjective = NAME_ADJECTIVES[(pubkey[2] ?? 0) % NAME_ADJECTIVES.length];
   const noun = NAME_NOUNS[(pubkey[3] ?? 0) % NAME_NOUNS.length];
-  return `${adjective} ${noun}·${toHex(pubkey).slice(0, 4)}`;
+  return `${adjective} ${noun}`;
+}
+
+/**
+ * Strip a trailing hex suffix (the "·abcd" tail of a full label) from a
+ * label string. Only a tail that matches the full-label shape is removed,
+ * so a display name that merely contains a middle dot is left alone.
+ */
+export function nameWithoutSuffix(label: string): string {
+  return label.replace(/·[0-9a-f]{4}$/, '');
 }

@@ -46,5 +46,28 @@ export {
   rehydrateReshares,
   reshareViewFor,
 } from './reshares';
+// --- IDENTITY: display names, peer registry, username resolution, avatars ---
+export {
+  DISPLAY_NAME_TAG,
+  DISPLAY_NAME_MAX_CHARS,
+  avatarGradientFor,
+  displayNameFromEvent,
+  displayNameFromTags,
+  formatPeerName,
+  getOwnDisplayName,
+  hydratePeerDisplayNames,
+  knownDisplayName,
+  knownPeerHexes,
+  matchKnownPeers,
+  memorableNameForHex,
+  normalizeDisplayName,
+  peerBaseName,
+  recordDisplayNameFromTags,
+  recordPeerDisplayName,
+  resolvePeerNames,
+  setOwnDisplayName,
+  __resetDisplayNamesForTests,
+} from './displayNames';
+export { memorableNameFor, nameWithoutSuffix } from './names';
 export { getKv } from './kv';
 export { startTransport, stopTransport, publishViaTransport, pruneExpiredStore } from './transport';
