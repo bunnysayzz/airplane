@@ -11,6 +11,7 @@ import {
   MemoryDmStore,
   dmKeypairFromDeviceSecret,
   dmToHex,
+  type DmRelayPublishResult,
 } from '@airplane/transport';
 import {
   SELF_MESSAGES_KEY,
@@ -38,7 +39,7 @@ afterEach(() => {
 class CountingRelay extends MemoryDmRelay {
   publishCalls = 0;
 
-  override async publish(envelope: Parameters<MemoryDmRelay['publish']>[0]): Promise<boolean> {
+  override async publish(envelope: Parameters<MemoryDmRelay['publish']>[0]): Promise<DmRelayPublishResult> {
     this.publishCalls += 1;
     return super.publish(envelope);
   }
