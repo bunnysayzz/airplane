@@ -38,6 +38,8 @@ export interface PostCardModel {
   score: number;
   /** true when confirmed on a Nostr relay (World) */
   worldConfirmed: boolean;
+  /** true when this is the device's own post and it is still unsent */
+  unsent?: boolean;
   /** Author mesh pubkey hex (DM address). Absent for synthetic/test cards. */
   authorPubkeyHex?: string;
   // --- RESHARE (delimited) ---
@@ -142,6 +144,16 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
               accessibilityLabel="Reached the world network"
             >
               🌐
+            </Text>
+          </Post.Action>
+        ) : null}
+        {!post.worldConfirmed && post.unsent ? (
+          <Post.Action>
+            <Text
+              style={[type.meta, { fontSize: 10, opacity: 0.6 }]}
+              accessibilityLabel="Not sent yet"
+            >
+              Unsent
             </Text>
           </Post.Action>
         ) : null}

@@ -88,6 +88,8 @@ export class WorldSync {
 
     // Bounded pass: only the first SYNC_MAX_PER_PASS ids are handled;
     // the rest wait for the next tick instead of growing this pass.
+    // getUnconfirmed is age-ordered (oldest first), so the pass
+    // drains the oldest backlog first, not store order.
     const unconfirmed = (await this.store.getUnconfirmed()).slice(0, SYNC_MAX_PER_PASS);
 
     // 1. Push each unconfirmed event to relays. Store reads for a page

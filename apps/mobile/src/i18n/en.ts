@@ -231,7 +231,7 @@ export const en = {
     charactersLeft: '{{count}} characters left',
     charactersOver: '{{count}} characters over the limit',
     overShort: '{{count}} over',
-    posted: 'Post published',
+    posted: 'Post saved',
   },
   attachments: {
     describe: 'Describe image {{index}}',

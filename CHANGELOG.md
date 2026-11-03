@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- BLE flood forwarding for posts: a bridge phone re-broadcasts a
+  BLE-received post to its other connected peers with TTL decrement
+  and drop at zero, seen-set dedup, sampled jitter, ingress link
+  exclusion, and overhear cancellation; DM frames are never forwarded.
+- Durable post outbox (MIGRATION_007): own posts are enqueued on save,
+  drain over BLE on peer arrival (oldest first), retry over relay via
+  age-ordered WorldSync, survive kill and relaunch, and show 'Unsent'
+  on the feed card while they reached no transport. The composer toast
+  now says 'Post saved' to match the save-first semantics: the toast
+  confirms the local save, the card reports delivery.
+
 ### Fixed
 
 - Version lockstep (PL1): app.json is now the single source of truth for the app version. The Android build derives versionName and versionCode from it at configuration time, so a build can no longer report a stale version and prompt an update to its own release line. The in-app version and the update check both read the same app.json version, and a lockstep test fails if the sources drift apart again. Version bumped to 0.1.9 (versionCode 109).

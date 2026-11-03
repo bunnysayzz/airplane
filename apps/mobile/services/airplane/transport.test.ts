@@ -30,7 +30,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
+import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
@@ -225,6 +225,74 @@ describe('transport manager', () => {
     });
     await publishViaTransport(event);
     expect(await getStore().isWorldConfirmed(toHex(event.id))).toBe(true);
+  });
+
+  test('drainPostOutbox sends queued posts over BLE oldest first and marks them ble-sent', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const older = { ...makeSignedEvent(), id: new Uint8Array(32).fill(21), created_at: Math.floor(Date.now() / 1000) - 600 };
+    const newer = { ...makeSignedEvent(), id: new Uint8Array(32).fill(22), created_at: Math.floor(Date.now() / 1000) };
+    for (const e of [older, newer]) {
+      await store.saveEvent(e);
+      await store.enqueuePostOutbox(toHex(e.id), e.created_at);
+    }
+    const sentIds: string[] = [];
+    jest.spyOn(hybrid!, 'sendOverMesh').mockImplementation(async (event) => {
+      sentIds.push(toHex(event.id));
+      return 1;
+    });
+    __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
+    const sent = await drainPostOutbox();
+    expect(sent).toBe(2);
+    expect(sentIds).toEqual([toHex(older.id), toHex(newer.id)]);
+    const statuses = await store.listPostOutboxStatuses([toHex(older.id), toHex(newer.id)]);
+    expect(statuses.get(toHex(older.id))).toBe('ble-sent');
+    expect(statuses.get(toHex(newer.id))).toBe('ble-sent');
+    __setBlePortForTests(null);
+  });
+
+  test('drainPostOutbox sends nothing when no live queued row exists', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const confirmed = { ...makeSignedEvent(), id: new Uint8Array(32).fill(23), created_at: Math.floor(Date.now() / 1000) };
+    await store.saveEvent(confirmed);
+    await store.enqueuePostOutbox(toHex(confirmed.id), confirmed.created_at);
+    await store.markWorldConfirmed(toHex(confirmed.id));
+    // A row with no event row is invisible to the drain list, so it
+    // must not cause a send either.
+    const ghost = { ...makeSignedEvent(), id: new Uint8Array(32).fill(24), created_at: Math.floor(Date.now() / 1000) };
+    await store.enqueuePostOutbox(toHex(ghost.id), ghost.created_at);
+    const sendSpy = jest.spyOn(hybrid!, 'sendOverMesh').mockResolvedValue(1);
+    __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
+    expect(await drainPostOutbox()).toBe(0);
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(await store.listPostOutbox()).toHaveLength(0);
+    __setBlePortForTests(null);
+  });
+
+  test('publishViaTransport marks a queued post unsent in the outbox', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const event = makeSignedEvent();
+    const store = getStore();
+    await store.saveEvent(event);
+    await store.enqueuePostOutbox(toHex(event.id), event.created_at);
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'none',
+      status: 'queued',
+      blePeers: 0,
+      relays: [],
+      relayTried: false,
+      relayDetail: 'no open relay socket',
+    });
+    await publishViaTransport(event);
+    const statuses = await store.listPostOutboxStatuses([toHex(event.id)]);
+    expect(statuses.get(toHex(event.id))).toBe('unsent');
   });
 
   test('an inbound burst coalesces to a single feed notify', async () => {

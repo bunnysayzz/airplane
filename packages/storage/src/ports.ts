@@ -36,6 +36,29 @@ export interface ListFeedOpts {
 }
 
 /**
+ * Durable post outbox status. 'pending' means enqueued and no fan-out
+ * result has been recorded yet; 'ble-sent' means at least one BLE
+ * drain/fan-out sent it but no relay has confirmed it; 'unsent' means
+ * the last fan-out reached no transport at all (no peers, no relay).
+ * World confirmation deletes the row, so no status means confirmed.
+ */
+export type PostOutboxStatus = 'pending' | 'ble-sent' | 'unsent';
+
+/** One durable post outbox row. */
+export interface PostOutboxRow {
+  eventId: Hex64;
+  /** The post's signed created_at (drain order key), seconds. */
+  createdAt: UnixSec;
+  /** When the row was enqueued, seconds. */
+  queuedAt: UnixSec;
+  /** Fan-out/drain attempts recorded for this row. */
+  attempts: number;
+  /** Last attempt time, seconds, or null before any attempt. */
+  lastAttemptAt: UnixSec | null;
+  status: PostOutboxStatus;
+}
+
+/**
  * Event + receipt + peer persistence (STORE-1/2/5/7).
  *
  * Implementations must be safe to call from any async context; callers do not
@@ -121,9 +144,43 @@ export interface StorePort {
 
   /**
    * Event IDs of kind-1 posts known locally but not yet World-confirmed.
-   * Used by the sync engine to decide what to push / query.
+   * Used by the sync engine to decide what to push / query. Age-ordered
+   * (oldest created_at first, id tiebreak) so a sync pass drains the
+   * oldest backlog first instead of whatever store order happens to be.
    */
   getUnconfirmed(): Promise<Hex64[]>;
+
+  // ------------------------------------------------------------------
+  // Durable post outbox (transport post fixes). Client-side only: one
+  // row per own kind-1 post, from save until World confirmation. The
+  // outbox is NOT a second draft store: it holds only signed posts that
+  // are already saved in the events table, never unsaved text. A row
+  // survives kill and relaunch because the table is durable; World
+  // confirmation deletes the row, and prune deletes it with its post.
+  // ------------------------------------------------------------------
+
+  /** Enqueue one own post for delivery retry. Idempotent by event id. */
+  enqueuePostOutbox(eventId: Hex64, createdAt: UnixSec): Promise<void>;
+
+  /**
+   * Outbox rows still awaiting World confirmation, oldest first
+   * (created_at, then id). Relay-confirmed, deleted, and expired rows
+   * are excluded here, so a drain pass never re-sends a settled post.
+   */
+  listPostOutbox(): Promise<PostOutboxRow[]>;
+
+  /**
+   * Record one drain/fan-out attempt for a queued post: bumps the
+   * attempt count and stamps the attempt time. A row that does not
+   * exist is left alone (never created by an attempt).
+   */
+  markPostOutboxAttempt(eventId: Hex64, status: PostOutboxStatus): Promise<void>;
+
+  /** Remove one outbox row (World confirmation or a missing event). */
+  removePostOutbox(eventId: Hex64): Promise<void>;
+
+  /** Batch outbox statuses for a page of event ids (feed mapping). */
+  listPostOutboxStatuses(ids: Hex64[]): Promise<Map<Hex64, PostOutboxStatus>>;
 
   // ------------------------------------------------------------------
   // Stars (T17). Client-side only: durable star state so counts and the

@@ -94,11 +94,45 @@ import { locationSourceFromTags } from './location';
  * --- RESHARE: reshareView carries the collapsed cluster (count + latest
  * resharer + self state) for the ORIGINAL card; a reshare never adds a card,
  * and ranking (score) is untouched by reshares. */
+/**
+ * How long a 'pending' outbox row may sit before the feed treats it
+ * as unsent. The router deadline is 5 seconds, so a pending row
+ * older than 10 seconds means its fan-out never reported a result
+ * (for example a kill during fan-out): the card must not stay silent
+ * about that. Fresh pending rows are still trying, so they show
+ * neither globe nor Unsent.
+ */
+export const POST_OUTBOX_PENDING_UNSENT_AFTER_MS = 10_000;
+
+/**
+ * Pure Unsent derivation (unit-tested). Only the author's own posts
+ * can be Unsent: another phone's post in the feed is already delivered
+ * to this phone by definition. World confirmation always wins over
+ * Unsent, and a row that was never enqueued (inbound posts, old
+ * installs) shows neither state.
+ */
+export function resolvePostUnsent(opts: {
+  outboxStatus?: import('@airplane/storage').PostOutboxStatus;
+  createdAtMs: number;
+  isOwn: boolean;
+  worldConfirmed: boolean;
+  nowMs?: number;
+}): boolean {
+  if (!opts.isOwn || opts.worldConfirmed || !opts.outboxStatus) return false;
+  if (opts.outboxStatus === 'unsent') return true;
+  if (opts.outboxStatus === 'pending') {
+    const nowMs = opts.nowMs ?? Date.now();
+    return nowMs - opts.createdAtMs > POST_OUTBOX_PENDING_UNSENT_AFTER_MS;
+  }
+  return false;
+}
+
 export function toPostCardModel(
   post: FeedPost,
   worldConfirmed = false,
   star?: { stars: number; starLabel: string; starredByMe: boolean },
   reshareView?: Pick<PostCardModel, 'reshares' | 'resharedByMe' | 'latestResharerLabel'>,
+  unsent = false,
 ): PostCardModel {
   return {
     eventId: toHex(post.event.id),
@@ -112,6 +146,7 @@ export function toPostCardModel(
     views: post.views,
     score: post.score,
     worldConfirmed,
+    unsent,
     // STAR MVP: display-only; ranking (score) is computed from views alone.
     stars: star?.stars ?? 0,
     starLabel: star?.starLabel ?? '',
@@ -254,6 +289,8 @@ async function mapPostsToCards(
   // One batched World-confirmation lookup for the whole page, not one
   // query per card.
   const confirmed = await store.listWorldConfirmed(ranked.map((p) => toHex(p.event.id) as Hex64));
+  // One batched outbox-status lookup for the whole page, same shape.
+  const outboxStatuses = await store.listPostOutboxStatuses(ranked.map((p) => toHex(p.event.id) as Hex64));
   // Record every signed display name claim on this page before resolving
   // names, so the registry (and collision detection) sees the whole page.
   for (const p of ranked) {
@@ -266,11 +303,18 @@ async function mapPostsToCards(
       markResharePostKnown(eventId);
       const worldConfirmed = confirmed.has(eventId as Hex64);
       const star = starViewFor(eventId, ownHex);
+      const isOwn = ownHex !== null && toHex(p.event.pubkey).toLowerCase() === ownHex.toLowerCase();
+      const unsent = resolvePostUnsent({
+        outboxStatus: outboxStatuses.get(eventId as Hex64),
+        createdAtMs: p.event.created_at * 1000,
+        isOwn,
+        worldConfirmed,
+      });
       return toPostCardModel(p, worldConfirmed, {
         stars: star.count,
         starLabel: star.label,
         starredByMe: star.starredByMe,
-      }, reshareViewFor(eventId, ownHex ?? undefined));
+      }, reshareViewFor(eventId, ownHex ?? undefined), unsent);
     }),
   );
   return applyResolvedPeerNames(cards);
@@ -331,11 +375,20 @@ export async function getPostCardById(eventId: string): Promise<PostCardModel | 
   // --- RESHARE: same collapsed-cluster mapping as the feed path.
   markResharePostKnown(id);
   recordDisplayNameFromTags(toHex(event.pubkey), event.tags);
+  const outboxStatuses = await store.listPostOutboxStatuses([id]);
+  const isOwn = ownHex !== null && toHex(event.pubkey).toLowerCase() === ownHex.toLowerCase();
+  const unsent = resolvePostUnsent({
+    outboxStatus: outboxStatuses.get(id),
+    createdAtMs: event.created_at * 1000,
+    isOwn,
+    worldConfirmed,
+  });
   const card = toPostCardModel(
     { event, views, score: rankScore(views, ageHours), ageHours },
     worldConfirmed,
     { stars: star.count, starLabel: star.label, starredByMe: star.starredByMe },
     reshareViewFor(id, ownHex ?? undefined),
+    unsent,
   );
   return applyResolvedPeerNames([card])[0];
 }
