@@ -3,7 +3,7 @@
     "name": "Airplane",
     "slug": "airplane",
     "scheme": "airplane",
-    "version": "0.1.16",
+    "version": "0.1.17",
     "platforms": [
       "ios",
       "android"
