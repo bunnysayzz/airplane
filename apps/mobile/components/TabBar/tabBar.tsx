@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pressable, View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,8 +15,14 @@ export interface TabDef {
     label: string;
     icon: TabIconName;
     activeIcon: TabIconName;
-    // A dot on the tab for unseen activity
-    badge?: boolean;
+    // Unread message count for the tab, Twitter style: a number pill,
+    // not a dot. Zero or absent means no pill.
+    badgeCount?: number;
+}
+
+/** Pill text for a count: exact up to 99, then 99+ like Twitter. */
+export function unreadPillText(count: number): string {
+    return count > 99 ? '99+' : String(count);
 }
 
 interface TabBarProps {
@@ -37,8 +43,9 @@ export const TabBar: React.FC<TabBarProps> = ({ tabs, activeTab, onTabPress, onC
 
     const tab = (def: TabDef) => {
         const active = def.key === activeTab;
+        const count = def.badgeCount ?? 0;
         // The open tab already shows them
-        const dot = def.badge && !active;
+        const showCount = count > 0 && !active;
         return (
             <Pressable
                 key={def.key}
@@ -47,13 +54,17 @@ export const TabBar: React.FC<TabBarProps> = ({ tabs, activeTab, onTabPress, onC
                     onTabPress(def.key);
                 }}
                 accessibilityRole="tab"
-                accessibilityLabel={def.label}
+                accessibilityLabel={count > 0 ? `${def.label}, ${count} unread` : def.label}
                 accessibilityState={{ selected: active }}
                 style={({ pressed }) => [styles.tab, active && styles.tabActive, pressed && { opacity: 0.7 }]}
             >
                 <View>
                     <Ionicons name={active ? def.activeIcon : def.icon} size={24} color={active ? colors.accentText : colors.textMuted} />
-                    {dot && <View testID="unread-dot" style={styles.dot} />}
+                    {showCount && (
+                        <View testID="unread-count" style={styles.countPill}>
+                            <Text style={styles.countPillText}>{unreadPillText(count)}</Text>
+                        </View>
+                    )}
                 </View>
             </Pressable>
         );

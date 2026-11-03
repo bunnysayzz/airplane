@@ -15,17 +15,26 @@ export const dockBottomOffset = (bottomInset: number) => Math.max(DOCK_BOTTOM_OF
 export const tabBarClearance = (bottomInset: number) => DOCK_HEIGHT + dockBottomOffset(bottomInset) + space.lg;
 
 export const makeStyles = (colors: ThemeColors) => StyleSheet.create({
-    // Unread notifications: a coat-coloured dot on the bell's shoulder, ringed so it reads on the glass
-    dot: {
+    // Unread count pill on the tab icon, Twitter style: a number, not a
+    // dot, ringed so it reads on the glass
+    countPill: {
         position: 'absolute',
         top: -1,
         right: -2,
-        width: 10,
-        height: 10,
-        borderRadius: 5,
+        minWidth: 18,
+        height: 18,
+        paddingHorizontal: 4,
+        borderRadius: 9,
         backgroundColor: colors.accentColor,
         borderWidth: 1.5,
         borderColor: colors.cardBackground,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    countPillText: {
+        fontSize: 11,
+        fontWeight: '700',
+        color: colors.buttonTextColor,
     },
     dockWrapper: {
         position: 'absolute',

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // DM P1 inbox: conversations list, requests folder (default ON), username
-// search over known peers plus pubkey paste to start a conversation, blocked list with unblock. Unread badge total is
-// inbox-only (muted excluded, requests shown as their own row).
+// search over known peers plus pubkey paste to start a conversation, blocked list with unblock. Each row carries its
+// own unread count pill (requests too; a muted row keeps its preserved
+// count). The tab total is inbox-only (muted excluded, requests
+// excluded): requests carry their own row pills instead.
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -16,6 +18,7 @@ import {
     resolvePeerNames,
 } from '../../services/airplane/displayNames';
 import { Avatar } from '../../components/ui';
+import { unreadPillText } from '../../components/TabBar/tabBar';
 import { getSelfMessageStore } from '../../services/airplane/selfMessages';
 import { useTheme } from '../../src/theme/themeContext';
 import { recordUiEvent } from '../../services/airplane/diagnostics';
@@ -140,7 +143,11 @@ export default function MessagesTab() {
             }}
             style={[styles.row, { borderBottomColor: colors.borderColor }]}
             accessibilityRole="button"
-            accessibilityLabel={`Conversation with ${peerNameFor(c.peerHex)}`}
+            accessibilityLabel={
+                c.unread > 0
+                    ? `Conversation with ${peerNameFor(c.peerHex)}, ${c.unread} unread`
+                    : `Conversation with ${peerNameFor(c.peerHex)}`
+            }
         >
             <Avatar name={peerNameFor(c.peerHex)} pubkeyHex={c.peerHex} size={36} />
             <View style={{ flex: 1, gap: 2 }}>
@@ -148,11 +155,13 @@ export default function MessagesTab() {
                 <Text style={[type.meta, { color: colors.textMuted }]} numberOfLines={1}>
                     {!c.lastSealed ? 'No messages yet' : (previews[c.peerHex] ?? DM_UNDECRYPTABLE_PLACEHOLDER)}
                 </Text>
-                {c.unread > 0 && !c.muted ? (
-                    <Text style={[type.meta, { color: colors.accentText }]}>{c.unread} unread</Text>
-                ) : null}
                 {c.muted ? <Text style={[type.meta, { color: colors.textMuted }]}>Muted</Text> : null}
             </View>
+            {c.unread > 0 ? (
+                <View style={[styles.unreadPill, { backgroundColor: colors.accentColor }]}>
+                    <Text style={[styles.unreadPillText, { color: colors.buttonTextColor }]}>{unreadPillText(c.unread)}</Text>
+                </View>
+            ) : null}
         </Pressable>
     );
 
@@ -291,4 +300,16 @@ const styles = StyleSheet.create({
     input: { flex: 1, borderWidth: 1, borderRadius: 8, padding: 10 },
     go: { borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
     row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth },
+    unreadPill: {
+        minWidth: 22,
+        height: 22,
+        paddingHorizontal: 6,
+        borderRadius: 11,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    unreadPillText: {
+        fontSize: 12,
+        fontWeight: '700',
+    },
 });

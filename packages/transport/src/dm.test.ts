@@ -898,3 +898,109 @@ describe('DM transport parity: honest states, acks, mesh, restart', () => {
     expect(rows[0].status).toBe('Delivered');
   });
 });
+
+describe('DM unread counts', () => {
+  test('per-thread counts add up to the tab total; markRead clears one thread', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 300_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    const carol = makePersona(relay, nowRef);
+    // Unknown senders land in requests first; accept moves them to inbox
+    // with their unread counts intact.
+    await bob.service.receiveEnvelope(sealDm('a1', alice.meshHex, bob.meshHex));
+    await bob.service.receiveEnvelope(sealDm('c1', carol.meshHex, bob.meshHex));
+    await bob.service.acceptRequest(alice.meshHex);
+    await bob.service.acceptRequest(carol.meshHex);
+    await bob.service.receiveEnvelope(sealDm('a2', alice.meshHex, bob.meshHex));
+    await bob.service.receiveEnvelope(sealDm('a3', alice.meshHex, bob.meshHex));
+    const inbox = await bob.service.listInbox();
+    const byPeer = new Map(inbox.map(c => [c.peerHex, c.unread]));
+    expect(byPeer.get(alice.meshHex)).toBe(3);
+    expect(byPeer.get(carol.meshHex)).toBe(1);
+    expect(await bob.service.totalUnread()).toBe(4);
+    await bob.service.markRead(alice.meshHex);
+    expect(await bob.service.totalUnread()).toBe(1);
+    expect((await bob.service.listInbox()).find(c => c.peerHex === alice.meshHex)?.unread).toBe(0);
+    expect((await bob.service.listInbox()).find(c => c.peerHex === carol.meshHex)?.unread).toBe(1);
+  });
+
+  test('same send delivered twice counts once, even concurrently', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 310_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    const env = sealDm('once only', alice.meshHex, bob.meshHex);
+    const p1 = bob.service.receiveEnvelope(env);
+    const p2 = bob.service.receiveEnvelope(env);
+    const verdicts = await Promise.all([p1, p2]);
+    expect(verdicts.sort()).toEqual(['ignored', 'request']);
+    expect((await bob.service.listRequests())[0].unread).toBe(1);
+    expect(await bob.service.getThread(alice.meshHex)).toHaveLength(1);
+    // A later replay of the same send still counts nothing.
+    expect(await bob.service.receiveEnvelope(env)).toBe('ignored');
+    expect((await bob.service.listRequests())[0].unread).toBe(1);
+  });
+
+  test('legacy relay-event-id replay after a restart counts nothing', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 320_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    const env = sealDm('from an old install', alice.meshHex, bob.meshHex);
+    // Legacy senders carry no delivery id; the relay event id is the key.
+    const legacy = { ...env, deliveryId: undefined, relayEventId: 'e'.repeat(64) };
+    expect(await bob.service.receiveEnvelope(legacy)).toBe('request');
+    expect(await bob.service.receiveEnvelope(legacy)).toBe('ignored');
+    expect((await bob.service.listRequests())[0].unread).toBe(1);
+    // A new service over the same store is a restart: the seen relay
+    // event id survived it, so the backfill replay still counts nothing.
+    const restarted = new DmService({
+      store: bob.store,
+      relay,
+      ownKeys: () => dmKeypairFromDeviceSecret(bob.secret),
+      ownMeshHex: () => bob.meshHex,
+      now: () => nowRef.now,
+    });
+    expect(await restarted.receiveEnvelope(legacy)).toBe('ignored');
+    expect((await restarted.listRequests())[0].unread).toBe(1);
+  });
+
+  test('requests do not feed the tab total; own and blocked messages never count', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 330_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    await bob.service.receiveEnvelope(sealDm('knock knock', alice.meshHex, bob.meshHex));
+    await bob.service.receiveEnvelope(sealDm('knock again', alice.meshHex, bob.meshHex));
+    expect((await bob.service.listRequests())[0].unread).toBe(2);
+    expect(await bob.service.totalUnread()).toBe(0);
+    // A message addressed to self is ignored, never counted.
+    expect(await bob.service.receiveEnvelope(sealDm('to self', bob.meshHex, bob.meshHex))).toBe('ignored');
+    expect(await bob.service.totalUnread()).toBe(0);
+    // Blocked sender: dropped before any row or count exists.
+    await bob.service.blockPeer(alice.meshHex);
+    expect(await bob.service.receiveEnvelope(sealDm('spam', alice.meshHex, bob.meshHex))).toBe('dropped');
+    expect(await bob.service.totalUnread()).toBe(0);
+    expect(await bob.service.listRequests()).toEqual([]);
+  });
+
+  test('muted rows keep their preserved count but stay out of the tab total', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 340_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    await bob.service.receiveEnvelope(sealDm('yo', alice.meshHex, bob.meshHex));
+    await bob.service.acceptRequest(alice.meshHex);
+    expect((await bob.service.listInbox())[0].unread).toBe(1);
+    await bob.service.mutePeer(alice.meshHex, true);
+    expect(await bob.service.totalUnread()).toBe(0);
+    // A message arriving while muted is stored but never increments.
+    await bob.service.receiveEnvelope(sealDm('yo again', alice.meshHex, bob.meshHex));
+    expect((await bob.service.getThread(alice.meshHex))).toHaveLength(2);
+    expect((await bob.service.listInbox())[0].unread).toBe(1);
+    expect(await bob.service.totalUnread()).toBe(0);
+    await bob.service.mutePeer(alice.meshHex, false);
+    expect(await bob.service.totalUnread()).toBe(1);
+  });
+});

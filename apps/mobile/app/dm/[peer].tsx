@@ -107,7 +107,15 @@ export default function DmThreadScreen() {
         void getDmService()
             .then(svc => {
                 unsub = svc.subscribe(() => {
-                    void refresh().catch(() => {});
+                    // Messages arriving while the thread is open are read
+                    // on sight: without this, a message received while
+                    // viewing increments the row count and stays counted
+                    // after leaving the thread. No loop: markRead emits
+                    // only when the count actually changes, so the
+                    // refresh it triggers ends with a no-op markRead.
+                    void refresh()
+                        .then(() => svc.markRead(peerHex))
+                        .catch(() => {});
                 });
                 // F23(a) left as-is per the finding's smaller-safe-change
                 // note: opening a request clears its unread count.
