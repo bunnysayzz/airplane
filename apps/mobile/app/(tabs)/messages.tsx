@@ -16,6 +16,7 @@ import {
     resolvePeerNames,
 } from '../../services/airplane/displayNames';
 import { Avatar } from '../../components/ui';
+import { getSelfMessageStore } from '../../services/airplane/selfMessages';
 import { useTheme } from '../../src/theme/themeContext';
 import { recordUiEvent } from '../../services/airplane/diagnostics';
 import { RouteTracker } from '../../components/RouteTracker/routeTracker';
@@ -29,6 +30,7 @@ export default function MessagesTab() {
     const [blocked, setBlocked] = useState<DmConversationRow[]>([]);
     const [previews, setPreviews] = useState<Record<string, string | null>>({});
     const [query, setQuery] = useState('');
+    const [savedCount, setSavedCount] = useState(0);
     // A failed refresh used to leave stale lists with no error shown. Now
     // refresh is all-or-nothing (lists + previews set only on success) and
     // a failure shows a retry affordance instead of silent staleness.
@@ -57,6 +59,14 @@ export default function MessagesTab() {
                 setRequests(nextRequests);
                 setBlocked(nextBlocked);
                 setPreviews(nextPreviews);
+                // Saved notes load separately: a self store failure must
+                // never fail the whole DM refresh or hide conversations.
+                try {
+                    const saved = await getSelfMessageStore().list();
+                    setSavedCount(saved.length);
+                } catch {
+                    setSavedCount(0);
+                }
                 setRefreshError(false);
             } catch {
                 setRefreshError(true);
@@ -212,6 +222,25 @@ export default function MessagesTab() {
                     </Pressable>
                 </View>
             ) : null}
+
+            <Text style={[type.name, { color: colors.textPrimary, marginTop: 20 }]}>Saved</Text>
+            <Pressable
+                onPress={() => {
+                    recordUiEvent('self:open');
+                    router.push('/dm/self');
+                }}
+                style={[styles.row, { borderBottomColor: colors.borderColor }]}
+                accessibilityRole="button"
+                accessibilityLabel="Saved messages, this device only"
+            >
+                <Text style={[type.name, { color: colors.textPrimary }]}>Saved</Text>
+                <Text style={[type.meta, { color: colors.textMuted }]} numberOfLines={1}>
+                    This device only. Never sent to anyone.
+                </Text>
+                <Text style={[type.meta, { color: colors.textMuted }]}>
+                    {savedCount === 0 ? 'No saved notes yet' : `${savedCount} saved ${savedCount === 1 ? 'note' : 'notes'}`}
+                </Text>
+            </Pressable>
 
             {requests.length > 0 ? (
                 <>
