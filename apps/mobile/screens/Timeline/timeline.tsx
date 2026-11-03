@@ -343,6 +343,7 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
                     <Ionicons name="cloud-offline-outline" size={32} color={colors.textMuted} />
                     <Text style={[type.meta, styles.errorText]}>{t('timeline.loadFailed')}</Text>
                     <Pressable
+                        hitSlop={8}
                         style={styles.retryButton}
                         onPress={() => {
                             recordUiEvent('feed:retry');
