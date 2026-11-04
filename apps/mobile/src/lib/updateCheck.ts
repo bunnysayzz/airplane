@@ -37,6 +37,7 @@ import {
   type UpdateCheckResult,
   type UpdateInfo,
 } from '../../services/airplane/updater';
+import { recordUpdateEvent } from '../../services/airplane/diagnostics';
 import { dialog } from './dialog';
 import { defaultTranslator } from '../i18n/translate';
 
@@ -146,9 +147,10 @@ const subscribeProgress = (
 };
 
 /** Browser fallback (pre-v0.1.21 behavior): open the URL, never crash. */
-const openBrowserFallback = async (url: string): Promise<DownloadStatus> => {
+const openBrowserFallback = async (url: string, reason: string): Promise<DownloadStatus> => {
   const t = defaultTranslator().t;
   if (!isAllowedUpdateUrl(url, { downloadHost: true })) {
+    recordUpdateEvent(`browser fallback failed ${reason}`);
     dialog.toast(t('settings.updateOpenFailed'));
     return 'failed';
   }
@@ -158,8 +160,10 @@ const openBrowserFallback = async (url: string): Promise<DownloadStatus> => {
       | undefined;
     if (typeof linking?.openURL !== 'function') throw new Error('linking-unavailable');
     await linking.openURL(url);
+    recordUpdateEvent(`browser fallback ${reason}`);
     return 'browser';
   } catch {
+    recordUpdateEvent(`browser fallback failed ${reason}`);
     dialog.toast(t('settings.updateOpenFailed'));
     return 'failed';
   }
@@ -180,17 +184,18 @@ export const startUpdateDownload = async (
   if (downloadUrl === null || !isAllowedUpdateUrl(downloadUrl, { downloadHost: true })) {
     // No APK asset, or a URL outside the allowlist: the release page is
     // the only safe fallback.
-    return openBrowserFallback(update.releaseUrl);
+    return openBrowserFallback(update.releaseUrl, 'no-apk');
   }
   const fileName = apkFileNameFromUrl(downloadUrl);
-  if (fileName === null) return openBrowserFallback(update.releaseUrl);
+  if (fileName === null) return openBrowserFallback(update.releaseUrl, 'bad-filename');
   const installer = getInstaller();
-  if (!installer) return openBrowserFallback(downloadUrl);
+  if (!installer) return openBrowserFallback(downloadUrl, 'no-installer');
 
   let allowed: boolean;
   try {
     allowed = await installer.canInstallPackages();
   } catch {
+    recordUpdateEvent(`download failed can-install-check`);
     dialog.toast(t('settings.updateDownloadFailed'));
     opts.onDownloadEnd?.('failed');
     return 'failed';
@@ -198,6 +203,7 @@ export const startUpdateDownload = async (
   if (!allowed) {
     pendingUpdate = update;
     pendingDownloadOpts = opts;
+    recordUpdateEvent(`permission required ${update.version}`);
     ensureResumeListener();
     dialog.alert(t('settings.updatePermissionTitle'), t('settings.updatePermissionMessage'), [
       {
@@ -220,15 +226,28 @@ export const startUpdateDownload = async (
   }
 
   dialog.toast(t('settings.updateDownloading'));
-  opts.onDownloadProgress?.(0);
-  const subscription = subscribeProgress(installer, (fraction) => {
+  recordUpdateEvent(`download started ${update.version}`);
+  // Progress milestones only (0, 25, 50, 75, 100): per-chunk fractions
+  // would flood the log, but a download with no milestone at all must
+  // still be visible as started-and-stalled, not silent.
+  let lastMilestone = -1;
+  const reportProgress = (fraction: number | null): void => {
     opts.onDownloadProgress?.(fraction);
-  });
+    if (fraction === null) return;
+    const milestone = fraction >= 1 ? 100 : Math.floor(fraction * 4) * 25;
+    if (milestone > lastMilestone) {
+      lastMilestone = milestone;
+      recordUpdateEvent(`download progress ${milestone}`);
+    }
+  };
+  reportProgress(0);
+  const subscription = subscribeProgress(installer, reportProgress);
   let downloaded: { path: string; sha256: string; bytes: number };
   try {
     downloaded = await installer.downloadApk(downloadUrl, fileName);
   } catch {
     subscription?.remove();
+    recordUpdateEvent(`download failed download-error`);
     dialog.toast(t('settings.updateDownloadFailed'));
     opts.onDownloadEnd?.('failed');
     return 'failed';
@@ -239,10 +258,14 @@ export const startUpdateDownload = async (
   const expected = sums === null ? null : expectedApkHash(sums, fileName);
   if (expected === null || expected.toLowerCase() !== downloaded.sha256.toLowerCase()) {
     await installer.deleteFile(downloaded.path).catch(() => {});
+    recordUpdateEvent(
+      `verify failed ${expected === null ? 'no-sums' : 'mismatch'}`,
+    );
     dialog.toast(t('settings.updateVerifyFailed'));
     opts.onDownloadEnd?.('failed');
     return 'failed';
   }
+  recordUpdateEvent(`verify ok ${update.version}`);
 
   try {
     await installer.installApk(downloaded.path);
@@ -251,8 +274,10 @@ export const startUpdateDownload = async (
     // example on a pre-Android 8 device, where the install intent action
     // does not resolve), fall back to the browser download instead of
     // leaving the user with a toast and no way forward.
-    return openBrowserFallback(downloadUrl);
+    recordUpdateEvent(`install failed intent`);
+    return openBrowserFallback(downloadUrl, 'install-intent-failed');
   }
+  recordUpdateEvent(`install intent fired ${update.version}`);
   opts.onDownloadEnd?.('installed');
   return 'installed';
 };
@@ -268,7 +293,10 @@ export const resumePendingUpdate = async (): Promise<void> => {
   const opts = pendingDownloadOpts;
   pendingDownloadOpts = undefined;
   const installer = getInstaller();
-  if (!installer) return;
+  if (!installer) {
+    recordUpdateEvent(`download failed no-installer`);
+    return;
+  }
   let allowed = false;
   try {
     allowed = await installer.canInstallPackages();
@@ -276,6 +304,7 @@ export const resumePendingUpdate = async (): Promise<void> => {
     allowed = false;
   }
   if (!allowed) {
+    recordUpdateEvent(`permission denied ${pending.version}`);
     dialog.toast(defaultTranslator().t('settings.updatePermissionDenied'));
     return;
   }
@@ -319,13 +348,25 @@ const runCheck = async (
   opts: DownloadOptions = {},
 ): Promise<UpdateCheckResult> => {
   if (Platform.OS !== 'android') return { available: false, error: 'ios-unsupported' };
+  const installed = getInstalledVersion().version;
   let result: UpdateCheckResult;
   try {
-    result = await checkForUpdate({ currentVersion: getInstalledVersion().version });
+    result = await checkForUpdate({ currentVersion: installed });
   } catch {
     // checkForUpdate itself never throws; this is belt-and-braces so a
     // future refactor can never take launch down with it.
+    recordUpdateEvent(`check failed check-failed`);
     return { available: false, error: 'check-failed' };
+  }
+  // The check outcome itself is a diagnostics line now: v0.1.22 logs
+  // showed the settings:update-check taps with no result line at all,
+  // so a silent check and a failed check were indistinguishable.
+  if (result.available && result.update) {
+    recordUpdateEvent(`check available ${result.update.version}`);
+  } else if (result.error) {
+    recordUpdateEvent(`check failed ${result.error}`);
+  } else {
+    recordUpdateEvent(`check up-to-date ${installed}`);
   }
   if (result.available && result.update && (forcePrompt || !promptedTags.has(result.update.tag))) {
     promptedTags.add(result.update.tag);

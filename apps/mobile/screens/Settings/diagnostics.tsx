@@ -12,6 +12,7 @@ import { tabBarClearance } from '../../components/TabBar/styles';
 import { useI18n } from '../../src/i18n/i18nContext';
 import {
   getDiagnosticsSnapshot,
+  recordInboxEvent,
   recordUiEvent,
   setDiagnosticsPermissions,
   subscribeDiagnostics,
@@ -266,6 +267,12 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
                 try {
                   logText = await readDiagnosticsLogText();
                 } catch (error: unknown) {
+                  recordInboxEvent(
+                    `read failed ${String(error instanceof Error ? error.message : error)
+                      .replace(/[\r\n]+/g, ' ')
+                      .trim()
+                      .slice(0, 60)}`,
+                  );
                   setInboxFailed(true);
                   setInboxError(
                     String(error instanceof Error ? error.message : error)
@@ -285,16 +292,29 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
                       text: t('settings.diagnosticsSendToInbox'),
                       onPress: () => {
                         setInboxSending(true);
+                        recordInboxEvent('upload started');
                         void sendDiagnosticsLogToInbox({
                           logText,
                           version: Constants.expoConfig?.version ?? 'unknown',
                           uploadedAt: new Date().toISOString(),
                         })
                           .then((result) => {
+                            if (result.truncated) {
+                              recordInboxEvent(
+                                `upload truncated original=${result.originalBytes}`,
+                              );
+                            }
+                            recordInboxEvent('upload sent');
                             setInboxSentId(result.id);
                             setLogStatus(getDiagnosticsLogStatus());
                           })
                           .catch((error: unknown) => {
+                            recordInboxEvent(
+                              `upload failed ${String(error instanceof Error ? error.message : error)
+                                .replace(/[\r\n]+/g, ' ')
+                                .trim()
+                                .slice(0, 60)}`,
+                            );
                             setInboxFailed(true);
                             setInboxError(
                               String(error instanceof Error ? error.message : error)
@@ -376,6 +396,11 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
         {logStatus.lastWriteError !== null && (
           <Text style={[type.body, styles.kvValue]}>
             {t('settings.diagnosticsLogWriteError')}: {logStatus.lastWriteError}
+          </Text>
+        )}
+        {logStatus.startError !== null && (
+          <Text style={[type.body, styles.kvValue]}>
+            {t('settings.diagnosticsLogStartError')}: {logStatus.startError}
           </Text>
         )}
         <Text style={[type.body, styles.kvValue]}>{t('settings.diagnosticsLogPath', { path: logStatus.fileUri })}</Text>

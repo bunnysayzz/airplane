@@ -57,6 +57,13 @@ function createExpoDiagnosticsLogPort(): DiagnosticsLogFilePort {
 
 let writer: DiagnosticsLogWriter | null = null;
 let started = false;
+/**
+ * A failed log start used to vanish into a swallowed catch in _layout:
+ * the app ran with no logging and nothing said so. The failure is kept
+ * here and surfaced through getDiagnosticsLogStatus, so the Diagnostics
+ * screen can show it instead of a silently empty file.
+ */
+let startError: string | null = null;
 
 /**
  * Start automatic logging. Idempotent: a second start (StrictMode
@@ -67,14 +74,22 @@ let started = false;
 export async function startDiagnosticsLogFile(): Promise<void> {
   if (started) return;
   started = true;
-  writer = new DiagnosticsLogWriter(createExpoDiagnosticsLogPort());
-  await writer.load();
-  attachDiagnosticsLogWriter(writer);
-  writer.append(formatDiagnosticsLogLine(Date.now(), 'app', 'started'));
-  // A disabled Sentry client is otherwise invisible: one log line per
-  // launch says so plainly instead of looking like "no errors happened".
-  if (takeSentryDisabledNote()) {
-    writer.append(formatDiagnosticsLogLine(Date.now(), 'sentry', 'disabled'));
+  try {
+    writer = new DiagnosticsLogWriter(createExpoDiagnosticsLogPort());
+    await writer.load();
+    attachDiagnosticsLogWriter(writer);
+    writer.append(formatDiagnosticsLogLine(Date.now(), 'app', 'started'));
+    // A disabled Sentry client is otherwise invisible: one log line per
+    // launch says so plainly instead of looking like "no errors happened".
+    if (takeSentryDisabledNote()) {
+      writer.append(formatDiagnosticsLogLine(Date.now(), 'sentry', 'disabled'));
+    }
+  } catch (error: unknown) {
+    startError = String(error instanceof Error ? error.message : error)
+      .replace(/[\r\n]+/g, ' ')
+      .trim()
+      .slice(0, 120);
+    writer = null;
   }
 }
 
@@ -116,6 +131,8 @@ export interface DiagnosticsLogFileStatus {
   lastWriteError: string | null;
   /** Lines confirmed on disk by the last successful flush. */
   flushedLineCount: number;
+  /** Log start failure, when starting itself failed. Null otherwise. */
+  startError: string | null;
   /** Sentry client state at status time: false means disabled, never throwing. */
   sentryEnabled: boolean;
   fileName: string;
@@ -133,6 +150,7 @@ export function getDiagnosticsLogStatus(): DiagnosticsLogFileStatus {
     lastWriteOk: lastWrite.ok,
     lastWriteAtMs: lastWrite.atMs,
     lastWriteError: lastWrite.error,
+    startError,
     sentryEnabled: isSentryEnabled(),
     fileName: DIAGNOSTICS_LOG_FILE_NAME,
     fileUri: logFileUri(),

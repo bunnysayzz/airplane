@@ -22,10 +22,14 @@
 
 import { setDiagnosticsLogSink } from './diagnostics';
 
-/** Rotation cap: newest lines are kept, oldest are dropped first. */
-export const MAX_DIAGNOSTICS_LOG_LINES = 5000;
-/** Rotation cap: about 2 MB of text. Both caps apply, whichever hits first. */
-export const MAX_DIAGNOSTICS_LOG_BYTES = 2 * 1024 * 1024;
+/** Rotation cap: newest lines are kept, oldest are dropped first.
+ * Raised 4x for the logging coverage fix: the user explicitly does not
+ * care about log size, and dropping early lines is what made earlier
+ * sessions unreadable. The inbox upload still truncates to its own
+ * endpoint cap (see logInbox.ts), so a bigger file never breaks it. */
+export const MAX_DIAGNOSTICS_LOG_LINES = 20000;
+/** Rotation cap: about 8 MB of text. Both caps apply, whichever hits first. */
+export const MAX_DIAGNOSTICS_LOG_BYTES = 8 * 1024 * 1024;
 const MAX_DETAIL_CHARS = 240;
 
 export interface DiagnosticsLogFilePort {

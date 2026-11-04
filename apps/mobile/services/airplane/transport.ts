@@ -46,10 +46,50 @@ import {
   recordDedupDrop,
   recordMessage,
   recordScanStopped,
+  recordServiceEvent,
   recordTransportFailure,
   setDiagnosticsAdapterState,
   type DiagnosticsMessageAttempt,
 } from './diagnostics';
+
+/**
+ * Map a store failure onto a short reason code for the Diagnostics line.
+ * The raw error is never logged: it can carry SQL text, and the line
+ * needs a stable outcome word, not a dump. Transient lock contention
+ * (backfill bursts writing at once) is the retryable class; anything
+ * else still retries, because a second attempt costs milliseconds, and
+ * a final failure triggers the inbound recovery below (the Hybrid seen
+ * mark is forgotten and the relays are asked for the id once), because
+ * a relay replay of an already seen id would be dropped as a duplicate
+ * within this launch.
+ */
+function storeFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/locked|busy/i.test(message)) return 'locked';
+  if (/constraint|unique/i.test(message)) return 'constraint';
+  return 'failed';
+}
+
+const STORE_SAVE_ATTEMPTS = 3;
+const STORE_SAVE_DELAYS_MS = [100, 300];
+
+/** Run one store save with bounded retries. Never throws. */
+async function saveWithRetry<T>(
+  save: () => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; code: string }> {
+  let lastCode = 'failed';
+  for (let attempt = 0; attempt < STORE_SAVE_ATTEMPTS; attempt += 1) {
+    try {
+      return { ok: true, value: await save() };
+    } catch (error: unknown) {
+      lastCode = storeFailureCode(error);
+      if (attempt < STORE_SAVE_DELAYS_MS.length) {
+        await new Promise((resolve) => setTimeout(resolve, STORE_SAVE_DELAYS_MS[attempt]));
+      }
+    }
+  }
+  return { ok: false, code: lastCode };
+}
 
 /**
  * NetInfo is a native module. If it fails to load (not linked, Expo Go,
@@ -286,6 +326,44 @@ function scheduleFeedNotify(): void {
   }, 250);
 }
 
+/**
+ * Recovery for an inbound event whose save failed on every retry.
+ * Bounded to one relay query per id per launch: without the bound,
+ * a redelivery that also fails its save would re-query forever.
+ * The Hybrid seen mark is forgotten first, so the query response
+ * is not dropped as a duplicate at ingress. When no relay is
+ * reachable the query sends nowhere and the id is not added to
+ * the once-per-launch set, so a later failure can try again;
+ * the seen mark is already forgotten, so any redelivery in the
+ * meantime can also pass ingress. When the set reaches its cap
+ * it clears first, which keeps memory bounded at the cost of
+ * allowing a very old id one more query. Never throws. A
+ * mesh-only post simply has no relay copy to fetch, so this
+ * step is a no-op for it, and the BLE flood seen cache still
+ * suppresses a BLE redelivery until it evicts the id.
+ */
+const failedInboundIds = new Set<string>();
+const FAILED_INBOUND_IDS_CAP = 1000;
+
+async function recoverFailedInbound(event: SignedEvent): Promise<void> {
+  const idHex = toHex(event.id);
+  if (failedInboundIds.has(idHex)) return;
+  try {
+    hybrid?.forgetSeen(idHex);
+    const sent = await hybrid?.nostr.queryByIds([idHex]);
+    if (!sent) return;
+    if (failedInboundIds.size >= FAILED_INBOUND_IDS_CAP) failedInboundIds.clear();
+    failedInboundIds.add(idHex);
+  } catch {
+    // Best effort only: recovery must never break the caller.
+  }
+}
+
+/** Test seam: reset the once-per-launch failed inbound set. */
+export function __resetFailedInboundForTests(): void {
+  failedInboundIds.clear();
+}
+
 async function handleIncoming(event: SignedEvent, source: string): Promise<void> {
   // STAR MVP: kind-4 events never reach the events table - its schema
   // CHECKs kind IN (1,2,3). They go to the in-memory star counter instead
@@ -303,10 +381,27 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
   if (event.kind === EVENT_KIND_RESHARE) {
     const result = recordReshareEvent(event);
     if (result === 'pending') void pullOriginalForReshare(event);
-    try {
-      await getStore().saveReshareEvent(event);
-    } catch {
-      // The count already applied; rehydration reconciles later.
+    const saved = await saveWithRetry(() => getStore().saveReshareEvent(event));
+    if (!saved.ok && (source === 'nostr' || source === 'ble')) {
+      // The count already applied; rehydration reconciles later. The
+      // failure is logged with its reason instead of swallowed, so a
+      // reshare persistence problem is visible in the next log. Local
+      // publish echoes are not logged as inbound failures.
+      recordMessage({
+        id: toHex(event.id),
+        sequence: null,
+        sizeBytes: encodeEvent(event).length,
+        direction: 'inbound',
+        attempts: [
+          {
+            transport: source === 'nostr' ? 'relay' : 'ble',
+            atMs: Date.now(),
+            outcome: 'failed',
+            detail: `store save failed reshare ${saved.code}`,
+          },
+        ],
+        finalStatus: 'receive failed',
+      });
     }
     scheduleFeedNotify();
     return;
@@ -337,16 +432,31 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
   // actually moves the feed. Previously inbound receipts were stored
   // but never counted, so relay views changed nothing.
   if (event.kind === EVENT_KIND_RECEIPT) {
-    let counted = false;
-    try {
-      counted = await getStore().saveReceipt(event);
-    } catch {
+    const receipt = await saveWithRetry(() => getStore().saveReceipt(event));
+    if (!receipt.ok) {
       addBreadcrumb('transport: inbound receipt store failed', {
         id: toHex(event.id).slice(0, 16),
       });
+      if (source === 'nostr' || source === 'ble') {
+        recordMessage({
+          id: toHex(event.id),
+          sequence: null,
+          sizeBytes: encodeEvent(event).length,
+          direction: 'inbound',
+          attempts: [
+            {
+              transport: source === 'nostr' ? 'relay' : 'ble',
+              atMs: Date.now(),
+              outcome: 'failed',
+              detail: `store save failed receipt ${receipt.code}`,
+            },
+          ],
+          finalStatus: 'receive failed',
+        });
+      }
       return;
     }
-    if (counted) notifyFeedListeners();
+    if (receipt.value) notifyFeedListeners();
     return;
   }
   // Store the event (deduped by HybridTransport already).
@@ -354,32 +464,44 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
   // Diagnostics and the feed is NOT notified: an unhandled rejection
   // here used to drop the event while Hybrid already marked it seen.
   // A storage failure must not escape as an unhandled rejection (the
-  // caller uses void handleIncoming) and must not be silent: record a
-  // Diagnostics message and a stage-tagged breadcrumb, and drop this
-  // pass only. The event is not queued durably here (no inbound queue
-  // exists in the store schema); it re-arrives via relay replay or BLE
-  // redelivery, and the next sync pass re-checks it.
-  try {
-    await store.saveEvent(event);
-  } catch {
-    recordMessage({
-      id: toHex(event.id),
-      sequence: null,
-      sizeBytes: encodeEvent(event).length,
-      direction: 'inbound',
-      attempts: [
-        {
-          transport: source === 'nostr' ? 'relay' : 'ble',
-          atMs: Date.now(),
-          outcome: 'failed',
-          detail: 'store save failed',
-        },
-      ],
-      finalStatus: 'receive failed',
-    });
+  // caller uses void handleIncoming) and must not be silent: the save
+  // retries a bounded number of times first (backfill bursts contend
+  // for the store), and only a final failure records a Diagnostics
+  // message with its reason code plus a stage-tagged breadcrumb, and
+  // drops this pass only. The event is not queued durably here (no
+  // inbound queue exists in the store schema). A final failure for a
+  // relay or Bluetooth arrival triggers the inbound recovery above:
+  // the Hybrid seen mark is forgotten and the relays are asked for
+  // the id once, so a redelivery can pass ingress again when the
+  // store recovers. After a restart the in-memory seen set clears,
+  // so a normal relay replay lands without any recovery step.
+  const saved = await saveWithRetry(() => store.saveEvent(event));
+  if (!saved.ok) {
+    // Local publish echoes are not logged as inbound failures; the
+    // breadcrumb below still records them.
+    if (source === 'nostr' || source === 'ble') {
+      recordMessage({
+        id: toHex(event.id),
+        sequence: null,
+        sizeBytes: encodeEvent(event).length,
+        direction: 'inbound',
+        attempts: [
+          {
+            transport: source === 'nostr' ? 'relay' : 'ble',
+            atMs: Date.now(),
+            outcome: 'failed',
+            detail: `store save failed ${saved.code}`,
+          },
+        ],
+        finalStatus: 'receive failed',
+      });
+    }
     addBreadcrumb('transport: inbound store failed', {
       id: toHex(event.id).slice(0, 16),
     });
+    if (source === 'nostr' || source === 'ble') {
+      void recoverFailedInbound(event);
+    }
     return;
   }
   // A post arriving may release stars and reshares held pending for it.
@@ -441,7 +563,10 @@ async function runSync(): Promise<void> {
       notifyFeedListeners(); // globe icons may have appeared
     }
   } catch {
-    // Sync failures are non-fatal; retry on next interval.
+    // Sync failures are non-fatal; retry on next interval. The failure
+    // is logged instead of swallowed: a sync that never succeeds must
+    // be visible in the next log, not just absent.
+    recordServiceEvent('sync pass failed');
   }
 }
 

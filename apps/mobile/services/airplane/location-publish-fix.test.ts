@@ -13,6 +13,7 @@ jest.mock('expo-location', () => ({
   hasServicesEnabledAsync: jest.fn(),
   getCurrentPositionAsync: jest.fn(),
   getLastKnownPositionAsync: jest.fn(),
+  watchPositionAsync: jest.fn(),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -22,6 +23,7 @@ const Location = require('expo-location') as {
   hasServicesEnabledAsync: jest.Mock;
   getCurrentPositionAsync: jest.Mock;
   getLastKnownPositionAsync: jest.Mock;
+  watchPositionAsync: jest.Mock;
 };
 
 import { encodeGeohash, type EventKind, type SignedEvent } from '@airplane/protocol';
@@ -146,6 +148,8 @@ describe('warm-up outcome lines', () => {
     await warm;
     expect(locationLines()).toEqual([
       'location warmup started',
+      'location watch started',
+      'location watch failed',
       'location warmup fresh-failed',
     ]);
   });
@@ -160,6 +164,8 @@ describe('warm-up outcome lines', () => {
     await warmLocationCell();
     expect(locationLines()).toEqual([
       'location warmup started',
+      'location watch started',
+      'location watch failed',
       'location warmup no-coordinates',
     ]);
   });
@@ -177,8 +183,11 @@ describe('warm-up outcome lines', () => {
     await warm;
     // The provider logs the fallback itself, then warm-up logs its own
     // outcome: two lines for one fallback, at two different layers.
+    // The failed watch attempt logs between them.
     expect(locationLines()).toEqual([
       'location warmup started',
+      'location watch started',
+      'location watch failed',
       'location fresh last-known',
       'location warmup last-known',
     ]);
@@ -449,8 +458,81 @@ describe('failure codes and log privacy', () => {
     expect(joined).not.toContain(OLD_CELL);
     for (const line of locationLines()) {
       expect(line).toMatch(
-        /^location (warmup (started|served-cached|fresh-ok|fresh-failed|last-known|no-coordinates|skipped (denied|undetermined))|fresh last-known|revalidate (started|ok|failed)|provider stale|(setup|compose) permission (granted|denied|undetermined))$/,
+        /^location (warmup (started|served-cached|fresh-ok|fresh-failed|last-known|no-coordinates|skipped (denied|undetermined))|fresh last-known|watch (started|fresh-ok|failed)|revalidate (started|ok|failed)|provider stale|(setup|compose) permission (granted|denied|undetermined))$/,
       );
     }
+  });
+});
+
+describe('watch second chance', () => {
+  function watchDelivers(coords: typeof BLR) {
+    Location.watchPositionAsync.mockImplementation(
+      (_opts: unknown, cb: (pos: { coords: typeof BLR }) => void) => {
+        cb({ coords });
+        return Promise.resolve({ remove: jest.fn() });
+      },
+    );
+  }
+
+  function watchNeverDelivers() {
+    Location.watchPositionAsync.mockImplementation(
+      () => new Promise(() => {}),
+    );
+  }
+
+  it('delivers a fresh fix when the one-shot hangs', async () => {
+    jest.useFakeTimers();
+    grantPermission();
+    enableServices();
+    noLastKnown();
+    Location.getCurrentPositionAsync.mockImplementation(
+      () => new Promise(() => {}),
+    );
+    watchDelivers(BLR);
+    const provider = new ExpoLocationProvider({ now: () => Date.now() });
+    const located = provider.getLocatedCell();
+    await jest.advanceTimersByTimeAsync(30_000);
+    await expect(located).resolves.toEqual({ cell: BLR_CELL, source: 'fresh' });
+    expect(locationLines()).toContain('location watch started');
+    expect(locationLines()).toContain('location watch fresh-ok');
+    expect(locationLines()).not.toContain('location fresh last-known');
+  });
+
+  it('falls back to last-known when the watch also delivers nothing', async () => {
+    jest.useFakeTimers();
+    grantPermission();
+    enableServices();
+    lastKnownAt(OLD, Date.now() - 3600_000);
+    Location.getCurrentPositionAsync.mockImplementation(
+      () => new Promise(() => {}),
+    );
+    watchNeverDelivers();
+    const provider = new ExpoLocationProvider({ now: () => Date.now() });
+    const located = provider.getLocatedCell();
+    await jest.advanceTimersByTimeAsync(30_000);
+    await expect(located).resolves.toEqual({ cell: OLD_CELL, source: 'last-known' });
+    expect(locationLines()).toContain('location watch started');
+    expect(locationLines()).toContain('location watch failed');
+    expect(locationLines()).toContain('location fresh last-known');
+  });
+
+  it('fails loud when one-shot, watch, and fallback all come up empty', async () => {
+    jest.useFakeTimers();
+    grantPermission();
+    enableServices();
+    noLastKnown();
+    Location.getCurrentPositionAsync.mockImplementation(
+      () => new Promise(() => {}),
+    );
+    watchNeverDelivers();
+    const provider = new ExpoLocationProvider({ now: () => Date.now() });
+    const located = provider.getLocatedCell();
+    // Attach the rejection handler before advancing timers: the
+    // rejection lands while timers run, and an unhandled rejection in
+    // that window fails the test even though the assertion follows.
+    const assertion = expect(located).rejects.toMatchObject({ code: 'timeout' });
+    await jest.advanceTimersByTimeAsync(30_000);
+    await assertion;
+    expect(locationLines()).toContain('location watch failed');
   });
 });

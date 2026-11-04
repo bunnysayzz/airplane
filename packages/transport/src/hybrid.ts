@@ -511,6 +511,21 @@ export class HybridTransport {
   }
 
   /**
+   * Forget one seen id, so a later redelivery of that id can pass
+   * ingress again. Only for a delivery that failed after ingress
+   * marked it seen: the app layer calls this when its store write
+   * finally fails, because without it a relay resubscribe replay or
+   * an explicit relay query for the same id would be dropped as a
+   * duplicate of a delivery that never landed, and the post would be
+   * lost even though a copy still exists on a relay. This never
+   * touches the BLE flood seen cache, so a BLE redelivery is still
+   * loop-suppressed there until that cache evicts the id.
+   */
+  forgetSeen(idHex: Hex64): void {
+    this.seen.delete(idHex);
+  }
+
+  /**
    * Publish a locally-created event through the ordered router.
    * Stage order is fixed: relay first, mesh fallback, queued when
    * neither can send. A relay win additionally broadcasts to connected

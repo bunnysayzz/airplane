@@ -42,11 +42,29 @@ describe('buildLogInboxPayload', () => {
     ).toThrow('log is empty');
   });
 
-  it('throws on an over-cap log', () => {
-    const big = 'x'.repeat(LOG_INBOX_MAX_BYTES + 1);
-    expect(() =>
-      buildLogInboxPayload({ logText: big, version: '0.1.21', uploadedAt: '2026-11-04T07:30:00.000Z' }),
-    ).toThrow('log too large');
+  it('truncates an over-cap log to its tail instead of failing', () => {
+    // Padded lines so the log genuinely exceeds the 2 MB cap: short
+    // lines alone would need tens of thousands of them.
+    const pad = 'x'.repeat(1100);
+    const lines = Array.from(
+      { length: 2000 },
+      (_, i) => `2026-11-04T07:30:00.000Z app line-${i} ${pad}`,
+    );
+    const big = `${lines.join('\n')}\n`;
+    expect(logTextByteLength(big)).toBeGreaterThan(LOG_INBOX_MAX_BYTES);
+    const payload = buildLogInboxPayload({
+      logText: big,
+      version: '0.1.21',
+      uploadedAt: '2026-11-04T07:30:00.000Z',
+    });
+    expect(logTextByteLength(payload.log)).toBeLessThanOrEqual(LOG_INBOX_MAX_BYTES);
+    expect(payload.log.startsWith('log truncated: original ')).toBe(true);
+    expect(payload.log).toContain('line-1999');
+    expect(payload.log).not.toContain('line-0 ');
+    const storedLines = payload.log.split('\n').filter((l) => l.length > 0);
+    expect(storedLines[storedLines.length - 1]).toBe(
+      `2026-11-04T07:30:00.000Z app line-1999 ${pad}`,
+    );
   });
 
   it('accepts a log exactly at the cap', () => {
@@ -92,7 +110,7 @@ describe('sendDiagnosticsLogToInbox', () => {
   it('POSTs the payload to the inbox URL and returns the id', async () => {
     const fetchFn = fetchReturning(okResponse({ id: 'k9f2mq7x' }));
     const result = await sendDiagnosticsLogToInbox(input, fetchFn as never);
-    expect(result).toEqual({ id: 'k9f2mq7x' });
+    expect(result).toEqual({ id: 'k9f2mq7x', truncated: false, originalBytes: 9 });
     expect(fetchFn).toHaveBeenCalledTimes(1);
     const [url, init] = fetchFn.mock.calls[0] as unknown as [
       string,
