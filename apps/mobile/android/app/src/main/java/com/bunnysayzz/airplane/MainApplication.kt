@@ -23,8 +23,9 @@ class MainApplication : Application(), ReactApplication {
         object : DefaultReactNativeHost(this) {
           override fun getPackages(): List<ReactPackage> {
             val packages = PackageList(this).packages
-            // Packages that cannot be autolinked yet can be added manually here, for example:
-            // packages.add(MyReactNativePackage())
+            // App-owned modules are not autolinked: the in-app updater
+            // installer (T14) is registered here explicitly.
+            packages.add(AirplaneInstallerPackage())
             return packages
           }
 

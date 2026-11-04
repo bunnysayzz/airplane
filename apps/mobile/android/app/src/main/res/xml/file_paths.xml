@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- T14 in-app updater: the system installer reads downloaded APKs from
+     this cache subdirectory only, via a one-shot FileProvider grant. -->
+<paths>
+  <cache-path name="updates" path="updates/" />
+</paths>

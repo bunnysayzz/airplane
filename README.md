@@ -391,6 +391,20 @@ app. Import the releases page in
 from the official releases page, never from forwarded files or mirrors
 you cannot verify.
 
+**Updating on Android:** Airplane checks GitHub Releases on launch and
+from Settings, and prompts when a newer release exists. Tapping Download
+downloads the APK inside the app, verifies its SHA-256 against the
+release's `SHA256SUMS.txt`, and then opens the system install sheet,
+where one tap installs it. The first time, Android asks you to allow
+installs from Airplane; the app sends you to that setting once, and the
+download resumes when you return. Nothing installs silently: Android
+never allows a fully silent install for a sideloaded app (only Play can
+do that, and only for Play-installed apps). Updates between CI builds
+install in place, because every CI build shares one signing key. If you
+installed from a differently signed build, Android refuses the update
+and you uninstall once, then install fresh; a future production signing
+key will force one more such reinstall when it lands.
+
 **iOS:** no public build yet. CI produces an unsigned IPA artifact for
 AltStore testing (free Apple ID, 7-day expiry, your own iPhone only).
 Signed builds need Apple Developer enrollment, which is pending. Note

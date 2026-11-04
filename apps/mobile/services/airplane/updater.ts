@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// T14 — in-app auto-update check from GitHub Releases (Android only).
+// T14 - in-app auto-update check from GitHub Releases (Android only).
 //
 // Pure logic, no react-native / expo imports, so it runs in the node Jest
 // harness and can never crash launch: every failure path returns
@@ -25,7 +25,7 @@
 // itself (no APK-style install intent, no App Store path for this build),
 // so the caller returns early on iOS and no iOS updater is built here.
 // EAS Update is not the route either (EAS abandoned; no Expo-cloud
-// dependency) — this talks to the public GitHub API with no auth.
+// dependency) - this talks to the public GitHub API with no auth.
 
 export const RELEASES_REPO = 'bunnysayzz/airplane';
 export const LATEST_RELEASE_URL = `https://api.github.com/repos/${RELEASES_REPO}/releases/latest`;
@@ -137,7 +137,7 @@ export const pickApkAsset = (assets: unknown): string | null => {
 
 /** Validate a `releases/latest` payload. Returns null for anything
  *  malformed (wrong shape, missing/unparseable tag, missing release URL)
- *  — never throws, so a bad response can never break launch. */
+ *  - never throws, so a bad response can never break launch. */
 export const parseReleasePayload = (payload: unknown): UpdateInfo | null => {
   if (!isRecord(payload)) return null;
   const tag = asString(payload.tag_name);
@@ -229,6 +229,126 @@ export const checkForUpdate = async (
     return { available: true, update: release };
   } catch {
     return { available: false, error: 'check-failed' };
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+};
+
+/**
+ * T14 in-app install: the release's SHA256SUMS.txt asset. Every release
+ * publishes one (see publish-test-apk.yml), so a downloaded APK is never
+ * installed on trust alone: its SHA-256 must match the sums file entry
+ * for its filename. The URL is constructed, never taken from a payload,
+ * and still passes the update allowlist before use.
+ */
+export const sumsDownloadUrl = (tag: string): string =>
+  `https://github.com/${RELEASES_REPO}/releases/download/${tag}/SHA256SUMS.txt`;
+
+/**
+ * Parse a sha256sum file: "<64 hex>  <name>" lines (two spaces, or the
+ * " *" binary-mode separator). Malformed lines are ignored, never fatal.
+ * Hashes are normalised to lowercase; filenames are kept as written.
+ */
+export const parseSha256Sums = (text: unknown): Map<string, string> => {
+  const out = new Map<string, string>();
+  if (typeof text !== 'string') return out;
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.replace(/\r$/, '').trim();
+    if (line === '') continue;
+    const match = /^([0-9a-fA-F]{64})[ \t]+\*?(.+)$/.exec(line);
+    if (!match) continue;
+    out.set(match[2].trim(), match[1].toLowerCase());
+  }
+  return out;
+};
+
+/** Expected hash for an APK file: exact filename first, then any entry
+ *  whose basename matches the wanted basename. Sums files list basenames
+ *  in practice, but a pathed entry must still match a bare filename. */
+export const expectedApkHash = (
+  sums: Map<string, string>,
+  apkFileName: string,
+): string | null => {
+  const direct = sums.get(apkFileName);
+  if (direct !== undefined) return direct;
+  const wantedBase = apkFileName.split('/').filter(Boolean).pop();
+  if (wantedBase === undefined) return null;
+  const byBase = sums.get(wantedBase);
+  if (byBase !== undefined) return byBase;
+  for (const [entry, hash] of sums) {
+    if (entry.split('/').filter(Boolean).pop() === wantedBase) return hash;
+  }
+  return null;
+};
+
+/** Basename of an APK download URL, or null when it is not an APK URL. */
+export const apkFileNameFromUrl = (url: string): string | null => {
+  try {
+    const name = new URL(url).pathname.split('/').filter(Boolean).pop() ?? null;
+    return name !== null && name.toLowerCase().endsWith('.apk') ? name : null;
+  } catch {
+    return null;
+  }
+};
+
+type TextResponse = {
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+};
+
+const isTextResponse = (value: unknown): value is TextResponse =>
+  isRecord(value) &&
+  typeof value.ok === 'boolean' &&
+  typeof value.status === 'number' &&
+  typeof value.text === 'function';
+
+/**
+ * Fetch and parse the release's SHA256SUMS.txt. Returns null on any
+ * failure (no fetch, timeout, non-2xx, unparseable body): a missing sums
+ * file aborts the install, it never falls back to installing unchecked.
+ */
+type FetchSumsOptions = {
+  fetchImpl?: (
+    url: string,
+    init?: { headers?: Record<string, string>; signal?: unknown },
+  ) => Promise<unknown>;
+  timeoutMs?: number;
+};
+
+export const fetchSha256Sums = async (
+  tag: string,
+  options: FetchSumsOptions = {},
+): Promise<Map<string, string> | null> => {
+  const { timeoutMs = CHECK_TIMEOUT_MS } = options;
+  const url = sumsDownloadUrl(tag);
+  if (!isAllowedUpdateUrl(url)) return null;
+  const fetchFn =
+    options.fetchImpl ??
+    ((typeof globalThis.fetch === 'function'
+      ? globalThis.fetch
+      : null) as FetchSumsOptions['fetchImpl']);
+  if (typeof fetchFn !== 'function') return null;
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timeoutId = setTimeout(() => {
+        controller?.abort();
+        reject(new Error('sums-timeout'));
+      }, timeoutMs);
+    });
+    const response = (await Promise.race([
+      fetchFn(url, { signal: controller?.signal }),
+      timeout,
+    ])) as unknown;
+    if (!isTextResponse(response)) return null;
+    if (!response.ok) return null;
+    const text = await response.text();
+    return parseSha256Sums(text);
+  } catch {
+    return null;
   } finally {
     if (timeoutId !== undefined) clearTimeout(timeoutId);
   }

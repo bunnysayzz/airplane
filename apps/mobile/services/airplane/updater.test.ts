@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // T14 tests: update detection, same/older ignored, failure tolerance.
 // The pure updater never throws, so every failure case asserts a quiet
-// `{ available: false }` — no crash, no prompt — exactly what launch needs.
+// `{ available: false }` - no crash, no prompt - exactly what launch needs.
 
 import {
+  apkFileNameFromUrl,
   checkForUpdate,
   compareVersions,
+  expectedApkHash,
+  fetchSha256Sums,
   isAllowedUpdateUrl,
   parseReleasePayload,
+  parseSha256Sums,
   parseVersion,
   pickApkAsset,
+  sumsDownloadUrl,
   type UpdateCheckResult,
 } from './updater';
 
@@ -208,5 +213,94 @@ describe('checkForUpdate', () => {
     expect(result.available).toBe(true);
     expect(result.update?.downloadUrl).toBeNull();
     expect(result.update?.releaseUrl).toContain('/releases/tag/');
+  });
+});
+
+describe('parseSha256Sums', () => {
+  const sumsText = [
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  airplane-v0.1.21.apk',
+    'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB *airplane-v0.1.21.aab',
+    '',
+    'not-a-hash  airplane-v0.1.21.apk',
+    'short  x.apk',
+  ].join('\n');
+  test('parses two-space and binary-mode lines, lowercases hashes', () => {
+    const sums = parseSha256Sums(sumsText);
+    expect(sums.get('airplane-v0.1.21.apk')).toBe('a'.repeat(64));
+    expect(sums.get('airplane-v0.1.21.aab')).toBe('b'.repeat(64));
+    expect(sums.size).toBe(2);
+  });
+  test('CRLF endings and surrounding whitespace tolerated', () => {
+    const sums = parseSha256Sums('c'.repeat(64) + '  x.apk\r\n');
+    expect(sums.get('x.apk')).toBe('c'.repeat(64));
+  });
+  test('non-string input yields an empty map, never throws', () => {
+    expect(parseSha256Sums(null).size).toBe(0);
+    expect(parseSha256Sums(42).size).toBe(0);
+  });
+});
+
+describe('expectedApkHash', () => {
+  const sums = new Map([
+    ['airplane-v0.1.21.apk', 'a'.repeat(64)],
+    ['nested/dir/app.apk', 'b'.repeat(64)],
+  ]);
+  test('exact filename wins', () => {
+    expect(expectedApkHash(sums, 'airplane-v0.1.21.apk')).toBe('a'.repeat(64));
+  });
+  test('basename fallback for pathed entries', () => {
+    expect(expectedApkHash(sums, 'app.apk')).toBe('b'.repeat(64));
+  });
+  test('missing entry yields null', () => {
+    expect(expectedApkHash(sums, 'nope.apk')).toBeNull();
+  });
+});
+
+describe('apkFileNameFromUrl', () => {
+  test('basename of an APK URL', () => {
+    expect(
+      apkFileNameFromUrl('https://github.com/bunnysayzz/airplane/releases/download/v0.1.21/airplane-v0.1.21.apk'),
+    ).toBe('airplane-v0.1.21.apk');
+  });
+  test('non-APK and malformed URLs yield null', () => {
+    expect(apkFileNameFromUrl('https://github.com/bunnysayzz/airplane/releases/tag/v0.1.21')).toBeNull();
+    expect(apkFileNameFromUrl('not a url')).toBeNull();
+  });
+});
+
+describe('sumsDownloadUrl', () => {
+  test('points at the release SHA256SUMS.txt asset', () => {
+    expect(sumsDownloadUrl('v0.1.21')).toBe(
+      'https://github.com/bunnysayzz/airplane/releases/download/v0.1.21/SHA256SUMS.txt',
+    );
+  });
+});
+
+describe('fetchSha256Sums', () => {
+  const textResponse = (text: string) => ({
+    ok: true,
+    status: 200,
+    text: async () => text,
+  });
+  test('fetches the sums URL and parses entries', async () => {
+    const fn = jest.fn(async () => textResponse(`${'d'.repeat(64)}  airplane-v0.1.21.apk\n`));
+    const sums = await fetchSha256Sums('v0.1.21', { fetchImpl: fn as never, timeoutMs: 1000 });
+    expect(fn).toHaveBeenCalledWith(
+      'https://github.com/bunnysayzz/airplane/releases/download/v0.1.21/SHA256SUMS.txt',
+      expect.anything(),
+    );
+    expect(sums?.get('airplane-v0.1.21.apk')).toBe('d'.repeat(64));
+  });
+  test('non-OK and throwing fetch yield null, never throw', async () => {
+    const notOk = await fetchSha256Sums('v0.1.21', {
+      fetchImpl: jest.fn(async () => ({ ok: false, status: 404, text: async () => '' })) as never,
+      timeoutMs: 1000,
+    });
+    expect(notOk).toBeNull();
+    const throwing = await fetchSha256Sums('v0.1.21', {
+      fetchImpl: fetchThrowing() as never,
+      timeoutMs: 1000,
+    });
+    expect(throwing).toBeNull();
   });
 });
