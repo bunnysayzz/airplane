@@ -17,6 +17,13 @@
 // { log, version, uploadedAt } to LOG_INBOX_UPLOAD_URL, respond 200
 // with JSON { id } where id is the stored object's id. The endpoint
 // rejects bodies over LOG_INBOX_MAX_BYTES, same as the app does here.
+// The endpoint stores the log text as one object named
+// logs/<uploadedAt compact>-<random 8>-v<version>.log, so every upload
+// is identifiable by version and time from the store listing alone.
+// The id is only the stored file's reference: the tester is never
+// asked to send or relay it anywhere. Tapping Send is the whole
+// action; new uploads are found by listing the store, not by ids
+// anyone passes along.
 
 /** Test inbox endpoint. Plain constant, easy to change when the
  * deployment lands. Public by design; no secret is attached to it. */

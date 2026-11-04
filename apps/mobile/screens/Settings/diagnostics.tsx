@@ -391,9 +391,14 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
           </Text>
         )}
         {inboxSentId !== null && (
-          <Text style={[type.meta, styles.note]}>
-            {t('settings.diagnosticsSendToInboxSent', { id: inboxSentId })}
-          </Text>
+          <>
+            <Text style={[type.meta, styles.note]}>
+              {t('settings.diagnosticsSendToInboxSent')}
+            </Text>
+            <Text style={[type.meta, styles.note]}>
+              {t('settings.diagnosticsSendToInboxId', { id: inboxSentId })}
+            </Text>
+          </>
         )}
         {inboxFailed && (
           <Text style={[type.meta, styles.note]}>
