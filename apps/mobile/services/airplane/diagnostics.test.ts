@@ -43,6 +43,7 @@ function message(id: string): DiagnosticsMessage {
     sequence: null,
     sizeBytes: 100,
     direction: 'outbound',
+    kind: 'post',
     attempts: [{ transport: 'relay', atMs: Date.now(), outcome: 'ok', detail: null }],
     finalStatus: 'relayed',
   };
@@ -75,6 +76,33 @@ describe('diagnostics collector', () => {
     });
     recordTransportFailure('start');
     expect(lines).toEqual(['transport start failed start']);
+    setDiagnosticsLogSink(null);
+  });
+
+  test('message lines carry kind and sequence, and omit an empty attempts segment', () => {
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => {
+      lines.push(`${kind} ${detail}`);
+    });
+    recordMessage({
+      ...message('msg-seq'),
+      sequence: 12,
+      kind: 'dm',
+      sizeBytes: 312,
+      direction: 'inbound',
+      finalStatus: 'received',
+      attempts: [{ transport: 'relay', atMs: Date.now(), outcome: 'ok', detail: null }],
+    });
+    recordMessage({
+      ...message('msg-no-channel'),
+      kind: 'dm',
+      finalStatus: 'received',
+      attempts: [],
+    });
+    expect(lines).toEqual([
+      'message inbound dm seq=12 312B received relay:ok',
+      'message outbound dm seq=none 100B received',
+    ]);
     setDiagnosticsLogSink(null);
   });
 

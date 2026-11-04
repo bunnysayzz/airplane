@@ -65,7 +65,7 @@ describe('BLE flood forwarding', () => {
     const forwarded: { eventId: string; peers: number; ttl: number }[] = [];
     const ble = new BleTransport(port, {
       floodForwardDelayMs: 0,
-      onFloodForward: (eventId, peers, ttl) => forwarded.push({ eventId, peers, ttl }),
+      onFloodForward: (event, peers, ttl) => forwarded.push({ eventId: toHex(event.id), peers, ttl }),
     });
     await ble.start();
     const received: SignedEvent[] = [];

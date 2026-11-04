@@ -96,6 +96,16 @@ export interface DmMessageRow {
   plainText?: string;
   /** Stable delivery id from the envelope (see dm.ts). Absent on pre-change rows. */
   deliveryId?: string;
+  /**
+   * Per-sender message sequence number. Outgoing: assigned at send
+   * from the app counter and sealed inside the rumor, so it travels
+   * with the message and survives re-seal (a retry reuses the row
+   * number, never a fresh one). Incoming: read from the sealed rumor
+   * and persisted, so the later ack line can carry the same number.
+   * Absent on rows from older senders and on pre-change rows: the
+   * log then reads seq=none, never a guessed number.
+   */
+  seq?: number;
   /** Expected ack proof for this send (outgoing rows only). One-way HMAC output, not a secret. */
   ackProof?: string;
   createdAtMs: number;
@@ -373,6 +383,60 @@ export class FailingDmRelay implements DmRelayPort {
   }
 }
 
+/**
+ * One transport attempt inside a DM traffic event. Mirrors the app
+ * diagnostics attempt shape (transport, outcome, detail) without
+ * importing the app layer into this package.
+ */
+export interface DmTrafficAttempt {
+  transport: 'relay' | 'ble';
+  outcome: 'ok' | 'failed' | 'skipped';
+  detail: string | null;
+}
+
+/**
+ * A DM traffic event for diagnostics: every DM send, receive and ack
+ * gets one, so no DM traffic is ever frames-only. sizeBytes is the
+ * envelope JSON byte length, comparable across relay and BLE, not
+ * the wire frame size. seq is the per-sender sequence number when
+ * the message carries one. The app maps these to message-level log
+ * lines (kind dm) with the same words posts use.
+ */
+export interface DmTrafficEvent {
+  kind: 'traffic';
+  direction: 'out' | 'in';
+  peerHex: string;
+  state: 'relayed' | 'mesh-sent' | 'queued' | 'failed' | 'received' | 'ack-sent' | 'ack-received' | 'dropped';
+  sizeBytes: number;
+  seq?: number;
+  attempts?: DmTrafficAttempt[];
+  reason?: string;
+}
+
+/**
+ * A DM state change with no traffic behind it: a cap turning a row
+ * Failed, or a thread open marking a conversation read. The app maps
+ * these to service lines, not message lines, because no bytes moved.
+ */
+export interface DmStateEvent {
+  kind: 'state';
+  peerHex: string;
+  state: 'failed' | 'thread-read';
+  reason?: string;
+}
+
+/** Diagnostics events the service emits. Never throws into delivery. */
+export type DmEvent = DmTrafficEvent | DmStateEvent;
+
+/** Envelope JSON byte length: the stable DM message size for log lines. */
+export function dmEnvelopeBytes(envelope: DmEnvelope): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(envelope)).length;
+  } catch {
+    return 0;
+  }
+}
+
 export interface DmServiceOpts {
   store: DmStorePort;
   relay: DmRelayPort;
@@ -383,6 +447,15 @@ export interface DmServiceOpts {
   /** This device's mesh pubkey hex (the DM address others write to). */
   ownMeshHex: () => string;
   now?: () => number;
+  /**
+   * Next per-sender DM sequence number, durable across restarts.
+   * Provided by the app (KV-backed); absent in package tests, where
+   * sends simply carry no number. A failure or null means no number,
+   * never a failed send.
+   */
+  nextDmSeq?: () => Promise<number | null>;
+  /** Diagnostics hook for traffic and state events. Never throws. */
+  onDmEvent?: (event: DmEvent) => void;
 }
 
 function newId(): string {
@@ -410,6 +483,8 @@ export class DmService {
   private readonly ownKeys: () => DmKeypair;
   private readonly ownMeshHex: () => string;
   private readonly now: () => number;
+  private readonly nextDmSeq?: () => Promise<number | null>;
+  private readonly onDmEvent?: (event: DmEvent) => void;
   private readonly listeners = new Set<() => void>();
   private relayUnsub: (() => void) | null = null;
   private meshUnsub: (() => void) | null = null;
@@ -425,6 +500,8 @@ export class DmService {
     this.ownKeys = opts.ownKeys;
     this.ownMeshHex = opts.ownMeshHex;
     this.now = opts.now ?? (() => Date.now());
+    this.nextDmSeq = opts.nextDmSeq;
+    this.onDmEvent = opts.onDmEvent;
   }
 
   subscribe(cb: () => void): () => void {
@@ -436,6 +513,32 @@ export class DmService {
 
   private emit(): void {
     for (const cb of [...this.listeners]) cb();
+  }
+
+  /** Diagnostics hook call. A hook failure must never break delivery. */
+  private emitDm(event: DmEvent): void {
+    try {
+      this.onDmEvent?.(event);
+    } catch {
+      // Diagnostics only; delivery stands.
+    }
+  }
+
+  /**
+   * Next per-sender DM sequence number, or undefined when the app
+   * provides no counter, it fails, or it returns an unusable value.
+   * A missing number never fails the send: the message simply
+   * carries no seq field and its log lines read seq=none.
+   */
+  private async nextSeqOrUndefined(): Promise<number | undefined> {
+    if (!this.nextDmSeq) return undefined;
+    try {
+      const seq = await this.nextDmSeq();
+      if (seq !== null && Number.isInteger(seq) && seq >= 1) return seq;
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -454,10 +557,10 @@ export class DmService {
     if (port && this.relayUnsub) {
       this.meshUnsub = port.subscribe(
         envelope => {
-          void this.receiveEnvelope(envelope);
+          void this.receiveEnvelope(envelope, 'ble');
         },
         envelope => {
-          void this.receiveAck(envelope);
+          void this.receiveAck(envelope, 'ble');
         },
       );
     }
@@ -469,19 +572,19 @@ export class DmService {
     this.relayUnsub = this.relay.subscribe(
       this.ownMeshHex(),
       envelope => {
-        void this.receiveEnvelope(envelope);
+        void this.receiveEnvelope(envelope, 'relay');
       },
       envelope => {
-        void this.receiveAck(envelope);
+        void this.receiveAck(envelope, 'relay');
       },
     );
     if (this.mesh && !this.meshUnsub) {
       this.meshUnsub = this.mesh.subscribe(
         envelope => {
-          void this.receiveEnvelope(envelope);
+          void this.receiveEnvelope(envelope, 'ble');
         },
         envelope => {
-          void this.receiveAck(envelope);
+          void this.receiveAck(envelope, 'ble');
         },
       );
     }
@@ -524,10 +627,10 @@ export class DmService {
     this.relayUnsub = this.relay.subscribe(
       this.ownMeshHex(),
       envelope => {
-        void this.receiveEnvelope(envelope);
+        void this.receiveEnvelope(envelope, 'relay');
       },
       envelope => {
-        void this.receiveAck(envelope);
+        void this.receiveAck(envelope, 'relay');
       },
       watermark === null ? undefined : { backfillSinceSec: watermark - DM_BACKFILL_OVERLAP_SEC },
     );
@@ -644,7 +747,12 @@ export class DmService {
     const conv = await this.startConversation(peerHex);
     if (conv.state === 'blocked') throw new Error('sendMessage: peer is blocked');
     const nowMs = this.now();
-    const { envelope, ackProof } = sealDmWithAckProof(text, this.ownMeshHex(), peerHex, Math.floor(nowMs / 1000));
+    // The sequence number is assigned here, once per message, before
+    // sealing: it travels inside the sealed rumor and is reused by
+    // every retry of this row, so one message always carries one
+    // number on both phones logs.
+    const seq = await this.nextSeqOrUndefined();
+    const { envelope, ackProof } = sealDmWithAckProof(text, this.ownMeshHex(), peerHex, Math.floor(nowMs / 1000), seq);
     const row: DmMessageRow = {
       id: newId(),
       peerHex,
@@ -654,6 +762,7 @@ export class DmService {
       plainText: text,
       deliveryId: envelope.deliveryId,
       ackProof,
+      seq,
       createdAtMs: nowMs,
       status: 'Sending',
       attempts: 0,
@@ -735,6 +844,15 @@ export class DmService {
               m.status = 'Failed';
               await this.store.updateMessage(m);
               changed = true;
+              // No traffic moved on this flush, so this is a state
+              // line, not a message line: the row turned Failed by
+              // cap exhaustion, not by a failed send.
+              this.emitDm({
+                kind: 'state',
+                peerHex: m.peerHex,
+                state: 'failed',
+                reason: 'ack-window-exhausted',
+              });
               continue;
             }
             if (m.nextAttemptAtMs > now) continue;
@@ -748,6 +866,12 @@ export class DmService {
             m.status = 'Failed';
             await this.store.updateMessage(m);
             changed = true;
+            this.emitDm({
+              kind: 'state',
+              peerHex: m.peerHex,
+              state: 'failed',
+              reason: 'mesh-attempts-exhausted',
+            });
             continue;
           }
           if (!force && m.nextAttemptAtMs > now) continue;
@@ -808,6 +932,18 @@ export class DmService {
       m.relayRepublishAttempts = (m.relayRepublishAttempts ?? 0) + 1;
       m.nextAttemptAtMs = now + DM_RELAYED_ACK_WINDOW_MS;
       await this.store.updateMessage(m);
+      // A re-publish is traffic: it gets its own relay line, marked
+      // as a re-publish, so the sender log shows the retry, not just
+      // the original send.
+      this.emitDm({
+        kind: 'traffic',
+        direction: 'out',
+        peerHex: m.peerHex,
+        state: 'relayed',
+        sizeBytes: dmEnvelopeBytes(envelope),
+        seq: m.seq,
+        attempts: [{ transport: 'relay', outcome: 'ok', detail: 'relay re-publish OK' }],
+      });
       return true;
     }
     if (relayRes.rejected) {
@@ -841,7 +977,10 @@ export class DmService {
     if (!envelope) {
       const plainText = m.plainText ?? this.outgoingPlaintext.get(m.id);
       if (plainText !== undefined) {
-        const sealed = sealDmWithAckProof(plainText, this.ownMeshHex(), m.peerHex, Math.floor(now / 1000));
+        // Re-seal reuses the row number: a retry sends identical
+        // text under a new delivery id but the same sequence number,
+        // so the message traces as one message on both logs.
+        const sealed = sealDmWithAckProof(plainText, this.ownMeshHex(), m.peerHex, Math.floor(now / 1000), m.seq);
         envelope = sealed.envelope;
         m.envelope = envelope;
         m.sealed = envelope.sealed;
@@ -850,6 +989,16 @@ export class DmService {
       } else {
         m.status = 'Failed';
         await this.store.updateMessage(m);
+        this.emitDm({
+          kind: 'traffic',
+          direction: 'out',
+          peerHex: m.peerHex,
+          state: 'failed',
+          sizeBytes: 0,
+          seq: m.seq,
+          attempts: [],
+          reason: 'envelope-missing',
+        });
         return { ok: false, envelopeMissing: true };
       }
     }
@@ -870,15 +1019,37 @@ export class DmService {
       // over Bluetooth, best effort, so a nearby offline peer gets the
       // DM at send time instead of waiting for a relay fetch. Status
       // stays Relayed, and a Bluetooth failure or zero peers never
-      // changes the relay result and never fails the DM.
+      // changes the relay result and never fails the DM. The BLE leg
+      // outcome is captured for the traffic line, not for the status.
+      let blePeers = 0;
+      let bleThrew = false;
       if (this.mesh) {
         try {
-          await this.mesh.publish(envelope, 'dm');
+          blePeers = await this.mesh.publish(envelope, 'dm');
         } catch {
           // Best effort only: the relay handoff already stands.
+          bleThrew = true;
         }
       }
       await this.store.updateMessage(m);
+      this.emitDm({
+        kind: 'traffic',
+        direction: 'out',
+        peerHex: m.peerHex,
+        state: 'relayed',
+        sizeBytes: dmEnvelopeBytes(envelope),
+        seq: m.seq,
+        attempts: [
+          { transport: 'relay', outcome: 'ok', detail: 'relay OK' },
+          this.mesh
+            ? bleThrew
+              ? { transport: 'ble', outcome: 'failed', detail: 'BLE send failed' }
+              : blePeers > 0
+                ? { transport: 'ble', outcome: 'ok', detail: `handed to radio for ${blePeers} peers` }
+                : { transport: 'ble', outcome: 'skipped', detail: 'no connected BLE peers' }
+            : { transport: 'ble', outcome: 'skipped', detail: 'no BLE port' },
+        ],
+      });
       return { ok: true, envelopeMissing: false };
     }
     // Mesh fallback: direct connected peers only in v1 (no multi-hop DM
@@ -898,6 +1069,22 @@ export class DmService {
       m.meshAttempts = (m.meshAttempts ?? 0) + 1;
       m.nextAttemptAtMs = now + DM_MESH_RETRY_MS;
       await this.store.updateMessage(m);
+      this.emitDm({
+        kind: 'traffic',
+        direction: 'out',
+        peerHex: m.peerHex,
+        state: 'mesh-sent',
+        sizeBytes: dmEnvelopeBytes(envelope),
+        seq: m.seq,
+        attempts: [
+          {
+            transport: 'relay',
+            outcome: 'failed',
+            detail: relayRes.rejected ? 'relay rejected' : 'relay unreachable',
+          },
+          { transport: 'ble', outcome: 'ok', detail: `handed to radio for ${meshPeers} peers` },
+        ],
+      });
       return { ok: true, envelopeMissing: false };
     }
     // No transport took it. Hard means a transport actively refused the
@@ -906,6 +1093,7 @@ export class DmService {
     // end in Queued, which retries without a cap so a long offline
     // stretch still drains when a transport returns.
     const hard = relayRes.rejected || meshThrew;
+    const prevStatus = m.status;
     m.attempts = Math.min(m.attempts + 1, DM_MAX_ATTEMPTS);
     if (hard && m.attempts >= DM_MAX_ATTEMPTS) {
       m.status = 'Failed';
@@ -917,6 +1105,33 @@ export class DmService {
       m.nextAttemptAtMs = now + DM_BACKOFF_MS[Math.min(m.attempts, DM_BACKOFF_MS.length - 1)];
     }
     await this.store.updateMessage(m);
+    // A MeshSent row staying MeshSent moved nothing on this retry
+    // and changed no state, so it gets no line: its earlier
+    // mesh-sent line already covers the send. A row turning Failed
+    // or Queued/Sending is the send line for this attempt.
+    if (m.status !== 'MeshSent' || prevStatus !== 'MeshSent') {
+      this.emitDm({
+        kind: 'traffic',
+        direction: 'out',
+        peerHex: m.peerHex,
+        state: m.status === 'Failed' ? 'failed' : 'queued',
+        sizeBytes: dmEnvelopeBytes(envelope),
+        seq: m.seq,
+        attempts: [
+          {
+            transport: 'relay',
+            outcome: 'failed',
+            detail: relayRes.rejected ? 'relay rejected' : 'relay unreachable',
+          },
+          !this.mesh
+            ? { transport: 'ble', outcome: 'skipped', detail: 'no BLE port' }
+            : meshThrew
+              ? { transport: 'ble', outcome: 'failed', detail: 'BLE send failed' }
+              : { transport: 'ble', outcome: 'skipped', detail: 'no connected BLE peers' },
+        ],
+        ...(m.status === 'Failed' ? { reason: 'attempts-exhausted' } : {}),
+      });
+    }
     return { ok: false, envelopeMissing: false };
   }
 
@@ -940,14 +1155,28 @@ export class DmService {
   }
 
   /** Route one incoming sealed envelope. Returns what happened (for tests/logs). */
-  async receiveEnvelope(envelope: DmEnvelope): Promise<'inbox' | 'request' | 'dropped' | 'ignored'> {
+  async receiveEnvelope(envelope: DmEnvelope, source?: 'relay' | 'ble'): Promise<'inbox' | 'request' | 'dropped' | 'ignored'> {
     if (envelope.recipientHex !== this.ownMeshHex()) return 'ignored';
     const rumor = unsealDm(envelope, this.ownKeys(), this.ownMeshHex());
     if (!rumor) return 'ignored'; // not for us / corrupt: never surface, never crash
     const senderHex = rumor.pubkey;
     if (senderHex === this.ownMeshHex()) return 'ignored';
     const existing = await this.store.getConversation(senderHex);
-    if (existing?.state === 'blocked') return 'dropped'; // silent drop: no row, no badge, no ack
+    if (existing?.state === 'blocked') {
+      // Silent drop: no row, no badge, no ack. But not silent in the
+      // log: a dropped message is still traffic that arrived, so it
+      // gets a message line marked dropped, with kind and number only.
+      this.emitDm({
+        kind: 'traffic',
+        direction: 'in',
+        peerHex: senderHex,
+        state: 'dropped',
+        sizeBytes: dmEnvelopeBytes(envelope),
+        seq: rumor.seq,
+        attempts: source ? [{ transport: source, outcome: 'ok', detail: null }] : [],
+      });
+      return 'dropped';
+    }
     // Dedup, never by text or sender: the same send delivered twice (two
     // relays, relay plus BLE, relay replay) renders once, with one unread
     // increment. The dedup key is the delivery id when present, else the
@@ -980,6 +1209,7 @@ export class DmService {
       sealed: envelope.sealed,
       envelope,
       deliveryId,
+      seq: rumor.seq,
       createdAtMs: nowMs,
       status: 'Delivered', // inbound: already on this device
       attempts: 0,
@@ -998,6 +1228,20 @@ export class DmService {
       await this.store.markSeenDelivery(dedupKey, senderHex);
       this.pendingSeen.delete(dedupKey);
     }
+    // The receive line: every stored DM gets a message-level line
+    // with kind, size and the sender number, on both paths below
+    // (request and inbox share this emission). A deduped replay
+    // returns above and gets no second line: the first arrival
+    // already logged it.
+    this.emitDm({
+      kind: 'traffic',
+      direction: 'in',
+      peerHex: senderHex,
+      state: 'received',
+      sizeBytes: dmEnvelopeBytes(envelope),
+      seq: rumor.seq,
+      attempts: source ? [{ transport: source, outcome: 'ok', detail: null }] : [],
+    });
     if (!existing) {
       // Unknown sender -> requests folder, NEVER straight to inbox (orders).
       await this.store.upsertConversation({
@@ -1041,39 +1285,72 @@ export class DmService {
    * or a BLE peer count above zero). A false return means the ack
    * never left, so the row stays pending for resendPendingAcks.
    */
-  private async sendAck(senderHex: string, envelope: DmEnvelope, deliveryId: string): Promise<boolean> {
+  private async sendAck(
+    senderHex: string,
+    envelope: DmEnvelope,
+    deliveryId: string,
+  ): Promise<{ sent: boolean; relayOk: boolean; blePeers: number; bleThrew: boolean; sizeBytes: number }> {
     const proof = dmAckProofForEnvelope(this.ownKeys().secretKey, envelope, deliveryId);
-    if (!proof) return false;
+    if (!proof) return { sent: false, relayOk: false, blePeers: 0, bleThrew: false, sizeBytes: 0 };
     const ackEnvelope = sealDm(JSON.stringify({ dmAckFor: deliveryId, proof }), this.ownMeshHex(), senderHex);
     let sent = false;
+    let relayOk = false;
+    let blePeers = 0;
+    let bleThrew = false;
     try {
       const res = await this.relay.publishAck(ackEnvelope);
-      if (res.accepted) sent = true;
+      if (res.accepted) {
+        sent = true;
+        relayOk = true;
+      }
     } catch {
       // Ack loss is not receipt loss: the message is already stored here.
     }
     if (this.mesh) {
       try {
-        const peers = await this.mesh.publish(ackEnvelope, 'ack');
-        if (peers > 0) sent = true;
+        blePeers = await this.mesh.publish(ackEnvelope, 'ack');
+        if (blePeers > 0) sent = true;
       } catch {
         // Same as above: best-effort only.
+        bleThrew = true;
       }
     }
-    return sent;
+    return { sent, relayOk, blePeers, bleThrew, sizeBytes: dmEnvelopeBytes(ackEnvelope) };
   }
 
   /**
    * Send the ack for one stored inbound row and persist the outcome.
    * Only a sent ack marks the row: a failed ack leaves ackSent false,
    * so a later service start re-sends it instead of assuming it left.
+   * A sent ack gets a message-level line carrying the original
+   * message number, so the ack traces to the message it acks.
    */
   private async sendAckForRow(row: DmMessageRow): Promise<void> {
     if (row.direction !== 'in' || row.deliveryId === undefined || !row.envelope) return;
-    const sent = await this.sendAck(row.peerHex, row.envelope, row.deliveryId);
-    if (sent && row.ackSent !== true) {
-      row.ackSent = true;
-      await this.store.updateMessage(row);
+    const res = await this.sendAck(row.peerHex, row.envelope, row.deliveryId);
+    if (res.sent) {
+      if (row.ackSent !== true) {
+        row.ackSent = true;
+        await this.store.updateMessage(row);
+      }
+      this.emitDm({
+        kind: 'traffic',
+        direction: 'out',
+        peerHex: row.peerHex,
+        state: 'ack-sent',
+        sizeBytes: res.sizeBytes,
+        seq: row.seq,
+        attempts: [
+          { transport: 'relay', outcome: res.relayOk ? 'ok' : 'failed', detail: res.relayOk ? 'relay OK' : 'relay unreachable' },
+          !this.mesh
+            ? { transport: 'ble', outcome: 'skipped', detail: 'no BLE port' }
+            : res.bleThrew
+              ? { transport: 'ble', outcome: 'failed', detail: 'BLE send failed' }
+              : res.blePeers > 0
+                ? { transport: 'ble', outcome: 'ok', detail: `handed to radio for ${res.blePeers} peers` }
+                : { transport: 'ble', outcome: 'skipped', detail: 'no connected BLE peers' },
+        ],
+      });
     }
   }
 
@@ -1109,7 +1386,7 @@ export class DmService {
   }
 
   /** Route one incoming delivery ack. Returns what happened (for tests/logs). */
-  async receiveAck(envelope: DmEnvelope): Promise<'delivered' | 'ignored'> {
+  async receiveAck(envelope: DmEnvelope, source?: 'relay' | 'ble'): Promise<'delivered' | 'ignored'> {
     if (envelope.recipientHex !== this.ownMeshHex()) return 'ignored';
     const rumor = unsealDm(envelope, this.ownKeys(), this.ownMeshHex());
     if (!rumor) return 'ignored';
@@ -1127,6 +1404,17 @@ export class DmService {
     row.status = 'Delivered';
     await this.store.updateMessage(row);
     this.emit();
+    // The ack line carries the original message number from the row,
+    // so the ack traces to the message it acks on both logs.
+    this.emitDm({
+      kind: 'traffic',
+      direction: 'in',
+      peerHex: row.peerHex,
+      state: 'ack-received',
+      sizeBytes: dmEnvelopeBytes(envelope),
+      seq: row.seq,
+      attempts: source ? [{ transport: source, outcome: 'ok', detail: null }] : [],
+    });
     return 'delivered';
   }
 
@@ -1238,6 +1526,9 @@ export class DmService {
     if (c && c.unread !== 0) {
       await this.store.upsertConversation({ ...c, unread: 0 });
       this.emit();
+      // Thread open read marking: no traffic moved, so this is a
+      // state line, not a message line.
+      this.emitDm({ kind: 'state', peerHex, state: 'thread-read' });
     }
   }
 

@@ -327,47 +327,64 @@ export class ExpoLocationProvider implements LocationProvider {
    */
   private async watchFix(
     Location: typeof ExpoLocationTypes,
-  ): Promise<{ latitude: number; longitude: number } | null> {
+  ): Promise<{ latitude: number; longitude: number } | 'cancelled' | null> {
     if (typeof Location.watchPositionAsync !== 'function') return null;
     // Holder object, not a plain variable: TS narrows a captured
     // variable to its initial null after the await, which would make
     // the removal below untypable. A property read is not narrowed.
     const holder: { current: { remove: () => void } | null } = { current: null };
     let finished = false;
+    // Cancellation race: backgrounding resolves this promise, which
+    // beats the watch timeout and the late native callback alike.
+    // The cancel closure is held in the module slot only for the life
+    // of this call (see the finally below), so a stale cancel can
+    // never kill a later watch.
+    let cancelResolve: (() => void) | null = null;
+    const cancelled = new Promise<'cancelled'>((resolve) => {
+      cancelResolve = () => resolve('cancelled');
+    });
+    const cancelFn = (): void => {
+      cancelResolve?.();
+    };
+    activeWatchCancel = cancelFn;
     try {
-      return await withTimeout(
-        new Promise<{ latitude: number; longitude: number }>((resolve, reject) => {
-          void Location.watchPositionAsync(
-            { accuracy: Location.LocationAccuracy.Balanced },
-            (position) => {
-              const { latitude, longitude } = position.coords;
-              if (this.validCoords(latitude, longitude)) {
-                resolve({ latitude, longitude });
-              } else {
-                reject(new Error('watch invalid coords'));
-              }
-            },
-          )
-            .then((s) => {
-              if (finished) {
-                try {
-                  s.remove();
-                } catch {
-                  // Already timed out: removal is best-effort.
+      return await Promise.race([
+        withTimeout(
+          new Promise<{ latitude: number; longitude: number }>((resolve, reject) => {
+            void Location.watchPositionAsync(
+              { accuracy: Location.LocationAccuracy.Balanced },
+              (position) => {
+                const { latitude, longitude } = position.coords;
+                if (this.validCoords(latitude, longitude)) {
+                  resolve({ latitude, longitude });
+                } else {
+                  reject(new Error('watch invalid coords'));
                 }
-              } else {
-                holder.current = s;
-              }
-            })
-            .catch(reject);
-        }),
-        WATCH_TIMEOUT_MS,
-        () => new Error('watch timeout'),
-      );
+              },
+            )
+              .then((s) => {
+                if (finished) {
+                  try {
+                    s.remove();
+                  } catch {
+                    // Already timed out: removal is best-effort.
+                  }
+                } else {
+                  holder.current = s;
+                }
+              })
+              .catch(reject);
+          }),
+          WATCH_TIMEOUT_MS,
+          () => new Error('watch timeout'),
+        ),
+        cancelled,
+      ]);
     } catch {
       return null;
     } finally {
       finished = true;
+      if (activeWatchCancel === cancelFn) activeWatchCancel = null;
       if (holder.current !== null) {
         try {
           holder.current.remove();
@@ -420,14 +437,22 @@ export class ExpoLocationProvider implements LocationProvider {
       }
       recordLocationEvent('watch started');
       const watched = await this.watchFix(Location);
-      if (watched) {
+      if (watched === 'cancelled') {
+        // Backgrounded mid-watch: the v0.1.23 log showed a watch
+        // start with no outcome line at all, because the process
+        // died with the old JS context. Cancelling from the
+        // background transition logs the outcome before the
+        // fallback runs, so the next log shows the cancel, not a gap.
+        recordLocationEvent('watch cancelled backgrounded');
+      } else if (watched) {
         const cell = encodeGeohash(watched.latitude, watched.longitude, 5);
         this.cached = { cell, atMs: this.now() };
         this.noteFreshPathOutcome('fresh');
         recordLocationEvent('watch fresh-ok');
         return { cell, source: 'fresh' };
+      } else {
+        recordLocationEvent('watch failed');
       }
-      recordLocationEvent('watch failed');
       const stale = await this.readLastKnown(Location);
       if (stale) {
         recordLocationEvent('fresh last-known');
@@ -473,8 +498,14 @@ export class ExpoLocationProvider implements LocationProvider {
         this.cached = { cell, atMs: this.now() };
         this.noteFreshPathOutcome('fresh');
         recordLocationEvent('revalidate ok');
-      } catch {
-        recordLocationEvent('revalidate failed');
+      } catch (error: unknown) {
+        // A bare revalidate failed line hid the cause in the v0.1.23
+        // logs (5 failures, no reason). Log the mapped code:
+        // timeout, permission-denied, services-disabled, or
+        // unavailable. An unmapped provider failure keeps its error
+        // class name after the colon, so the next log can tell
+        // provider error shapes apart instead of lumping them.
+        recordLocationEvent(`revalidate failed ${revalidateFailureCode(error)}`);
       }
     })();
     this.revalidating = run;
@@ -556,6 +587,35 @@ function mapExpoError(error: unknown): LocationError {
       : locationError('services-disabled', message);
   }
   return locationError('unavailable', message);
+}
+
+/**
+ * Reason code for a background revalidation failure: the typed code
+ * when the failure carries one, else the mapped expo code. An
+ * unmapped provider failure keeps its error class name after the
+ * colon (an outcome name only, never content or coordinates), so
+ * the diagnostics line distinguishes provider error shapes.
+ */
+function revalidateFailureCode(error: unknown): string {
+  if (error instanceof LocationError) return error.code;
+  const mapped = mapExpoError(error);
+  if (mapped.code !== 'unavailable') return mapped.code;
+  const cls = error instanceof Error ? error.name : typeof error;
+  return `unavailable:${cls}`;
+}
+
+/**
+ * Cancel closure for the in-flight location watch, if any. The watch
+ * cancel subscription (below) resolves through this slot, mirroring
+ * how the compose warmup seam reaches the default provider: only one
+ * watch can be in flight at a time in practice, and the slot clears
+ * when the watch settles, so a stale cancel never fires.
+ */
+let activeWatchCancel: (() => void) | null = null;
+
+/** Cancel the in-flight location watch, if any. No-op otherwise. */
+export function cancelPendingLocationWatch(): void {
+  activeWatchCancel?.();
 }
 
 function withTimeout<T>(
@@ -749,6 +809,24 @@ export function subscribeComposeWarmupOnForeground(
 ): () => void {
   const sub = appState.addEventListener('change', (state) => {
     if (state === 'active') void warmLocationCell();
+  });
+  return () => sub.remove();
+}
+
+/**
+ * Background seam for the location watch, mirroring the warmup seam
+ * above: when the app backgrounds mid-watch, cancel the watch so
+ * its outcome line (watch cancelled backgrounded) lands before the
+ * last-known fallback runs, instead of the watch dying silently
+ * with the old JS context. Only the background transition cancels:
+ * transient inactive states (dialogs, permission prompts) leave the
+ * watch running.
+ */
+export function subscribeWatchCancelOnBackground(
+  appState: ComposeWarmupAppState,
+): () => void {
+  const sub = appState.addEventListener('change', (state) => {
+    if (state === 'background') cancelPendingLocationWatch();
   });
   return () => sub.remove();
 }

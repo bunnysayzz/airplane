@@ -139,7 +139,9 @@ describe('publishPost', () => {
     const saved = await getStore().getEvent(id);
     expect(saved).not.toBeNull();
     expect(saved!.content).toBe('hello mesh');
-    expect(saved!.tags).toEqual([]);
+    // The per-sender sequence counter starts at 1 for a fresh KV:
+    // every published post carries its signed seq tag.
+    expect(saved!.tags).toEqual([['seq', '1']]);
     expect(saved!.kind).toBe(1);
   });
 

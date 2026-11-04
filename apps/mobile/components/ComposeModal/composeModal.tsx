@@ -36,6 +36,7 @@ import {
     logFirstComposePermissionStatus,
     requestLocationPermission,
     subscribeComposeWarmupOnForeground,
+    subscribeWatchCancelOnBackground,
     warmLocationCell,
 } from '../../services/airplane/location';
 
@@ -210,6 +211,15 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
     useEffect(() => {
         if (!isOpen) return;
         return subscribeComposeWarmupOnForeground(AppState);
+    }, [isOpen]);
+
+    // Watch cancel: while the sheet is open, backgrounding cancels
+    // the in-flight location watch so its outcome line lands before
+    // the last-known fallback runs, instead of dying silently with
+    // the old JS context. Same lifetime as the warmup subscription.
+    useEffect(() => {
+        if (!isOpen) return;
+        return subscribeWatchCancelOnBackground(AppState);
     }, [isOpen]);
 
     // Every keystroke persists the draft, so a kill at any moment loses

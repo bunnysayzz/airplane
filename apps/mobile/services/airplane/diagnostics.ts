@@ -67,14 +67,24 @@ export interface DiagnosticsMessageAttempt {
 export interface DiagnosticsMessage {
   id: string;
   /**
-   * Per-conversation sender sequence. Null until the durable outbox (R5)
-   * assigns one: sequence counters must survive restart to stay true,
-   * and R4 deliberately assigns no volatile in-memory sequence that a
-   * restart would reset into duplicate numbers.
+   * Per-sender message sequence, durable across restarts: posts carry
+   * it as a signed seq tag, DMs as a field inside the sealed rumor.
+   * The counter lives in KV and increments only for messages that
+   * reach signing (posts) or sealing (DMs), so a gap in a receiver
+   * log means the message never arrived, not a renumbering. Null
+   * when the sender is an older version with no number, or when the
+   * counter was unavailable: the line then reads seq=none, never a
+   * guessed number.
    */
   sequence: number | null;
   sizeBytes: number;
   direction: 'outbound' | 'inbound';
+  /**
+   * Traffic class of the message, kind only, never content: a size-only
+   * line made a post indistinguishable from a DM, which left the
+   * v0.1.23 regression question of a lost 163B item unanswerable.
+   */
+  kind: 'post' | 'dm' | 'star' | 'reshare' | 'receipt' | 'other';
   attempts: DiagnosticsMessageAttempt[];
   finalStatus: string;
 }
@@ -511,7 +521,7 @@ export function recordInboxEvent(detail: InboxLogDetail): void {
 
 /** Service lifecycle failures that used to die in a swallowed catch:
  * a launch start that fails must leave a line, not silence. */
-export type ServiceLogDetail = `dm start failed ${string}` | 'sync pass failed';
+export type ServiceLogDetail = `dm start failed ${string}` | 'sync pass failed' | `dm ${string}`;
 
 export function recordServiceEvent(detail: ServiceLogDetail): void {
   logEvent('service', detail);
@@ -584,13 +594,20 @@ export function recordDedupDrop(peerId: string | null): void {
 // ---------------------------------------------------------------- messages
 
 export function recordMessage(message: DiagnosticsMessage): void {
-  // Log direction, size, status and attempt outcomes only. The message
-  // id is deliberately NOT logged: it is not needed to diagnose a step,
-  // and keeping ids out keeps the shareable file to diagnostics data.
+  // Log direction, kind, sequence, size, status and attempt outcomes
+  // only. The message id is deliberately NOT logged: it is not needed
+  // to diagnose a step, and keeping ids out keeps the shareable file
+  // to diagnostics data. The sequence number is what traces one
+  // message across both phones logs: a number present on the sender
+  // side and missing on the receiver side is a lost message.
   const attempts = message.attempts
     .map((a) => `${a.transport}:${a.outcome}${a.detail !== null ? `:${a.detail}` : ''}`)
     .join(',');
-  logEvent('message', `${message.direction} ${message.sizeBytes}B ${message.finalStatus} ${attempts}`);
+  const seq = message.sequence === null ? 'seq=none' : `seq=${message.sequence}`;
+  // Lines without a known transport (DM arrivals routed without a
+  // channel) carry no attempts segment rather than a fabricated one.
+  const attemptsText = attempts.length > 0 ? ` ${attempts}` : '';
+  logEvent('message', `${message.direction} ${message.kind} ${seq} ${message.sizeBytes}B ${message.finalStatus}${attemptsText}`);
   messages.push(message);
   while (messages.length > MAX_MESSAGES) messages.shift();
   notifyThrottled();
@@ -694,9 +711,10 @@ export type LocationLogDetail =
   | 'watch started'
   | 'watch fresh-ok'
   | 'watch failed'
+  | 'watch cancelled backgrounded'
   | 'revalidate started'
   | 'revalidate ok'
-  | 'revalidate failed'
+  | `revalidate failed ${string}`
   | 'provider stale'
   | 'setup permission granted'
   | 'setup permission denied'

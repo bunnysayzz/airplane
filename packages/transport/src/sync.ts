@@ -53,12 +53,19 @@ export const SYNC_PAGE_SIZE = 20;
 export interface WorldSyncOpts {
   /** Deadline per publish ACK wait, ms. Default 5000 (router deadline). */
   ackDeadlineMs?: number;
+  /**
+   * Called with the events a pass actually pushed to a relay, so the
+   * caller can log each re-push: without this hook a WorldSync
+   * recovery is invisible on the sender's log.
+   */
+  onPushed?: (events: SignedEvent[]) => void;
 }
 
 export class WorldSync {
   /** In-flight pass, shared by concurrent callers so ticks cannot overlap. */
   private inFlight: Promise<SyncReport> | null = null;
   private readonly ackDeadlineMs: number;
+  private readonly opts: WorldSyncOpts;
 
   constructor(
     private readonly nostr: NostrTransport,
@@ -66,6 +73,7 @@ export class WorldSync {
     opts: WorldSyncOpts = {},
   ) {
     this.ackDeadlineMs = opts.ackDeadlineMs ?? 5000;
+    this.opts = opts;
   }
 
   /**
@@ -97,6 +105,7 @@ export class WorldSync {
     //    concurrently too; pages stay sequential so one pass cannot
     //    flood the store or the relays with the whole backlog at once.
     const pushedIds: Hex64[] = [];
+    const pushedEvents: SignedEvent[] = [];
     for (let i = 0; i < unconfirmed.length; i += SYNC_PAGE_SIZE) {
       const page = unconfirmed.slice(i, i + SYNC_PAGE_SIZE);
       const events = await Promise.all(
@@ -120,12 +129,30 @@ export class WorldSync {
           // pushed. A relay that silently drops the event is re-pushed
           // on a later pass, exactly like an unconfirmed post.
           const ack = await this.nostr.publishWithAck(row.event, this.ackDeadlineMs);
-          return ack.ok.length > 0 ? row.idHex : null;
+          return ack.ok.length > 0 ? row : null;
         }),
       );
-      for (const idHex of pushed) if (idHex) pushedIds.push(idHex);
+      for (const row of pushed) {
+        if (!row) continue;
+        pushedIds.push(row.idHex);
+        pushedEvents.push(row.event);
+      }
     }
     report.pushed = pushedIds;
+
+    // The push phase is done: report the pushed events now, before
+    // the query phase, so the app can log each re-push as its own
+    // relay line. The hook receives the full events (not just ids)
+    // because the log line needs kind, size and sequence. A hook
+    // failure must never fail the sync pass: the push already
+    // happened, and the query phase below still runs.
+    if (pushedEvents.length > 0 && this.opts.onPushed) {
+      try {
+        this.opts.onPushed(pushedEvents);
+      } catch {
+        // Hook is diagnostics only; the sync result stands.
+      }
+    }
 
     // 2. Query relays for the IDs we just pushed (plus any still
     //    unconfirmed). Matches arrive via onReceive -> confirmListener.

@@ -30,9 +30,11 @@ import {
   dmFromHex,
   dmKeypairFromDeviceSecret,
   dmToHex,
+  type DmEvent,
 } from '@airplane/transport';
 import { getDeviceKeypair, onIdentityChange } from './identity';
-import { recordServiceEvent } from './diagnostics';
+import { recordMessage, recordServiceEvent } from './diagnostics';
+import { getKv } from './kv';
 import { loadRelayUrls } from '../../src/lib/relays';
 import { SqliteDmStore } from './dmSqlite';
 import { createSqliteDatabasePort } from './sqlite';
@@ -60,6 +62,90 @@ export function resetDmService(): void {
 // burn must not leave a singleton keyed to the old secret alive.
 onIdentityChange(resetDmService);
 
+/** KV key for the durable per-sender DM sequence counter. */
+const DM_SEQ_KV_KEY = 'dm-seq-v1';
+
+/**
+ * Next per-sender DM sequence number, durable across restarts.
+ * Same shape as the post counter: a promise chain serializes the
+ * read-increment-write so two concurrent sends can never share a
+ * number, and the value is written back before it is returned, so a
+ * kill after assignment cannot reissue it. Null on any KV failure:
+ * the DM then carries no seq field rather than failing.
+ */
+let dmSeqQueue: Promise<void> = Promise.resolve();
+
+async function nextDmSeq(): Promise<number | null> {
+  let assigned: number | null = null;
+  const run = dmSeqQueue.then(async () => {
+    try {
+      const kv = getKv();
+      const raw = await kv.get(DM_SEQ_KV_KEY);
+      const prev = raw === null ? 0 : Number(raw);
+      const next = Number.isFinite(prev) && prev >= 0 ? Math.floor(prev) + 1 : 1;
+      await kv.set(DM_SEQ_KV_KEY, String(next));
+      assigned = next;
+    } catch {
+      assigned = null;
+    }
+  });
+  dmSeqQueue = run.catch(() => {});
+  await run;
+  return assigned;
+}
+
+/**
+ * Map a service diagnostics event to a log line. Traffic events
+ * become message-level lines (kind dm) with the same words posts
+ * use, so a DM traces across both phones logs by number and state.
+ * State events (no bytes moved) become service lines. Peer identity
+ * in lines is the first 8 hex chars only, never the full key; the
+ * message id slot stays empty because DMs carry no post-style event
+ * id, and the renderer never logs the id field anyway.
+ */
+function logDmEvent(ev: DmEvent): void {
+  if (ev.kind === 'state') {
+    if (ev.state === 'failed') {
+      recordServiceEvent(`dm failed peer:${ev.peerHex.slice(0, 8)} ${ev.reason ?? 'unknown'}`);
+    } else {
+      recordServiceEvent(`dm thread read peer:${ev.peerHex.slice(0, 8)}`);
+    }
+    return;
+  }
+  const finalStatus =
+    ev.state === 'relayed'
+      ? 'relayed'
+      : ev.state === 'mesh-sent'
+        ? 'handed to radio over BLE'
+        : ev.state === 'queued'
+          ? 'not delivered to any transport'
+          : ev.state === 'failed'
+            ? ev.reason
+              ? `failed ${ev.reason}`
+              : 'failed'
+            : ev.state === 'received'
+              ? 'received'
+              : ev.state === 'ack-sent'
+                ? 'ack sent'
+                : ev.state === 'ack-received'
+                  ? 'ack received'
+                  : 'dropped';
+  recordMessage({
+    id: '',
+    sequence: ev.seq ?? null,
+    sizeBytes: ev.sizeBytes,
+    direction: ev.direction === 'out' ? 'outbound' : 'inbound',
+    kind: 'dm',
+    attempts: (ev.attempts ?? []).map((a) => ({
+      transport: a.transport,
+      atMs: Date.now(),
+      outcome: a.outcome,
+      detail: a.detail,
+    })),
+    finalStatus,
+  });
+}
+
 export async function getDmService(): Promise<DmService> {
   if (service) return service;
   if (servicePromise) return servicePromise;
@@ -74,6 +160,8 @@ export async function getDmService(): Promise<DmService> {
       mesh: pendingBlePort ? new DmBleTransport(pendingBlePort) : undefined,
       ownKeys: () => dmKeypairFromDeviceSecret(kp.secretKey),
       ownMeshHex: () => ownHex,
+      nextDmSeq,
+      onDmEvent: logDmEvent,
     });
     svc.start();
     service = svc;

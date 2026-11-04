@@ -202,17 +202,18 @@ describe('signed display name tag on posts', () => {
     const id = await publishPost('hello', { geohash5: 'tdr1v', displayName: 'tuba' });
     const event = await getStore().getEvent(id);
     expect(event).not.toBeNull();
-    expect(event!.tags).toEqual([['display_name', 'tuba']]);
+    // Plus the signed seq tag: the counter starts at 1 for a fresh KV.
+    expect(event!.tags).toEqual([['display_name', 'tuba'], ['seq', '1']]);
   });
 
-  test('publishPost picks up the saved own name, and posts without one carry no tag', async () => {
+  test('publishPost picks up the saved own name, and posts without one carry no name tag', async () => {
     __setKvForTests(new MemoryKv());
     await setOwnDisplayName('tuba');
     const withName = await publishPost('hello', { geohash5: 'tdr1v' });
-    expect((await getStore().getEvent(withName))!.tags).toEqual([['display_name', 'tuba']]);
+    expect((await getStore().getEvent(withName))!.tags).toEqual([['display_name', 'tuba'], ['seq', '1']]);
     await setOwnDisplayName('');
     const withoutName = await publishPost('hello again', { geohash5: 'tdr1v' });
-    expect((await getStore().getEvent(withoutName))!.tags).toEqual([]);
+    expect((await getStore().getEvent(withoutName))!.tags).toEqual([['seq', '2']]);
   });
 
   test('toPostCardModel shows the signed name clean, and the full label unchanged', () => {

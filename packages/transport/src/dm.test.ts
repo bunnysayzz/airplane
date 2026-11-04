@@ -6,6 +6,7 @@ import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
   DM_MAX_ATTEMPTS,
   chacha20,
+  dmAckProofForEnvelope,
   dmConversationKey,
   dmConversationKeyX,
   dmKeypairFromDeviceSecret,
@@ -14,6 +15,7 @@ import {
   nip44Decrypt,
   nip44Encrypt,
   sealDm,
+  sealDmWithAckProof,
   unsealDm,
 } from './dm';
 import {
@@ -21,6 +23,7 @@ import {
   FailingDmRelay,
   MemoryDmRelay,
   MemoryDmStore,
+  type DmEvent,
   type DmMeshPort,
   type DmRelayPort,
   type DmRelayPublishResult,
@@ -35,7 +38,12 @@ interface Persona {
   store: MemoryDmStore;
 }
 
-function makePersona(relay: DmRelayPort, nowRef: { now: number }, mesh?: DmMeshPort): Persona {
+function makePersona(
+  relay: DmRelayPort,
+  nowRef: { now: number },
+  mesh?: DmMeshPort,
+  extra?: { nextDmSeq?: () => Promise<number | null>; onDmEvent?: (e: DmEvent) => void },
+): Persona {
   const secret = ed25519.utils.randomSecretKey();
   const meshHex = dmToHex(ed25519.getPublicKey(secret));
   const store = new MemoryDmStore();
@@ -46,6 +54,8 @@ function makePersona(relay: DmRelayPort, nowRef: { now: number }, mesh?: DmMeshP
     ownKeys: () => dmKeypairFromDeviceSecret(secret),
     ownMeshHex: () => meshHex,
     now: () => nowRef.now,
+    nextDmSeq: extra?.nextDmSeq,
+    onDmEvent: extra?.onDmEvent,
   });
   return { secret, meshHex, service, store };
 }
@@ -1002,5 +1012,95 @@ describe('DM unread counts', () => {
     expect(await bob.service.totalUnread()).toBe(0);
     await bob.service.mutePeer(alice.meshHex, false);
     expect(await bob.service.totalUnread()).toBe(1);
+  });
+});
+
+describe('DM diagnostics events + sequence numbers', () => {
+  test('seq travels inside the sealed rumor and the ack proof is unaffected', () => {
+    const sender = ed25519.utils.randomSecretKey();
+    const recipient = ed25519.utils.randomSecretKey();
+    const senderHex = dmToHex(ed25519.getPublicKey(sender));
+    const recipientHex = dmToHex(ed25519.getPublicKey(recipient));
+    const { envelope, ackProof } = sealDmWithAckProof('numbered', senderHex, recipientHex, 1_700_000_000, 5);
+    const rumor = unsealDm(envelope, dmKeypairFromDeviceSecret(recipient), recipientHex);
+    expect(rumor?.seq).toBe(5);
+    // The proof covers only the delivery id: recomputing it over the
+    // seq-carrying envelope still matches the sealed proof.
+    expect(dmAckProofForEnvelope(dmKeypairFromDeviceSecret(recipient).secretKey, envelope, envelope.deliveryId as string)).toBe(ackProof);
+    // No seq field means no number, never a guessed one.
+    const plain = sealDm('unnumbered', senderHex, recipientHex, 1_700_000_000);
+    expect(unsealDm(plain, dmKeypairFromDeviceSecret(recipient), recipientHex)?.seq).toBeUndefined();
+  });
+
+  test('send, receive and ack each emit a traffic event carrying one number', async () => {
+    const relay = new MemoryDmRelay();
+    const nowRef = { now: 1_000_000 };
+    const aliceEvents: DmEvent[] = [];
+    const bobEvents: DmEvent[] = [];
+    let nextSeq = 7;
+    const alice = makePersona(relay, nowRef, undefined, {
+      nextDmSeq: async () => nextSeq++,
+      onDmEvent: (e) => aliceEvents.push(e),
+    });
+    const bob = makePersona(relay, nowRef, undefined, {
+      onDmEvent: (e) => bobEvents.push(e),
+    });
+    alice.service.start();
+    bob.service.start();
+    await alice.service.sendMessage(bob.meshHex, 'trace me');
+    await alice.service.flushOutbox();
+    await tick();
+    await tick();
+    const traffic = (events: DmEvent[]) =>
+      events.filter((e): e is Extract<DmEvent, { kind: 'traffic' }> => e.kind === 'traffic');
+    const aliceSent = traffic(aliceEvents).find((e) => e.direction === 'out' && e.state === 'relayed');
+    expect(aliceSent).toBeDefined();
+    expect(aliceSent?.seq).toBe(7);
+    expect(aliceSent?.sizeBytes).toBeGreaterThan(0);
+    const bobReceived = traffic(bobEvents).find((e) => e.direction === 'in' && e.state === 'received');
+    expect(bobReceived?.seq).toBe(7);
+    const bobAck = traffic(bobEvents).find((e) => e.direction === 'out' && e.state === 'ack-sent');
+    expect(bobAck?.seq).toBe(7);
+    const aliceAck = traffic(aliceEvents).find((e) => e.direction === 'in' && e.state === 'ack-received');
+    expect(aliceAck?.seq).toBe(7);
+    const rows = await alice.store.listMessages(bob.meshHex);
+    expect(rows[0].status).toBe('Delivered');
+    await bob.service.markRead(alice.meshHex);
+    expect(bobEvents.some((e) => e.kind === 'state' && e.state === 'thread-read')).toBe(true);
+  });
+
+  test('a re-seal reuses the row number instead of taking a fresh one', async () => {
+    const relay = new TogglingRelay();
+    relay.accept = false;
+    const nowRef = { now: 1_000_000 };
+    let nextSeq = 7;
+    const alice = makePersona(relay, nowRef, undefined, { nextDmSeq: async () => nextSeq++ });
+    const bob = makePersona(relay, nowRef);
+    await alice.service.sendMessage(bob.meshHex, 'reseal me');
+    await alice.service.flushOutbox();
+    let rows = await alice.store.listMessages(bob.meshHex);
+    expect(rows[0].seq).toBe(7);
+    expect(rows[0].status).toBe('Queued');
+    // Simulate a restart with a lost envelope: the plaintext survives,
+    // so the retry re-seals, and must reuse number 7, not take 8.
+    await alice.store.updateMessage({ ...rows[0], envelope: undefined, sealed: '' });
+    const alice2 = new DmService({
+      store: alice.store,
+      relay,
+      ownKeys: () => dmKeypairFromDeviceSecret(alice.secret),
+      ownMeshHex: () => alice.meshHex,
+      now: () => nowRef.now,
+      nextDmSeq: async () => nextSeq++,
+    });
+    relay.accept = true;
+    // Forced: the stripped row's backoff timer has not elapsed, and
+    // this is a retry, not a timer-driven flush.
+    await alice2.flushOutbox(true);
+    rows = await alice.store.listMessages(bob.meshHex);
+    expect(rows[0].seq).toBe(7);
+    expect(rows[0].status).toBe('Relayed');
+    expect(nextSeq).toBe(8);
+    const rumor = unsealDm(rows[0].envelope!, dmKeypairFromDeviceSecret(bob.secret), bob.meshHex);
+    expect(rumor?.seq).toBe(7);
   });
 });

@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS dm_messages (
   delivery_id TEXT UNIQUE,
   ack_proof TEXT,
   sender_created_at_sec INTEGER,
+  seq INTEGER,
   mesh_attempts INTEGER NOT NULL DEFAULT 0,
   relay_republish_attempts INTEGER NOT NULL DEFAULT 0,
   ack_sent INTEGER NOT NULL DEFAULT 0,
@@ -97,6 +98,7 @@ interface MessageDbRow {
   delivery_id: string | null;
   ack_proof: string | null;
   sender_created_at_sec: number | null;
+  seq: number | null;
   mesh_attempts: number;
   relay_republish_attempts: number | null;
   ack_sent: number | null;
@@ -161,6 +163,7 @@ function messageFromRow(row: MessageDbRow): DmMessageRow {
   if (row.delivery_id !== null) message.deliveryId = row.delivery_id;
   if (row.ack_proof !== null) message.ackProof = row.ack_proof;
   if (row.sender_created_at_sec !== null) message.senderCreatedAtSec = row.sender_created_at_sec;
+  if (row.seq !== null && row.seq !== undefined) message.seq = row.seq;
   return message;
 }
 
@@ -186,6 +189,7 @@ export class SqliteDmStore implements DmStorePort {
         for (const sql of [
           'ALTER TABLE dm_messages ADD COLUMN relay_republish_attempts INTEGER NOT NULL DEFAULT 0',
           'ALTER TABLE dm_messages ADD COLUMN ack_sent INTEGER NOT NULL DEFAULT 0',
+          'ALTER TABLE dm_messages ADD COLUMN seq INTEGER',
         ]) {
           try {
             await this.db.exec(sql);
@@ -251,9 +255,9 @@ export class SqliteDmStore implements DmStorePort {
     await this.db.exec(
       `INSERT INTO dm_messages
         (id, peer_hex, direction, sealed, envelope_json, plain_text, delivery_id, ack_proof,
-         sender_created_at_sec, mesh_attempts, relay_republish_attempts, ack_sent,
+         sender_created_at_sec, seq, mesh_attempts, relay_republish_attempts, ack_sent,
          created_at_ms, status, attempts, next_attempt_at_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         m.id,
         m.peerHex,
@@ -264,6 +268,7 @@ export class SqliteDmStore implements DmStorePort {
         m.deliveryId ?? null,
         m.ackProof ?? null,
         m.senderCreatedAtSec ?? null,
+        m.seq ?? null,
         m.meshAttempts ?? 0,
         m.relayRepublishAttempts ?? 0,
         m.ackSent === true ? 1 : 0,
@@ -289,7 +294,7 @@ export class SqliteDmStore implements DmStorePort {
     await this.db.exec(
       `UPDATE dm_messages SET peer_hex = ?, direction = ?, sealed = ?, envelope_json = ?,
         plain_text = ?, delivery_id = ?, ack_proof = ?, sender_created_at_sec = ?,
-        mesh_attempts = ?, relay_republish_attempts = ?, ack_sent = ?,
+        seq = ?, mesh_attempts = ?, relay_republish_attempts = ?, ack_sent = ?,
         created_at_ms = ?, status = ?, attempts = ?, next_attempt_at_ms = ?
        WHERE id = ?`,
       [
@@ -301,6 +306,7 @@ export class SqliteDmStore implements DmStorePort {
         m.deliveryId ?? null,
         m.ackProof ?? null,
         m.senderCreatedAtSec ?? null,
+        m.seq ?? null,
         m.meshAttempts ?? 0,
         m.relayRepublishAttempts ?? 0,
         m.ackSent === true ? 1 : 0,
