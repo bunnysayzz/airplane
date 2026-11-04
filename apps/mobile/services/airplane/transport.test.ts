@@ -30,7 +30,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
+import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, __resetNetInfoForTests, __resetPulledPostsForTests, __resetFailedInboundForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
@@ -610,6 +610,41 @@ describe('transport manager', () => {
       ),
     ).toBe(true);
     spy.mockRestore();
+  });
+
+  test('a failed inbound save forgets the seen mark so a redelivery can land', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    __resetFailedInboundForTests();
+    resetDiagnosticsForTests();
+    const store = getStore();
+    const spy = jest.spyOn(store, 'saveEvent').mockRejectedValue(new Error('store boom'));
+    try {
+      const event = makeSignedEvent();
+      expect(hybrid!.ingress(event, 'nostr')).toBe(true);
+      // Let the in-process retries (100 ms + 300 ms) and the
+      // best-effort relay re-query run to completion.
+      await jest.advanceTimersByTimeAsync(1000);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      expect(await store.getEvent(toHex(event.id))).toBeNull();
+      expect(spy).toHaveBeenCalledTimes(3);
+      const messages = getDiagnosticsSnapshot().messages;
+      expect(
+        messages.some(
+          (m) =>
+            m.direction === 'inbound' &&
+            m.finalStatus === 'receive failed' &&
+            m.attempts.some((a) => (a.detail ?? '').includes('store save failed')),
+        ),
+      ).toBe(true);
+      // The recovery forgot the seen mark: the same id passes
+      // ingress again instead of being dropped as a duplicate.
+      expect(hybrid!.ingress(event, 'nostr')).toBe(true);
+      await jest.advanceTimersByTimeAsync(1000);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('inbound receipts count views once via the counting path', async () => {

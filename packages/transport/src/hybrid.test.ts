@@ -299,6 +299,26 @@ describe('HybridTransport', () => {
     await h.stop();
   });
 
+  test('forgetSeen lets a failed delivery redeliver once', async () => {
+    const { h } = makeHybrid();
+    await h.start();
+
+    const seen: { id: string; source: IngressSource }[] = [];
+    h.onPost((e, source) => {
+      seen.push({ id: toHex(e.id), source });
+    });
+
+    const event = makePost('forget seen');
+    expect(h.ingress(event, 'nostr')).toBe(true);
+    expect(h.ingress(event, 'nostr')).toBe(false);
+    h.forgetSeen(toHex(event.id));
+    expect(h.ingress(event, 'nostr')).toBe(true);
+    expect(seen).toHaveLength(2);
+    // Forgetting an id that was never seen is a harmless no-op.
+    expect(() => h.forgetSeen(toHex(makePost('never seen').id))).not.toThrow();
+    await h.stop();
+  });
+
   test('dedup hook reports source and peer for cross-transport drops (R2)', async () => {
     const dropped: { source: IngressSource; peerId: string | null }[] = [];
     const port = new FakeBlePort();
