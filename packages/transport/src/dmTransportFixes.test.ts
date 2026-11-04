@@ -10,6 +10,7 @@ import {
   DM_RELAYED_UNREACHABLE_RETRY_MS,
   DmService,
   MemoryDmStore,
+  type DmMeshPort,
   type DmRelayPort,
   type DmRelayPublishResult,
 } from './dmService';
@@ -24,13 +25,18 @@ interface Persona {
   store: MemoryDmStore;
 }
 
-function makePersona(relay: DmRelayPort, nowRef: { now: number }): Persona {
+function makePersona(
+  relay: DmRelayPort,
+  nowRef: { now: number },
+  mesh?: DmMeshPort,
+): Persona {
   const secret = ed25519.utils.randomSecretKey();
   const meshHex = dmToHex(ed25519.getPublicKey(secret));
   const store = new MemoryDmStore();
   const service = new DmService({
     store,
     relay,
+    mesh,
     ownKeys: () => dmKeypairFromDeviceSecret(secret),
     ownMeshHex: () => meshHex,
     now: () => nowRef.now,
@@ -136,12 +142,13 @@ describe('rank 1: Relayed re-publish', () => {
       expect(rows[0].status).toBe('Relayed');
       expect(rows[0].relayRepublishAttempts).toBe(i);
     }
-    // Past the cap, no more re-publishes, and still Relayed, never Failed.
+    // Past the cap, no more re-publishes: gap 105 turns the capped
+    // Relayed row Failed on the next flush, mirroring MeshSent.
     nowRef.now += DM_RELAYED_ACK_WINDOW_MS + 1;
     await alice.service.flushOutbox(true);
     expect(relay.publishCalls).toBe(1 + DM_RELAYED_MAX_REPUBLISH);
     rows = await alice.store.listMessages(peer);
-    expect(rows[0].status).toBe('Relayed');
+    expect(rows[0].status).toBe('Failed');
     alice.service.stop();
   });
 
@@ -276,5 +283,166 @@ describe('rank 9: lost-ack resend on start', () => {
     expect(relay.ackPublishCalls).toBe(callsBefore);
     alice.service.stop();
     bob.service.stop();
+  });
+});
+
+describe('gap 105: capped Relayed rows become Failed', () => {
+  test('tap-to-retry works on a capped Relayed row', async () => {
+    const relay = new ModeRelay();
+    const nowRef = { now: 800_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const peer = 'd'.repeat(64);
+    await alice.service.sendMessage(peer, 'retry me');
+    await alice.service.flushOutbox();
+    for (let i = 1; i <= DM_RELAYED_MAX_REPUBLISH; i += 1) {
+      nowRef.now += DM_RELAYED_ACK_WINDOW_MS + 1;
+      await alice.service.flushOutbox();
+    }
+    nowRef.now += DM_RELAYED_ACK_WINDOW_MS + 1;
+    await alice.service.flushOutbox();
+    let rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Failed');
+    // Tap-to-retry re-queues, and the next flush sends again.
+    await alice.service.retryMessage(peer, rows[0].id);
+    rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Sending');
+    await alice.service.flushOutbox();
+    rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Relayed');
+    alice.service.stop();
+  });
+
+  test('a capped Relayed row turning Failed does not block a later row', async () => {
+    const relay = new ModeRelay();
+    const nowRef = { now: 900_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const peer = 'e'.repeat(64);
+    await alice.service.sendMessage(peer, 'head row');
+    await alice.service.flushOutbox();
+    let rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Relayed');
+    rows[0].relayRepublishAttempts = DM_RELAYED_MAX_REPUBLISH;
+    await alice.store.updateMessage(rows[0]);
+    await alice.service.sendMessage(peer, 'later row');
+    await alice.service.flushOutbox();
+    rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Failed');
+    expect(rows[1].status).toBe('Relayed');
+    expect(relay.publishCalls).toBe(2);
+    alice.service.stop();
+  });
+
+  test('a late ack still upgrades a capped-then-Failed row to Delivered', async () => {
+    const relay = new AckToggleRelay();
+    relay.ackAccept = false;
+    const nowRef = { now: 1_000_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const bob = makePersona(relay, nowRef);
+    alice.service.start();
+    bob.service.start();
+    await alice.service.sendMessage(bob.meshHex, 'cap then ack');
+    await alice.service.flushOutbox();
+    await tick();
+    let aliceRows = await alice.store.listMessages(bob.meshHex);
+    expect(aliceRows[0].status).toBe('Relayed');
+    for (let i = 1; i <= DM_RELAYED_MAX_REPUBLISH; i += 1) {
+      nowRef.now += DM_RELAYED_ACK_WINDOW_MS + 1;
+      await alice.service.flushOutbox();
+    }
+    nowRef.now += DM_RELAYED_ACK_WINDOW_MS + 1;
+    await alice.service.flushOutbox();
+    aliceRows = await alice.store.listMessages(bob.meshHex);
+    expect(aliceRows[0].status).toBe('Failed');
+    // Acks now work. Restarting Bob re-sends the pending ack, and the
+    // Failed row upgrades to Delivered without a new message.
+    relay.ackAccept = true;
+    bob.service.stop();
+    const bobRestarted = new DmService({
+      store: bob.store,
+      relay,
+      ownKeys: () => dmKeypairFromDeviceSecret(bob.secret),
+      ownMeshHex: () => bob.meshHex,
+      now: () => nowRef.now,
+    });
+    bobRestarted.start();
+    await tick();
+    aliceRows = await alice.store.listMessages(bob.meshHex);
+    expect(aliceRows[0].status).toBe('Delivered');
+    alice.service.stop();
+    bobRestarted.stop();
+  });
+});
+
+describe('gap 106: DM relay win also sends over Bluetooth', () => {
+  /** Counting BLE mesh port for DM tests. */
+  class CountingMesh implements DmMeshPort {
+    calls = 0;
+    throwOnPublish = false;
+    peers = 1;
+    async publish(): Promise<number> {
+      this.calls += 1;
+      if (this.throwOnPublish) throw new Error('ble down');
+      return this.peers;
+    }
+    subscribe(): () => void {
+      return () => {};
+    }
+  }
+
+  test('relay win plus connected peers calls mesh publish and stays Relayed', async () => {
+    const relay = new ModeRelay();
+    const mesh = new CountingMesh();
+    const nowRef = { now: 1_100_000_000 };
+    const alice = makePersona(relay, nowRef, mesh);
+    const peer = 'f'.repeat(64);
+    await alice.service.sendMessage(peer, 'relay plus ble');
+    await alice.service.flushOutbox();
+    const rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Relayed');
+    expect(mesh.calls).toBe(1);
+    expect(rows[0].meshAttempts).toBe(0);
+    alice.service.stop();
+  });
+
+  test('relay win with no mesh port still lands Relayed', async () => {
+    const relay = new ModeRelay();
+    const nowRef = { now: 1_200_000_000 };
+    const alice = makePersona(relay, nowRef);
+    const peer = 'a'.repeat(64);
+    await alice.service.sendMessage(peer, 'relay only');
+    await alice.service.flushOutbox();
+    const rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Relayed');
+    alice.service.stop();
+  });
+
+  test('a throwing mesh leg leaves the relay result unchanged', async () => {
+    const relay = new ModeRelay();
+    const mesh = new CountingMesh();
+    mesh.throwOnPublish = true;
+    const nowRef = { now: 1_300_000_000 };
+    const alice = makePersona(relay, nowRef, mesh);
+    const peer = 'b'.repeat(64);
+    await alice.service.sendMessage(peer, 'ble throws');
+    await alice.service.flushOutbox();
+    const rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Relayed');
+    expect(mesh.calls).toBe(1);
+    alice.service.stop();
+  });
+
+  test('a mesh leg reaching zero peers still lands Relayed', async () => {
+    const relay = new ModeRelay();
+    const mesh = new CountingMesh();
+    mesh.peers = 0;
+    const nowRef = { now: 1_400_000_000 };
+    const alice = makePersona(relay, nowRef, mesh);
+    const peer = 'c'.repeat(64);
+    await alice.service.sendMessage(peer, 'no peers');
+    await alice.service.flushOutbox();
+    const rows = await alice.store.listMessages(peer);
+    expect(rows[0].status).toBe('Relayed');
+    expect(mesh.calls).toBe(1);
+    alice.service.stop();
   });
 });

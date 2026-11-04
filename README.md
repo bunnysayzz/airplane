@@ -225,15 +225,39 @@ than it proves:
 |---|---|---|
 | Sending | Sending | An attempt is in flight. Never a final state. |
 | Queued | Queued, waiting for a transport | No transport exists right now. Retried, never Failed while no transport exists. |
-| Relayed | Sent to relay, not delivered yet | A relay accepted the envelope. The relay holds it; no peer has confirmed it yet. Re-published with the identical envelope (same event ID) only after a 24 hour ack window with no ack, at most 3 re-publishes. A re-publish that finds no relay reachable does not burn the cap; the row stays Relayed and retries soon. A re-publish that a relay accepts or rejects burns one attempt and starts a fresh 24 hour window. A Relayed row past its cap with no ack still stays Relayed: it has no Failed state by time alone. The label stays Relayed while the window runs. |
+| Relayed | Sent to relay, not delivered yet | A relay accepted the envelope. The relay holds it; no peer has confirmed it yet. Re-published with the identical envelope (same event ID) only after a 24 hour ack window with no ack, at most 3 re-publishes. A re-publish that finds no relay reachable does not burn the cap; the row stays Relayed and retries soon. A re-publish that a relay accepts or rejects burns one attempt and starts a fresh 24 hour window. A Relayed row whose re-publish cap is exhausted turns Failed on the next flush, mirroring MeshSent, so tap-to-retry works on it; a late ack still upgrades that Failed row to Delivered. |
 | MeshSent | Sent over BLE, not delivered yet | A BLE notify went out to a connected peer, but no peer app has acked yet. Re-attempted when due (30 seconds) or on force flush; a relay success upgrades it to Relayed; 5 mesh sends without an ack end in Failed. |
 | Delivered | Delivered | Only on a verified peer ack. See below. |
-| Failed | Failed, tap to retry | Hard failures exhausted. Tap to retry re-queues the message. |
+| Failed | Failed, tap to retry | Hard failures exhausted, mesh sends exhausted without an ack, or Relayed re-publishes exhausted without an ack. Tap to retry re-queues the message. A late ack still upgrades a Failed row to Delivered. |
 
 Sending is optimistic: the row is stored and the send returns at once,
 and a background flush does the work. A flush is forced when the app
 returns to the foreground, when connectivity returns, and when the BLE
 peer count changes from 0 to N or back.
+
+A DM a relay accepts is also sent to connected Bluetooth peers, best
+effort, mirroring the post relay-win leg: the row stays Relayed
+whether that leg succeeds or not, so a nearby offline peer gets the
+DM at send time instead of waiting for a relay fetch. A Bluetooth
+failure on that leg never fails the DM.
+
+Diagnostics lines added for the cold-start and scan gaps, all
+observability only (no behavior change, no new user copy promising a
+fix): a warmup skipped for permission logs `warmup skipped` plus the
+permission status word, and warmup re-attempts when compose is open
+and the app returns to foreground; the permission status itself is
+logged at setup completion and at first compose open, status words
+only; when consecutive fresh-path resolutions fall back to last-known
+with no fresh fix all session, one `provider stale` line marks that
+the fresh provider is not delivering (the existing "Last known area"
+card marker already covers the user signal); a scan summary line
+reports one flush window labeled with the elapsed ms it covered, with
+event totals plus distinct peripheral counts, so two phones' lines
+can be aligned by rate and by unique devices instead of by raw
+totals; a window with zero mesh sightings after mesh was seen logs
+one `mesh-sightings-zero-after-seen` line; and a relay skip for
+"network not validated" carries the last NetInfo state words
+(connected, reachable, type) in its diagnostics detail.
 
 The DM service starts at app launch, not only when Messages opens.
 Launch cost is one subscribe plus one forced flush, plus the capped
@@ -512,7 +536,18 @@ DMs go only to directly connected peers in v1, with no multi-hop.
 The post router is ordered, relay first. A relay win ends the router
 decision, and the post is also handed to connected Bluetooth peers,
 best effort, so a nearby offline peer receives it at publish time;
-a Bluetooth failure never changes the relay result. Only a relay
+a Bluetooth failure never changes the relay result. That relay-win
+Bluetooth leg is intended behavior with a known side effect:
+receivers flood-forward kind-1 posts at receipt regardless of World
+state, so a relay post handed over Bluetooth also hops over the mesh
+from its receivers, including to phones that would have received it
+via relay anyway. Ingress dedup already prevents re-flood to phones
+that saw the post via relay, so the cost is extra hops, not loops;
+there is deliberately no World-confirmed flood suppression, because
+the product rule already assumes a post can reach the world. DMs
+follow the same relay-win-plus-Bluetooth rule: a DM a relay accepts
+is also sent to connected Bluetooth peers, best effort, and stays
+Relayed whether that leg succeeds or not. Only a relay
 loss, rejection, or timeout falls through to BLE alone, and only no
 transport at all reports queued. The queued report
 is not storage: the durable post outbox owns persistence and drain
@@ -630,8 +665,9 @@ roadmap promise with a date.
 - **Relayed re-publish is capped, not endless.** A Relayed row
   re-publishes only after a 24 hour ack window, at most 3 times, with
   the identical envelope; unreachable relays do not burn the cap. A
-  capped Relayed row with no ack stays Relayed, with no Failed state
-  by time alone.
+  capped Relayed row with no ack turns Failed on the next flush,
+  mirroring MeshSent, so tap-to-retry works on it; a late ack still
+  upgrades that Failed row to Delivered.
 - **Post BLE ack frame absent (follow-up).** There is no BLE ack for
   posts, so BLE post delivery is reported only as handed to radio,
   never as delivered. A post BLE ack frame is follow-up work, not

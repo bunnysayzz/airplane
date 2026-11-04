@@ -16,6 +16,7 @@ import { EXPLAINER_CARDS, ExplainerCard } from './explainerCard';
 import { markOnboardingDone } from './onboardingStatus';
 import { makeStyles } from './styles';
 import { recordUiEvent } from '../../services/airplane/diagnostics';
+import { logSetupPermissionStatus } from '../../services/airplane/location';
 
 // Setup never holds the user longer than this
 export const SETUP_TIMEOUT_MS = 30_000;
@@ -128,6 +129,10 @@ const Setup: React.FC<SetupProps> = ({ onDone, progress = null, ready = false })
     }
     if (finishing) return;
     recordUiEvent(isLast ? 'setup:start' : 'setup:next');
+    // Gap 104: the permission status at setup completion, for the
+    // first-launch hypothesis (setup versus first open). Status word
+    // only, and logging never blocks completion.
+    void logSetupPermissionStatus();
     setFinishing(true);
     try {
       await markOnboardingDone();

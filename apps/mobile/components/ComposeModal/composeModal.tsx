@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
     Animated,
+    AppState,
     Easing,
     Keyboard,
     KeyboardAvoidingView,
@@ -32,7 +33,9 @@ import { recordUiEvent } from '../../services/airplane/diagnostics';
 import {
     failureCodeForPublishError,
     getLocationPermissionStatus,
+    logFirstComposePermissionStatus,
     requestLocationPermission,
+    subscribeComposeWarmupOnForeground,
     warmLocationCell,
 } from '../../services/airplane/location';
 
@@ -192,9 +195,21 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ isOpen, onClose, onPublishe
             // finds a warm cache or an in-flight fix instead of starting a
             // cold 15 second race. Silent: failures surface at submit.
             void warmLocationCell();
+            // Gap 104: the permission status at first compose open, for
+            // the first-launch hypothesis (setup versus first open).
+            void logFirstComposePermissionStatus();
             const focus = setTimeout(() => inputRef.current?.focus(), 350);
             return () => clearTimeout(focus);
         }
+    }, [isOpen]);
+
+    // Gap 103 retry: while the sheet is open, a return to foreground
+    // re-attempts warmup, so a user typing for minutes in one open
+    // gets a second attempt instead of waiting for the next open.
+    // The subscription lives only while the sheet is open.
+    useEffect(() => {
+        if (!isOpen) return;
+        return subscribeComposeWarmupOnForeground(AppState);
     }, [isOpen]);
 
     // Every keystroke persists the draft, so a kill at any moment loses
