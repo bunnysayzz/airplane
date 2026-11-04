@@ -1212,9 +1212,10 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
   }
   const nowMs = Date.now();
   // Diagnostics record exactly the stages the router actually ran: a
-  // relay win never touches BLE, a skipped relay stage is marked
-  // skipped (not failed), and a queued result records both stages as
-  // unattempted or failed per the router result.
+  // relay win also runs a best-effort Bluetooth leg to connected peers
+  // (v0.1.19), a skipped relay stage is marked skipped (not failed),
+  // and a queued result records both stages as unattempted or failed
+  // per the router result.
   const attempts: DiagnosticsMessageAttempt[] = [];
   if (result.transport === 'relay') {
     attempts.push({
@@ -1228,6 +1229,20 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
       // break the mesh fallback timing. The wording says exactly that.
       detail: `relay OK from ${result.relays.length} relay(s); event sent to open relays`,
     });
+    if (blePeersAtPublish.length > 0) {
+      // Relay-plus-BLE: the router handed the event to the radio as
+      // well. A completed GATT notify is a radio handoff, not peer
+      // delivery, so the wording stays honest either way.
+      attempts.push({
+        transport: 'ble',
+        atMs: nowMs,
+        outcome: result.blePeers > 0 ? 'ok' : 'failed',
+        detail:
+          result.blePeers > 0
+            ? `handed to radio for ${result.blePeers} connected peers (radio handoff only, no peer receipt signal)`
+            : 'BLE broadcast reached no peers after relay win',
+      });
+    }
   } else {
     attempts.push({
       transport: 'relay',
@@ -1281,3 +1296,4 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
   });
   return result;
 }
+
