@@ -30,7 +30,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, __resetNetInfoForTests, __resetPulledPostsForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
+import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, __resetNetInfoForTests, __resetPulledPostsForTests, __resetFailedInboundForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio, saveEventWithRetry } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
@@ -852,6 +852,97 @@ describe('mesh-scan fix: scan failure keeps advertising', () => {
       expect(port.advertise).toHaveBeenCalledTimes(1);
     } finally {
       __setBlePortForTests(null);
+    }
+  });
+});
+
+describe('inbound save retry', () => {
+  // Same lifecycle as the mesh-scan block: fake timers for the retry
+  // delays, and stopTransport cleanup so no timer outlives a test.
+  let realWebSocket: unknown;
+
+  beforeEach(() => {
+    realWebSocket = (globalThis as Record<string, unknown>).WebSocket;
+    (globalThis as Record<string, unknown>).WebSocket = FakeSocket;
+    FakeSocket.instances = [];
+    netInfoMock.fetch.mockResolvedValue({ isConnected: false, isInternetReachable: false });
+    netInfoMock.addEventListener.mockClear();
+    netInfoMock.addEventListener.mockReturnValue(jest.fn());
+    __resetStoreForTests();
+    __resetNetInfoForTests();
+    __resetResharesForTests();
+    __resetPulledPostsForTests();
+    __resetFailedInboundForTests();
+    __resetDeviceKeypairForTests();
+    AsyncStorageMock.__clear();
+    jest.useFakeTimers();
+  });
+
+  afterEach(async () => {
+    jest.clearAllTimers();
+    await stopTransport();
+    jest.useRealTimers();
+    (globalThis as Record<string, unknown>).WebSocket = realWebSocket;
+    __setBlePortForTests(null);
+  });
+
+  test('saveEventWithRetry succeeds after transient failures', async () => {
+    // These two helper tests run on real timers: the file harness
+    // uses fake timers, which would never fire the retry delays.
+    // The next test's beforeEach re-enables fake timers.
+    jest.useRealTimers();
+    let attempts = 0;
+    const store = {
+      saveEvent: jest.fn(async () => {
+        attempts++;
+        if (attempts < 3) throw new Error('database is locked');
+      }),
+    };
+    await saveEventWithRetry(store, makeSignedEvent(), [0, 0]);
+    expect(store.saveEvent).toHaveBeenCalledTimes(3);
+    jest.useFakeTimers();
+  });
+
+  test('saveEventWithRetry gives up after every attempt fails', async () => {
+    jest.useRealTimers();
+    const store = {
+      saveEvent: jest.fn(async () => {
+        throw new Error('database is locked');
+      }),
+    };
+    await expect(saveEventWithRetry(store, makeSignedEvent(), [0, 0])).rejects.toThrow('database is locked');
+    expect(store.saveEvent).toHaveBeenCalledTimes(3);
+    jest.useFakeTimers();
+  });
+
+  test('a failed inbound save forgets the seen mark so a redelivery can land', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const originalSave = store.saveEvent.bind(store);
+    store.saveEvent = jest.fn(async () => {
+      throw new Error('store boom');
+    }) as typeof store.saveEvent;
+    try {
+      const event = makeSignedEvent();
+      expect(hybrid!.ingress(event, 'nostr')).toBe(true);
+      // Let the in-process retries (100 ms + 500 ms) and the
+      // best-effort relay re-query run to completion.
+      await jest.advanceTimersByTimeAsync(1000);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      expect(await store.getEvent(toHex(event.id))).toBeNull();
+      expect(
+        getDiagnosticsSnapshot().messages.some(
+          (m) => m.direction === 'inbound' && m.finalStatus === 'receive failed',
+        ),
+      ).toBe(true);
+      // The recovery forgot the seen mark: the same id passes
+      // ingress again instead of being dropped as a duplicate.
+      expect(hybrid!.ingress(event, 'nostr')).toBe(true);
+      await jest.advanceTimersByTimeAsync(1000);
+    } finally {
+      store.saveEvent = originalSave;
     }
   });
 });

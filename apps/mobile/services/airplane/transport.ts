@@ -350,17 +350,28 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
     return;
   }
   // Store the event (deduped by HybridTransport already).
-  // saveEvent is idempotent. A store failure is surfaced in
-  // Diagnostics and the feed is NOT notified: an unhandled rejection
-  // here used to drop the event while Hybrid already marked it seen.
-  // A storage failure must not escape as an unhandled rejection (the
-  // caller uses void handleIncoming) and must not be silent: record a
-  // Diagnostics message and a stage-tagged breadcrumb, and drop this
-  // pass only. The event is not queued durably here (no inbound queue
-  // exists in the store schema); it re-arrives via relay replay or BLE
-  // redelivery, and the next sync pass re-checks it.
+  // saveEvent is idempotent. A store failure used to end here: the
+  // Diagnostics line was recorded and the pass was dropped, while
+  // Hybrid had already marked the id seen, so a relay resubscribe
+  // replay or a later query for the same id was dropped as a
+  // duplicate of a delivery that never landed. A 2026-11-04 device
+  // log showed exactly that line (one relay inbound, store save
+  // failed) with no later recovery for the event. The fix is in
+  // two parts, both below. First, the save itself retries in
+  // process with backoff, because a transient lock or a store
+  // that is not ready yet is the common transient cause and the
+  // event is already in hand, so no network round trip is needed
+  // to rescue it. Second, when every retry still fails, a relay
+  // or BLE arrival (never the local publish echo, which is already
+  // saved by publishPost) forgets its Hybrid seen mark and asks
+  // the relays for the id once, so a redelivery can pass ingress
+  // again and land when the store recovers. A storage failure
+  // must not escape as an unhandled rejection (the caller uses
+  // void handleIncoming) and must not be silent: the Diagnostics
+  // message and stage-tagged breadcrumb stay, whatever the retry
+  // outcome is.
   try {
-    await store.saveEvent(event);
+    await saveEventWithRetry(store, event);
   } catch {
     recordMessage({
       id: toHex(event.id),
@@ -380,6 +391,9 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
     addBreadcrumb('transport: inbound store failed', {
       id: toHex(event.id).slice(0, 16),
     });
+    if (source === 'nostr' || source === 'ble') {
+      void recoverFailedInbound(event);
+    }
     return;
   }
   // A post arriving may release stars and reshares held pending for it.
@@ -425,6 +439,81 @@ async function pullOriginalForReshare(event: SignedEvent): Promise<void> {
 /** Test seam: clear the pull-on-demand once-per-launch set. */
 export function __resetPulledPostsForTests(): void {
   pulledPostIds.clear();
+}
+
+/**
+ * Inbound save retries. saveEvent is idempotent, so retrying the
+ * same event cannot create a second copy, and a transient failure
+ * (a locked database, a store that is not ready yet at launch)
+ * is the case this exists for. Delays are deliberately short:
+ * handleIncoming is fire-and-forget, but a post that took seconds
+ * to save would still be late to the feed, so the total wait is
+ * capped at under a second. A persistent failure (a schema CHECK
+ * on a misrouted kind, a corrupt row) fails every attempt the same
+ * way and is reported by the caller, never hidden by the retries.
+ * The delays parameter exists for tests, which pass zeros.
+ */
+export const INBOUND_SAVE_RETRY_DELAYS_MS = [100, 500];
+
+export async function saveEventWithRetry(
+  store: { saveEvent: (event: SignedEvent) => Promise<void> },
+  event: SignedEvent,
+  delaysMs: readonly number[] = INBOUND_SAVE_RETRY_DELAYS_MS,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
+    try {
+      await store.saveEvent(event);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < delaysMs.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, delaysMs[attempt]));
+      }
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Recovery for an inbound event whose save failed on every retry.
+ * Bounded to one relay query per id per launch: without the bound,
+ * a redelivery that also fails its save would re-query forever.
+ * The Hybrid seen mark is forgotten first, so the query response
+ * is not dropped as a duplicate at ingress. When no relay is
+ * reachable the query sends nowhere and the id is not added to
+ * the once-per-launch set, so a later failure can try again;
+ * the seen mark is already forgotten, so any redelivery in the
+ * meantime can also pass ingress. The set-marking mirrors
+ * pullOriginalForReshare, which marks only after a query that
+ * actually reached a relay.
+ * Never throws. A mesh-only post simply has no relay copy to fetch,
+ * so this step is a no-op for it, and the BLE flood seen cache
+ * still suppresses a BLE redelivery until it evicts the id.
+ */
+const failedInboundIds = new Set<string>();
+const FAILED_INBOUND_IDS_CAP = 1000;
+
+async function recoverFailedInbound(event: SignedEvent): Promise<void> {
+  const idHex = toHex(event.id);
+  if (failedInboundIds.has(idHex)) return;
+  try {
+    hybrid?.forgetSeen(idHex);
+    const sent = await hybrid?.nostr.queryByIds([idHex]);
+    if (!sent) return;
+    if (failedInboundIds.size >= FAILED_INBOUND_IDS_CAP) {
+      const oldest = failedInboundIds.values().next().value as string | undefined;
+      if (oldest !== undefined) failedInboundIds.delete(oldest);
+    }
+    failedInboundIds.add(idHex);
+  } catch {
+    // Best-effort: the Diagnostics failure line already recorded it.
+  }
+}
+
+/** Test seam: clear the failed-inbound recovery set. */
+export function __resetFailedInboundForTests(): void {
+  failedInboundIds.clear();
 }
 
 async function runSync(): Promise<void> {
