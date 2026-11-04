@@ -26,7 +26,7 @@
 
 import { encodeGeohash } from '@airplane/protocol';
 import type * as ExpoLocationTypes from 'expo-location';
-import { recordLocationEvent } from './diagnostics';
+import { recordLocationEvent, type LocationLogDetail } from './diagnostics';
 
 /** Typed failure modes. `code` is stable for UI copy mapping. */
 export type LocationFailureCode =
@@ -147,6 +147,40 @@ export class ExpoLocationProvider implements LocationProvider {
   private inflight: Promise<LocatedCell> | null = null;
   /** In-flight background refresh, deduped the same way. */
   private revalidating: Promise<void> | null = null;
+  /**
+   * Provider-stale tracker (gaps 101/102, observability only, not a
+   * provider fix). Counts consecutive fresh-path resolutions that fell
+   * back to last-known, with no fresh fix all session. A cached serve
+   * is not a fresh-path resolution, so it neither counts nor resets.
+   * On the second consecutive last-known resolution with no fresh fix
+   * yet, one 'provider stale' line is emitted for the session: the
+   * signal that the fresh provider is not delivering at all, as the
+   * 2026-11-04 logs showed (12 fresh resolutions, all last-known).
+   * This line never changes resolution behavior and never promises a
+   * fix; the previously rejected provider approaches (library upgrade,
+   * accuracy change, single-shot watch) stay rejected without new
+   * evidence, which would be reported as a follow-up, not smuggled in.
+   */
+  private freshSeenInSession = false;
+  private lastKnownStreak = 0;
+  private providerStaleLogged = false;
+
+  private noteFreshPathOutcome(source: 'fresh' | 'last-known'): void {
+    if (source === 'fresh') {
+      this.freshSeenInSession = true;
+      this.lastKnownStreak = 0;
+      return;
+    }
+    this.lastKnownStreak += 1;
+    if (
+      this.lastKnownStreak >= 2 &&
+      !this.freshSeenInSession &&
+      !this.providerStaleLogged
+    ) {
+      this.providerStaleLogged = true;
+      recordLocationEvent('provider stale');
+    }
+  }
 
   constructor(opts: ExpoProviderOpts = {}) {
     this.timeoutMs = opts.timeoutMs ?? FIX_TIMEOUT_MS;
@@ -292,12 +326,14 @@ export class ExpoLocationProvider implements LocationProvider {
     ) {
       const cell = encodeGeohash(recent.latitude, recent.longitude, 5);
       this.cached = { cell, atMs: this.now() };
+      this.noteFreshPathOutcome('fresh');
       return { cell, source: 'fresh' };
     }
     try {
       const coords = await this.freshFix(Location);
       const cell = encodeGeohash(coords.latitude, coords.longitude, 5);
       this.cached = { cell, atMs: this.now() };
+      this.noteFreshPathOutcome('fresh');
       return { cell, source: 'fresh' };
     } catch (error) {
       const mapped =
@@ -308,6 +344,7 @@ export class ExpoLocationProvider implements LocationProvider {
       const stale = await this.readLastKnown(Location);
       if (stale) {
         recordLocationEvent('fresh last-known');
+        this.noteFreshPathOutcome('last-known');
         return {
           cell: encodeGeohash(stale.latitude, stale.longitude, 5),
           source: 'last-known',
@@ -315,6 +352,7 @@ export class ExpoLocationProvider implements LocationProvider {
       }
       if (this.cached) {
         recordLocationEvent('fresh last-known');
+        this.noteFreshPathOutcome('last-known');
         return { cell: this.cached.cell, source: 'last-known' };
       }
       throw mapped;
@@ -346,6 +384,7 @@ export class ExpoLocationProvider implements LocationProvider {
           cell = encodeGeohash(coords.latitude, coords.longitude, 5);
         }
         this.cached = { cell, atMs: this.now() };
+        this.noteFreshPathOutcome('fresh');
         recordLocationEvent('revalidate ok');
       } catch {
         recordLocationEvent('revalidate failed');
@@ -470,6 +509,7 @@ export function __resetLocationProviderForTests(): void {
   providerOverride = null;
   defaultProvider = null;
   defaultExpoProvider = null;
+  composePermissionLogged = false;
 }
 
 /**
@@ -535,7 +575,19 @@ export async function getLocationCell(): Promise<string> {
  */
 export async function warmLocationCell(): Promise<void> {
   try {
-    if ((await getLocationPermissionStatus()) !== 'granted') return;
+    // Gap 103: a skipped warmup is visible, not silent. The line names
+    // the permission status only, never content or location, so the
+    // log can no longer be read as "warmup never ran" when it ran and
+    // was skipped for permission, and the log can distinguish the two
+    // skip reasons. The OS dialog still only fires from the composer's
+    // priming flow, never from warming.
+    const permission = await getLocationPermissionStatus();
+    if (permission !== 'granted') {
+      recordLocationEvent(
+        permission === 'denied' ? 'warmup skipped denied' : 'warmup skipped undetermined',
+      );
+      return;
+    }
     recordLocationEvent('warmup started');
     const { source } = await getLocatedCell();
     recordLocationEvent(
@@ -552,4 +604,64 @@ export async function warmLocationCell(): Promise<void> {
         : 'warmup fresh-failed',
     );
   }
+}
+
+/**
+ * Gap 104, observability only: log the foreground-location permission
+ * status (status word only, never content or location) at setup
+ * completion and at first compose open. This does NOT change any
+ * permission behavior: it only records the two readings the
+ * first-launch hypothesis needs, so a later log can show whether the
+ * grant read absent at setup and present at first open, or the
+ * reverse, without guessing at the mechanism. The compose reading is
+ * logged once per session; the setup reading logs on every setup
+ * completion (setup completes once per install).
+ */
+let composePermissionLogged = false;
+
+async function recordPermissionStatus(prefix: 'setup' | 'compose'): Promise<void> {
+  try {
+    const status = await getLocationPermissionStatus();
+    recordLocationEvent(`${prefix} permission ${status}` as LocationLogDetail);
+  } catch {
+    // Logging never breaks setup or compose.
+  }
+}
+
+/** Log the permission status at setup completion (gap 104). */
+export async function logSetupPermissionStatus(): Promise<void> {
+  await recordPermissionStatus('setup');
+}
+
+/** Log the permission status at the first compose open only (gap 104). */
+export async function logFirstComposePermissionStatus(): Promise<void> {
+  if (composePermissionLogged) return;
+  composePermissionLogged = true;
+  await recordPermissionStatus('compose');
+}
+
+/**
+ * Gap 103 retry trigger, as a testable seam: subscribe a foreground
+ * return to a fresh warmup attempt, for use while compose is open.
+ * The compose sheet owns the subscription lifetime (it subscribes on
+ * open and unsubscribes on close), so a user typing for minutes in one
+ * open gets a second warmup attempt on returning to the app, instead
+ * of waiting for the next open. The AppState shape is the
+ * react-native one, narrowed to what this seam uses, so unit tests can
+ * pass a fake. Warmup itself never throws and never prompts.
+ */
+export interface ComposeWarmupAppState {
+  addEventListener: (
+    type: 'change',
+    cb: (state: string) => void,
+  ) => { remove: () => void };
+}
+
+export function subscribeComposeWarmupOnForeground(
+  appState: ComposeWarmupAppState,
+): () => void {
+  const sub = appState.addEventListener('change', (state) => {
+    if (state === 'active') void warmLocationCell();
+  });
+  return () => sub.remove();
 }

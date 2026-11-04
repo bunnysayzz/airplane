@@ -147,6 +147,24 @@ let syncTimer: ReturnType<typeof setInterval> | null = null;
  */
 let lastOnline: boolean | null = null;
 /**
+ * Gap 111, observability only: the raw NetInfo state words from the
+ * most recent listener fire or fetch, kept so a relay skip for
+ * "network not validated" can say why in state words (connected,
+ * reachable, type), instead of leaving a stuck validation unexplained.
+ * State words only: no SSID, no address, no identifier. This never
+ * changes connectivity behavior: applyConnectivity still owns the
+ * online/offline decision, and this summary is only read for a log
+ * line. Null before any NetInfo state has arrived.
+ */
+let lastNetInfoSummary: string | null = null;
+
+/** Render one NetInfo state as state words only, for the gap 111 log line. */
+function netInfoWords(state: NetInfoState): string {
+  const reachable =
+    state.isInternetReachable === null ? 'null' : String(!!state.isInternetReachable);
+  return `connected=${!!state.isConnected} reachable=${reachable} type=${state.type ?? 'unknown'}`;
+}
+/**
  * True once any connectivity state has been applied (listener or fetch).
  * False before the first state and forever when the NetInfo module fails
  * to load: that is the router's unknown-network state, which gets the
@@ -1059,6 +1077,7 @@ function wireConnectivity(): void {
 
   // React to connectivity changes.
   netUnsub = netInfo.addEventListener((state) => {
+    lastNetInfoSummary = netInfoWords(state);
     applyConnectivity(!!state.isConnected && !!state.isInternetReachable);
   });
 
@@ -1069,6 +1088,7 @@ function wireConnectivity(): void {
   void netInfo
     .fetch()
     .then((initial) => {
+      lastNetInfoSummary = netInfoWords(initial);
       applyConnectivity(!!initial.isConnected && !!initial.isInternetReachable);
     })
     .catch(() => {});
@@ -1087,6 +1107,7 @@ export async function stopTransport(): Promise<void> {
   netUnsub?.();
   netUnsub = null;
   lastOnline = null;
+  lastNetInfoSummary = null;
   connectivityKnown = false;
   clearScanRetry();
   bleScanUp = false;
@@ -1244,11 +1265,20 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
       });
     }
   } else {
+    // Gap 111: when the relay stage was skipped for "network not
+    // validated", the diagnostics detail carries the last NetInfo
+    // state words, so a stuck validation names its state instead of
+    // sitting unexplained. Any other relay detail passes through
+    // unchanged, and no connectivity behavior changes here.
+    const relayDetail =
+      result.relayDetail === 'network not validated'
+        ? `network not validated (${lastNetInfoSummary ?? 'no NetInfo state yet'})`
+        : result.relayDetail;
     attempts.push({
       transport: 'relay',
       atMs: nowMs,
       outcome: result.relayTried ? 'failed' : 'skipped',
-      detail: result.relayDetail,
+      detail: relayDetail,
     });
     if (result.transport === 'mesh') {
       attempts.push({

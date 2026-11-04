@@ -72,22 +72,29 @@ Sending is optimistic: the row is stored, the send returns at once, and
 a background flush does the work. A flush is forced when the app returns
 to the foreground, when connectivity returns, and on 0-to-N BLE peer
 transitions, plus the normal backoff timer. The outbox retries with
-backoff and a 5 attempt cap for hard failures, then Failed, except for
-the two states that never end in failure on their own: Queued and
-Relayed, below.
+backoff and a 5 attempt cap for hard failures, then Failed. Queued is
+the one state that never ends in failure on its own; Relayed ends in
+Failed once its re-publish cap is exhausted, below.
 
 | State | Thread label | Rule |
 |---|---|---|
 | Sending | Sending | An attempt is in flight, or a hard failure is being retried inside the attempt cap. Never a final state. |
 | Queued | Queued, waiting for a transport | The last attempt found no transport at all (relays unreachable and no BLE peers). Retried without an attempt cap: offline for hours still drains when a transport returns, it does not Failed. |
-| Relayed | Sent to relay, not delivered yet | A relay accepted the envelope. Re-published with the identical event ID only after a 24 hour ack window with no ack, at most 3 re-publishes. A re-publish is a no-op at a relay that still holds the event, and a recovery when the relay dropped it. Never Failed by time alone, and the label stays Relayed while the window runs. A re-publish never inflates unread counts: the recipient dedups by delivery ID. |
+| Relayed | Sent to relay, not delivered yet | A relay accepted the envelope. Re-published with the identical event ID only after a 24 hour ack window with no ack, at most 3 re-publishes. A re-publish is a no-op at a relay that still holds the event, and a recovery when the relay dropped it. A Relayed row whose re-publish cap is exhausted turns Failed on the next flush, mirroring MeshSent, so tap-to-retry works on it; a late ack still upgrades that Failed row to Delivered. A re-publish never inflates unread counts: the recipient dedups by delivery ID. |
 | MeshSent | Sent over BLE, not delivered yet | A BLE notify went out to at least one connected peer. Re-attempted when due (30 seconds) or on force flush; a relay success upgrades it to Relayed; 5 mesh sends without an ack end in Failed. |
 | Delivered | Delivered | Only on a verified peer ack. See Acks below. |
-| Failed | Failed, tap to retry | Hard failures exhausted, or mesh sends exhausted without an ack. Tap to retry re-queues the message, resets attempts, and sends again. |
+| Failed | Failed, tap to retry | Hard failures exhausted, mesh sends exhausted without an ack, or Relayed re-publishes exhausted without an ack. Tap to retry re-queues the message, resets attempts, and sends again. |
 
 A late ack still upgrades any state to Delivered, including Failed.
 A row in Relayed or MeshSent is a handoff, not a trap: it stays visible
 with its "not delivered yet" label until an ack arrives.
+
+Relay win plus Bluetooth: a DM a relay accepts is also sent to
+connected Bluetooth peers over the mesh port, best effort, mirroring
+the post relay-win leg. The row stays Relayed whether that leg
+succeeds, reaches zero peers, or throws; a Bluetooth failure never
+changes the relay result and never fails the DM. This leg runs on
+the initial relay win only, not on Relayed re-publishes.
 
 Per-conversation head-of-line: a row that turns terminally Failed
 inside a flush does not block later rows to the same peer; the flush
@@ -220,9 +227,9 @@ of an already seen envelope cannot resurrect a deleted conversation.
 - Multi-hop DM: direct connected peers only in v1.
 - NIP-42 AUTH unanswered. Half-open detection is now a silence timer
   with no ping, by platform limit, not a ping.
-- Relayed rows re-publish after a 24 hour ack window, capped at 3, but
-  a Relayed row past its cap with no ack still stays Relayed: it has
-  no Failed state by time alone.
+- Relayed rows re-publish after a 24 hour ack window, capped at 3, and
+  a Relayed row past its cap with no ack turns Failed on the next
+  flush, mirroring MeshSent, so tap-to-retry works on it.
 - Backfill is bounded: 24 hours on first subscribe, last envelope or
   ack minus 300 seconds on resubscribe. Replay pagination past 500
   and per-peer watermarks are follow-up work, not in this batch.

@@ -27,8 +27,10 @@
 //             has acked yet. Re-published only after a 24 hour ack window
 //             with no ack, at most 3 re-publishes, using the identical
 //             event id (a no-op at a relay that still holds it, and a
-//             recovery when the relay dropped it). Never Failed by time
-//             alone, and the label stays Relayed while the window runs.
+//             recovery when the relay dropped it). Once the re-publish
+//             cap is exhausted, the next flush turns the row Failed,
+//             mirroring MeshSent, so tap-to-retry works; a late ack
+//             still upgrades that Failed row to Delivered.
 //   MeshSent  a BLE notify went out to at least one connected peer, but no
 //             peer app has acked yet. A notify resolving is a radio
 //             handoff, not delivery: the peer central may not have been
@@ -42,7 +44,8 @@
 //             only state that claims the peer has the message.
 //   Failed    hard failures exhausted (every relay explicitly rejected the
 //             envelope, or BLE sends threw) after DM_MAX_ATTEMPTS attempts,
-//             or mesh sends exhausted without an ack. Tap-to-retry re-queues.
+//             mesh sends exhausted without an ack, or Relayed re-publishes
+//             exhausted without an ack. Tap-to-retry re-queues.
 // A row in Relayed or MeshSent is a handoff, not a trap: it stays visible
 // with its "not delivered yet" label until an ack arrives, and an ack that
 // arrives after Failed still corrects the row to Delivered.
@@ -570,7 +573,8 @@ export class DmService {
       for (const m of messages) {
         if (m.direction !== 'out') continue;
         // Relayed rows arm the timer for their re-publish window only
-        // while re-publishes remain; a capped Relayed row never arms.
+        // while re-publishes remain; a capped Relayed row never arms
+        // because the next flush turns it Failed instead (gap 105).
         if (m.status === 'Relayed') {
           if ((m.relayRepublishAttempts ?? 0) >= DM_RELAYED_MAX_REPUBLISH) continue;
         } else if (m.status !== 'Sending' && m.status !== 'Queued' && m.status !== 'MeshSent') {
@@ -690,7 +694,9 @@ export class DmService {
    * the backoff timer. Timer flushes stay non-force (due rows only).
    * Relayed rows are the one exception to force: a Relayed row is
    * re-published only when its 24 hour ack window has passed (rank 1),
-   * never early on a forced flush.
+   * never early on a forced flush. A capped Relayed row is the other
+   * exception to staying Relayed: the next flush turns it Failed
+   * (gap 105), so tap-to-retry works on it.
    */
   async flushOutbox(force = false): Promise<void> {
     if (this.flushInFlight) return this.flushInFlight;
@@ -721,7 +727,16 @@ export class DmService {
             // and re-publishes remain. Force never pulls this forward.
             // A Relayed row never head-blocks later rows: the loop
             // continues past it whatever the re-publish outcome is.
-            if ((m.relayRepublishAttempts ?? 0) >= DM_RELAYED_MAX_REPUBLISH) continue;
+            // Gap 105: a capped Relayed row is not skipped forever.
+            // It turns Failed here, mirroring the MeshSent cap branch
+            // below, so tap-to-retry (which only acts on Failed rows)
+            // works on it. A late ack still upgrades it to Delivered.
+            if ((m.relayRepublishAttempts ?? 0) >= DM_RELAYED_MAX_REPUBLISH) {
+              m.status = 'Failed';
+              await this.store.updateMessage(m);
+              changed = true;
+              continue;
+            }
             if (m.nextAttemptAtMs > now) continue;
             if (await this.tryRepublishRelayed(m, now)) changed = true;
             continue;
@@ -850,6 +865,19 @@ export class DmService {
       m.status = 'Relayed';
       m.relayRepublishAttempts = 0;
       m.nextAttemptAtMs = now + DM_RELAYED_ACK_WINDOW_MS;
+      // Gap 106, DM relay win plus Bluetooth (mirrors the v0.1.19 post
+      // fix): a relay win also sends the envelope to connected peers
+      // over Bluetooth, best effort, so a nearby offline peer gets the
+      // DM at send time instead of waiting for a relay fetch. Status
+      // stays Relayed, and a Bluetooth failure or zero peers never
+      // changes the relay result and never fails the DM.
+      if (this.mesh) {
+        try {
+          await this.mesh.publish(envelope, 'dm');
+        } catch {
+          // Best effort only: the relay handoff already stands.
+        }
+      }
       await this.store.updateMessage(m);
       return { ok: true, envelopeMissing: false };
     }

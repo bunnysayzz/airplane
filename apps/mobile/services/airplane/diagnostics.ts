@@ -348,14 +348,47 @@ export function recordScanFailure(code: string): void {
   notifyThrottled();
 }
 
-// Scan sighting summary (mesh-scan fix): counts of discover events in a
-// window, split into mesh-tagged and non-mesh, plus the manufacturer
-// data shapes seen (company id hex and byte length only). Counts and
-// company ids are not identifiers: no device ids, names, or RSSI here.
-// This line is what lets the next device run tell "scanner delivered
-// nothing" apart from "scanner delivered packets but no mesh tag".
-export function recordScanSightings(total: number, mesh: number, nonMesh: number, manufacturerSummary: string): void {
-  logEvent('scan', `sightings total=${total} mesh=${mesh} nonmesh=${nonMesh} md=${manufacturerSummary}`);
+// Scan sighting summary (mesh-scan fix, gap 109 comparable form):
+// counts of discover events in one flush window, split into
+// mesh-tagged and non-mesh, plus the manufacturer data shapes seen
+// (company id hex and byte length only). Two phones' lines are only
+// comparable when the window and the counting are the same, so the
+// line now labels both: windowMs is the elapsed ms the window actually
+// covered (windows flush on the first sighting at or past 60 s, so a
+// window is 60 s or longer, never silently a different length), and
+// unique/meshUnique count distinct peripheral ids in the window, so
+// one chatty advertiser re-broadcasting cannot inflate a phone's total
+// past another phone's. Counts and company ids are not identifiers:
+// no device ids, names, or RSSI here. This line is what lets the next
+// device run tell "scanner delivered nothing" apart from "scanner
+// delivered packets but no mesh tag".
+// Gap 110: when a flushed window reports zero mesh sightings after an
+// earlier window reported mesh sightings, one distinct drop line is
+// emitted (once per drop, until mesh sightings return). It observes
+// only; it does not change scanning, connecting, or retry behavior.
+let scanMeshSeenBefore = false;
+let scanMeshDropLogged = false;
+
+export function recordScanSightings(
+  total: number,
+  mesh: number,
+  nonMesh: number,
+  manufacturerSummary: string,
+  windowMs: number,
+  uniqueTotal: number,
+  uniqueMesh: number,
+): void {
+  logEvent(
+    'scan',
+    `sightings window=${windowMs}ms total=${total} mesh=${mesh} nonmesh=${nonMesh} unique=${uniqueTotal} meshUnique=${uniqueMesh} md=${manufacturerSummary}`,
+  );
+  if (mesh > 0) {
+    scanMeshSeenBefore = true;
+    scanMeshDropLogged = false;
+  } else if (total > 0 && scanMeshSeenBefore && !scanMeshDropLogged) {
+    scanMeshDropLogged = true;
+    logEvent('scan', 'mesh-sightings-zero-after-seen');
+  }
   notifyThrottled();
 }
 
@@ -593,10 +626,19 @@ export type LocationLogDetail =
   | 'warmup fresh-failed'
   | 'warmup last-known'
   | 'warmup no-coordinates'
+  | 'warmup skipped denied'
+  | 'warmup skipped undetermined'
   | 'fresh last-known'
   | 'revalidate started'
   | 'revalidate ok'
-  | 'revalidate failed';
+  | 'revalidate failed'
+  | 'provider stale'
+  | 'setup permission granted'
+  | 'setup permission denied'
+  | 'setup permission undetermined'
+  | 'compose permission granted'
+  | 'compose permission denied'
+  | 'compose permission undetermined';
 
 export function recordLocationEvent(detail: LocationLogDetail): void {
   logEvent('location', detail);
@@ -632,6 +674,8 @@ export function resetDiagnosticsForTests(): void {
   scanningState = 'stopped';
   scanningLastFailure = null;
   scanStarts = [];
+  scanMeshSeenBefore = false;
+  scanMeshDropLogged = false;
   peers.clear();
   messages.length = 0;
   permissionReport = null;

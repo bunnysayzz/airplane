@@ -1150,6 +1150,11 @@ function loadCentralAdapter(): CentralAdapter | null {
     let sightTotal = 0;
     let sightMesh = 0;
     let sightNonMesh = 0;
+    // Gap 109: distinct peripheral ids in the window, so the flushed
+    // line can report unique counts alongside event totals. One
+    // advertiser repeating does not inflate the unique count.
+    const sightUnique = new Set<string>();
+    const sightMeshUnique = new Set<string>();
     const sightMd = new Map<string, number>();
     let sightWindowStartMs = 0;
     const SIGHTING_WINDOW_MS = 60_000;
@@ -1193,10 +1198,13 @@ function loadCentralAdapter(): CentralAdapter | null {
         return [];
       }
     }
-    function noteSighting(p: unknown, tag: Uint8Array | null): void {
+    function noteSighting(p: unknown, tag: Uint8Array | null, peripheralId: string): void {
       sightTotal++;
-      if (tag) sightMesh++;
-      else {
+      sightUnique.add(peripheralId);
+      if (tag) {
+        sightMesh++;
+        sightMeshUnique.add(peripheralId);
+      } else {
         sightNonMesh++;
         for (const s of manufacturerSummary(p)) sightMd.set(s, (sightMd.get(s) ?? 0) + 1);
       }
@@ -1206,24 +1214,33 @@ function loadCentralAdapter(): CentralAdapter | null {
         return;
       }
       if (now - sightWindowStartMs >= SIGHTING_WINDOW_MS && sightTotal > 0) {
+        // Gap 109: the flushed line labels the window it actually
+        // covered (elapsed ms since window start), so two phones'
+        // lines can be aligned by rate, not by raw totals alone.
         recordScanSightings(
           sightTotal,
           sightMesh,
           sightNonMesh,
           [...sightMd.entries()].map(([k, c]) => `${k}x${c}`).join(','),
+          now - sightWindowStartMs,
+          sightUnique.size,
+          sightMeshUnique.size,
         );
         sightTotal = 0;
         sightMesh = 0;
         sightNonMesh = 0;
+        sightUnique.clear();
+        sightMeshUnique.clear();
         sightMd.clear();
         sightWindowStartMs = now;
       }
     }
     function mapDiscover(p: unknown): { id: string; rssi: number; tag: Uint8Array | null } {
       const tag = extractTag(p);
-      noteSighting(p, tag);
+      const peripheralId = String((p as { id?: unknown })?.id ?? '');
+      noteSighting(p, tag, peripheralId);
       return {
-        id: String((p as { id?: unknown })?.id ?? ''),
+        id: peripheralId,
         rssi: typeof (p as { rssi?: unknown })?.rssi === 'number' ? ((p as { rssi: number }).rssi as number) : 0,
         tag,
       };

@@ -321,6 +321,39 @@ describe('transport manager', () => {
     expect(statuses.get(toHex(event.id))).toBe('unsent');
   });
 
+  test('a relay skip for network not validated logs the last NetInfo state words', async () => {
+    resetDiagnosticsForTests();
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    // Drive the NetInfo listener with a stuck-validation state: not
+    // connected, reachability still unknown, on wifi.
+    const listener = netInfoMock.addEventListener.mock.calls[0][0] as (s: {
+      isConnected: boolean;
+      isInternetReachable: boolean | null;
+      type: string;
+    }) => void;
+    listener({ isConnected: false, isInternetReachable: null, type: 'wifi' });
+    const event = makeSignedEvent();
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'none',
+      status: 'queued',
+      blePeers: 0,
+      relays: [],
+      relayTried: false,
+      relayDetail: 'network not validated',
+    });
+    await publishViaTransport(event);
+    const messages = getDiagnosticsSnapshot().messages;
+    const outbound = messages.filter((m) => m.direction === 'outbound');
+    expect(outbound).toHaveLength(1);
+    const relayAttempt = outbound[0].attempts.find((a) => a.transport === 'relay');
+    expect(relayAttempt?.outcome).toBe('skipped');
+    expect(relayAttempt?.detail).toBe(
+      'network not validated (connected=false reachable=null type=wifi)',
+    );
+  });
+
   test('a mesh publish records handed to radio, never delivered, in diagnostics', async () => {
     resetDiagnosticsForTests();
     await startTransport();

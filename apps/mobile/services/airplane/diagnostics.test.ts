@@ -304,8 +304,10 @@ describe('scan sighting summary', () => {
     const lines: string[] = [];
     setDiagnosticsLogSink((kind, detail) => lines.push(`${kind}:${detail}`));
     try {
-      recordScanSightings(12, 3, 9, 'ffff:8x2,1234:2x1');
-      expect(lines).toEqual(['scan:sightings total=12 mesh=3 nonmesh=9 md=ffff:8x2,1234:2x1']);
+      recordScanSightings(12, 3, 9, 'ffff:8x2,1234:2x1', 60000, 5, 1);
+      expect(lines).toEqual([
+        'scan:sightings window=60000ms total=12 mesh=3 nonmesh=9 unique=5 meshUnique=1 md=ffff:8x2,1234:2x1',
+      ]);
     } finally {
       setDiagnosticsLogSink(null);
     }

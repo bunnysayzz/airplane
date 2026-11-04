@@ -449,7 +449,7 @@ describe('failure codes and log privacy', () => {
     expect(joined).not.toContain(OLD_CELL);
     for (const line of locationLines()) {
       expect(line).toMatch(
-        /^location (warmup (started|served-cached|fresh-ok|fresh-failed|last-known|no-coordinates)|fresh last-known|revalidate (started|ok|failed))$/,
+        /^location (warmup (started|served-cached|fresh-ok|fresh-failed|last-known|no-coordinates|skipped (denied|undetermined))|fresh last-known|revalidate (started|ok|failed)|provider stale|(setup|compose) permission (granted|denied|undetermined))$/,
       );
     }
   });
