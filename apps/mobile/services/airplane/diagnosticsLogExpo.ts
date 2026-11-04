@@ -140,6 +140,23 @@ export function getDiagnosticsLogStatus(): DiagnosticsLogFileStatus {
 }
 
 /**
+ * Read the current log file text for the test inbox upload. Same file
+ * the Share button shares, already redacted by the collector, flushed
+ * first so the tail is included. TESTING ONLY, REMOVE AFTER TESTING
+ * with the test inbox button. Throws when the file cannot be read.
+ */
+export async function readDiagnosticsLogText(): Promise<string> {
+  if (writer === null) {
+    await startDiagnosticsLogFile();
+  }
+  await writer?.flushComplete();
+  if (logFileUri() === DIAGNOSTICS_LOG_FILE_UNAVAILABLE) {
+    throw new Error('log file unavailable');
+  }
+  return FileSystem.readAsStringAsync(logFileUri());
+}
+
+/**
  * Open the Android share sheet for the log file. Throws when sharing
  * is unavailable on the device, so the Diagnostics screen can say so
  * plainly instead of pretending the sheet opened.

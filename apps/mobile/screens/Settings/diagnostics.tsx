@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Linking, Pressable, ScrollView, Text, View } from 'react-native';
+import { Alert, Linking, Pressable, ScrollView, Text, View } from 'react-native';
+import Constants from 'expo-constants';
 import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Card, SectionLabel } from '../../components/ui';
@@ -21,8 +22,14 @@ import {
 import { checkBlePermissionStates } from '../../services/airplane/ble/permissions';
 import {
   getDiagnosticsLogStatus,
+  readDiagnosticsLogText,
   shareDiagnosticsLogFile,
 } from '../../services/airplane/diagnosticsLogExpo';
+import {
+  formatLogInboxSize,
+  logTextByteLength,
+  sendDiagnosticsLogToInbox,
+} from '../../services/airplane/logInbox';
 import { retryBleRadio } from '../../services/airplane/transport';
 
 interface DiagnosticsProps {
@@ -43,6 +50,12 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
   const [shareFailed, setShareFailed] = useState<boolean>(false);
   const [shareError, setShareError] = useState<string | null>(null);
   const [retryFailed, setRetryFailed] = useState<boolean>(false);
+  // Test inbox upload state. TESTING ONLY, REMOVE AFTER TESTING with
+  // the "Send to test inbox" button below.
+  const [inboxSending, setInboxSending] = useState<boolean>(false);
+  const [inboxSentId, setInboxSentId] = useState<string | null>(null);
+  const [inboxFailed, setInboxFailed] = useState<boolean>(false);
+  const [inboxError, setInboxError] = useState<string | null>(null);
 
   const refreshPermissions = () => {
     checkBlePermissionStates()
@@ -236,6 +249,72 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
           >
             <Text style={[type.name, styles.buttonText]}>{t('settings.diagnosticsShareLog')}</Text>
           </Pressable>
+          {/* TESTING ONLY, REMOVE AFTER TESTING: one-tap upload of the
+          same redacted log file the Share button shares, to the test
+          inbox endpoint. Confirm dialog shows the size and the
+          redacted-only note; failure falls back to Share log. */}
+          <Pressable
+            style={styles.button}
+            onPress={() => {
+              recordUiEvent('diagnostics:send-inbox');
+              if (inboxSending) return;
+              setInboxFailed(false);
+              setInboxError(null);
+              setInboxSentId(null);
+              void (async () => {
+                let logText: string;
+                try {
+                  logText = await readDiagnosticsLogText();
+                } catch (error: unknown) {
+                  setInboxFailed(true);
+                  setInboxError(
+                    String(error instanceof Error ? error.message : error)
+                      .replace(/[\r\n]+/g, ' ')
+                      .trim()
+                      .slice(0, 120),
+                  );
+                  return;
+                }
+                const size = formatLogInboxSize(logTextByteLength(logText));
+                Alert.alert(
+                  t('settings.diagnosticsSendToInbox'),
+                  t('settings.diagnosticsSendToInboxConfirm', { size }),
+                  [
+                    { text: t('common.cancel'), style: 'cancel' },
+                    {
+                      text: t('settings.diagnosticsSendToInbox'),
+                      onPress: () => {
+                        setInboxSending(true);
+                        void sendDiagnosticsLogToInbox({
+                          logText,
+                          version: Constants.expoConfig?.version ?? 'unknown',
+                          uploadedAt: new Date().toISOString(),
+                        })
+                          .then((result) => {
+                            setInboxSentId(result.id);
+                            setLogStatus(getDiagnosticsLogStatus());
+                          })
+                          .catch((error: unknown) => {
+                            setInboxFailed(true);
+                            setInboxError(
+                              String(error instanceof Error ? error.message : error)
+                                .replace(/[\r\n]+/g, ' ')
+                                .trim()
+                                .slice(0, 120),
+                            );
+                          })
+                          .finally(() => setInboxSending(false));
+                      },
+                    },
+                  ],
+                );
+              })();
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={t('settings.diagnosticsSendToInbox')}
+          >
+            <Text style={[type.name, styles.buttonText]}>{t('settings.diagnosticsSendToInbox')}</Text>
+          </Pressable>
           {anyDenied && (
             <Pressable
               style={styles.button}
@@ -309,6 +388,22 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
           <Text style={[type.meta, styles.note]}>
             {t('settings.diagnosticsShareUnavailable')}
             {shareError !== null ? `: ${shareError}` : ''}
+          </Text>
+        )}
+        {inboxSentId !== null && (
+          <>
+            <Text style={[type.meta, styles.note]}>
+              {t('settings.diagnosticsSendToInboxSent')}
+            </Text>
+            <Text style={[type.meta, styles.note]}>
+              {t('settings.diagnosticsSendToInboxId', { id: inboxSentId })}
+            </Text>
+          </>
+        )}
+        {inboxFailed && (
+          <Text style={[type.meta, styles.note]}>
+            {t('settings.diagnosticsSendToInboxFailed')}
+            {inboxError !== null ? `: ${inboxError}` : ''}
           </Text>
         )}
 
