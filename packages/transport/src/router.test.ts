@@ -105,7 +105,7 @@ function sentEnvelopeId(socket: InjectableSocket): string {
 }
 
 describe('Ordered router publish', () => {
-  test('relay OK wins: no BLE frames, status relayed, local echo once', async () => {
+  test('relay OK wins: status relayed, local echo once, plus a best-effort BLE leg', async () => {
     const { h, port, sockets } = makeRouter();
     await h.start();
     sockets[0].open();
@@ -126,10 +126,10 @@ describe('Ordered router publish', () => {
     expect(res.transport).toBe('relay');
     expect(res.status).toBe('relayed');
     expect(res.relays).toEqual(['wss://mock.relay']);
-    expect(res.blePeers).toBe(0);
+    expect(res.blePeers).toBe(1);
     expect(res.relayTried).toBe(true);
     expect(res.relayDetail).toBeNull();
-    expect(port.sent).toHaveLength(0); // mesh never armed on a relay win
+    expect(port.sent).toHaveLength(1); // relay-plus-BLE: the connected peer also gets the event over the radio
     expect(seen).toEqual(['local']);
     await h.stop();
   });
@@ -271,7 +271,7 @@ describe('Ordered router publish', () => {
     await h.stop();
   });
 
-  test('relay win with peers present still sends nothing over BLE', async () => {
+  test('relay win with peers present also sends over BLE', async () => {
     const { h, port, sockets } = makeRouter();
     await h.start();
     sockets[0].open();
@@ -284,7 +284,8 @@ describe('Ordered router publish', () => {
     const res = await pending;
 
     expect(res.transport).toBe('relay');
-    expect(port.sent).toHaveLength(0);
+    expect(res.blePeers).toBe(2);
+    expect(port.sent).toHaveLength(2); // one frame per connected peer
     await h.stop();
   });
 
@@ -517,3 +518,4 @@ describe('NostrTransport.publishWithAck', () => {
     expect(ack.timedOut).toBe(false);
   });
 });
+

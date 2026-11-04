@@ -331,7 +331,9 @@ export type RouterTransport = 'relay' | 'mesh' | 'none';
  * were handed to via the radio (a radio handoff, not peer receipt:
  * there is no BLE ack for posts, and a GATT notify can resolve with
  * no subscriber), relays is the list of relay URLs that sent an
- * accepted OK.
+ * accepted OK. On a relay win, blePeers is the count of connected
+ * peers the event was also handed to over Bluetooth (best effort,
+ * v0.1.19); zero means no radio leg ran or it reached nobody.
  */
 export interface RouteResult {
   transport: RouterTransport;
@@ -511,7 +513,9 @@ export class HybridTransport {
   /**
    * Publish a locally-created event through the ordered router.
    * Stage order is fixed: relay first, mesh fallback, queued when
-   * neither can send. A future LAN stage slots in between relay and
+   * neither can send. A relay win additionally broadcasts to connected
+   * Bluetooth peers, best effort (v0.1.19); that leg never changes
+   * the relay result. A future LAN stage slots in between relay and
    * mesh: it must run after the relay stage, never before it, so the
    * relay-first order and D1 hold for every transport added later.
    * Marks the id seen (so the echo is not re-emitted), then emits
@@ -524,10 +528,30 @@ export class HybridTransport {
     const relay = await this.attemptRelay(event);
     let result: RouteResult;
     if (relay.ok.length > 0) {
+      // Relay-plus-BLE (v0.1.19): a relay win no longer skips Bluetooth.
+      // Connected peers also get the event over the radio, best effort,
+      // so an online sender's post reaches a nearby offline peer at
+      // publish time instead of waiting for that peer to come online.
+      // A BLE failure or zero sends never changes the relay result:
+      // transport stays 'relay', status stays 'relayed', and the post
+      // never fails because of the radio leg. The peer count rides the
+      // existing blePeers field so diagnostics can show both paths
+      // without a RouteResult shape change. A peer arriving AFTER
+      // publish still gets nothing over Bluetooth from this publish;
+      // that residual gap is unchanged (the outbox row is removed on
+      // relay win, and the outbox holds own posts only).
+      let blePeers = 0;
+      if (blePeerIds.length > 0) {
+        try {
+          blePeers = await this.ble.broadcast(event, blePeerIds);
+        } catch {
+          blePeers = 0;
+        }
+      }
       result = {
         transport: 'relay',
         status: 'relayed',
-        blePeers: 0,
+        blePeers,
         relays: relay.ok,
         relayTried: true,
         relayDetail: null,
@@ -655,3 +679,4 @@ export class HybridTransport {
     return this.nostr.online;
   }
 }
+

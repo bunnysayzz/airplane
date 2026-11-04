@@ -379,6 +379,74 @@ describe('HybridTransport', () => {
     await h.stop();
   });
 
+  /** Relay-winning hybrid: the relay socket is stubbed to OK. */
+  function makeRelayHybrid() {
+    const port = new FakeBlePort();
+    const ble = new BleTransport(port);
+    const h = new HybridTransport(ble, { relays: [] });
+    Object.defineProperty(h.nostr, 'online', { value: true, configurable: true });
+    h.nostr.publishWithAck = async () => ({
+      ok: ['wss://relay.test'],
+      rejected: [],
+      timedOut: false,
+      cancelled: false,
+    });
+    return { h, port, ble };
+  }
+
+  test('relay win also broadcasts to connected peers, best effort (v0.1.19)', async () => {
+    const { h, port } = makeRelayHybrid();
+    await h.start();
+    const event = makePost('relay plus ble');
+    const res = await h.publish(event, ['p1']);
+    expect(res.transport).toBe('relay');
+    expect(res.status).toBe('relayed');
+    expect(res.relays).toEqual(['wss://relay.test']);
+    expect(res.blePeers).toBe(1);
+    expect(port.sent).toHaveLength(1);
+    await h.stop();
+  });
+
+  test('relay win with no peers runs no Bluetooth leg', async () => {
+    const { h, port } = makeRelayHybrid();
+    await h.start();
+    const res = await h.publish(makePost('relay only'), []);
+    expect(res.transport).toBe('relay');
+    expect(res.status).toBe('relayed');
+    expect(res.blePeers).toBe(0);
+    expect(port.sent).toHaveLength(0);
+    await h.stop();
+  });
+
+  test('relay fail still falls back to mesh unchanged', async () => {
+    const { h, port } = makeRelayHybrid();
+    h.nostr.publishWithAck = async () => ({
+      ok: [],
+      rejected: [],
+      timedOut: true,
+      cancelled: false,
+    });
+    await h.start();
+    const res = await h.publish(makePost('relay fails'), ['p1']);
+    expect(res.transport).toBe('mesh');
+    expect(res.status).toBe('sent');
+    expect(res.blePeers).toBe(1);
+    expect(port.sent).toHaveLength(1);
+    await h.stop();
+  });
+
+  test('a throwing Bluetooth broadcast leaves the relay result unchanged', async () => {
+    const { h, ble } = makeRelayHybrid();
+    jest.spyOn(ble, 'broadcast').mockRejectedValue(new Error('radio gone'));
+    await h.start();
+    const res = await h.publish(makePost('radio throws'), ['p1']);
+    expect(res.transport).toBe('relay');
+    expect(res.status).toBe('relayed');
+    expect(res.relays).toEqual(['wss://relay.test']);
+    expect(res.blePeers).toBe(0);
+    await h.stop();
+  });
+
   test('mesh stage reports queued with zero peers when every BLE send fails', async () => {
     const port = new FakeBlePort();
     port.send = async () => {
@@ -662,3 +730,4 @@ describe('HybridTransport lifecycle', () => {
     await h.stop();
   });
 });
+

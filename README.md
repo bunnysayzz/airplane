@@ -64,8 +64,10 @@ the ordered router, relay first, not over every transport at once:
   NetInfo, no Google Play Services), the router tries relays first
   with a 5 second first-OK deadline (1500 ms while the network state
   is still unknown, so a dead hotspot cannot burn the full deadline
-  before mesh fallback). A relay win means BLE is never used at
-  publish time, even to a connected nearby peer. The app pushes
+  before mesh fallback). A relay win also hands the post to
+  connected Bluetooth peers, best effort, so a nearby offline peer
+  receives it at publish time; the relay result is unchanged by
+  that leg. The app pushes
   unsynced posts, pulls new events, and checks relays for its
   unconfirmed event IDs.
 - **BLE mesh fallback**: when relays do not win, the post goes over
@@ -418,10 +420,11 @@ Run them on the merged tree, in this order:
     after the follow-up WorldSync query round trip. Then, if a relay
     can be made to drop the event before the query, confirm no globe
     appears for it.
-12. **Relay-first, not parallel.** Online with a BLE peer connected,
-    post on phone A and confirm the Diagnostics record shows the relay
-    stage winning and BLE never attempted at publish time for that
-    post.
+12. **Relay win plus Bluetooth.** Online on phone A with phone B
+    connected over Bluetooth but offline, post on phone A and
+    confirm B receives the post over Bluetooth while staying
+    offline, and the Diagnostics record shows the relay stage
+    winning plus a Bluetooth handoff leg for that post.
 13. **Unread pills, badge, read on sight.** Send a DM to phone B while
     B is not in the thread and confirm B's row pill and the Messages
     tab badge both count it. Open the thread on B and confirm both
@@ -506,10 +509,12 @@ Posts flood hop by hop (kinds 1, 2, and 3 only, TTL decremented before
 forwarding, seen-set dedup, sampled jitter, ingress peer excluded);
 DMs go only to directly connected peers in v1, with no multi-hop.
 
-The post router is ordered, relay first. A relay win ends the publish:
-BLE is never attempted for that post at publish time, even to a
-connected peer. Only a relay loss, rejection, or timeout falls through
-to BLE, and only no transport at all reports queued. The queued report
+The post router is ordered, relay first. A relay win ends the router
+decision, and the post is also handed to connected Bluetooth peers,
+best effort, so a nearby offline peer receives it at publish time;
+a Bluetooth failure never changes the relay result. Only a relay
+loss, rejection, or timeout falls through to BLE alone, and only no
+transport at all reports queued. The queued report
 is not storage: the durable post outbox owns persistence and drain
 (see Features). A hotspot is not a transport stage in this router;
 it is NetInfo reachability plus BLE.
@@ -830,3 +835,4 @@ details):
 - [panel-ui](https://github.com/panel-ui/panelui) (MIT, copyright
   panel-ui): component primitives vendored via the panel-ui CLI, basis
   for shared UI in `components/ui`
+
