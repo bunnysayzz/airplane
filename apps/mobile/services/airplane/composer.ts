@@ -39,6 +39,49 @@ import {
   getOwnDisplayName,
   normalizeDisplayName,
 } from './displayNames';
+import { getKv } from './kv';
+
+/**
+ * Signed tag name for the per-sender post sequence number. Old
+ * versions ignore unknown tags (same precedent as the display_name
+ * tag), so a seq tag never breaks interop: an old phone verifies
+ * the signature over the event as received and simply does not read
+ * the number.
+ */
+export const POST_SEQ_TAG = 'seq';
+
+/** KV key for the durable per-sender post sequence counter. */
+const POST_SEQ_KV_KEY = 'post-seq-v1';
+
+/**
+ * Next per-sender post sequence number, durable across restarts.
+ * The read-increment-write runs through a promise chain so two
+ * concurrent publishes can never receive the same number, and the
+ * value is written back before the number is returned, so a kill
+ * after assignment cannot reissue it. Null on any KV failure: the
+ * post then carries no seq tag rather than failing, and its log
+ * lines read seq=none.
+ */
+let postSeqQueue: Promise<void> = Promise.resolve();
+
+export async function nextPostSeq(): Promise<number | null> {
+  let assigned: number | null = null;
+  const run = postSeqQueue.then(async () => {
+    try {
+      const kv = getKv();
+      const raw = await kv.get(POST_SEQ_KV_KEY);
+      const prev = raw === null ? 0 : Number(raw);
+      const next = Number.isFinite(prev) && prev >= 0 ? Math.floor(prev) + 1 : 1;
+      await kv.set(POST_SEQ_KV_KEY, String(next));
+      assigned = next;
+    } catch {
+      assigned = null;
+    }
+  });
+  postSeqQueue = run.catch(() => {});
+  await run;
+  return assigned;
+}
 
 export { LocationError, type LocationFailureCode } from './location';
 
@@ -83,6 +126,12 @@ export interface PublishOpts {
    * no marker, and the geohash5 override path carries no source.
    */
   locationSource?: LocationSource;
+  /**
+   * Per-sender sequence number for this post. Undefined means no seq
+   * tag (the KV counter was unavailable, or the caller did not assign
+   * one); a finite integer at least 1 becomes a signed seq tag.
+   */
+  seq?: number;
 }
 
 /**
@@ -110,6 +159,9 @@ export function tagsForPublish(opts: PublishOpts): string[][] {
   }
   if (opts.locationSource === 'last-known') {
     tags.push([LOCATION_SOURCE_TAG, 'last-known']);
+  }
+  if (opts.seq !== undefined && Number.isInteger(opts.seq) && opts.seq >= 1) {
+    tags.push([POST_SEQ_TAG, String(opts.seq)]);
   }
   return tags;
 }
@@ -158,13 +210,29 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
       displayName = null;
     }
   }
+  // The sequence number is assigned after location and display name
+  // resolve, right before signing, so the common publish failures
+  // (location, keypair) never burn a number: only a sign-stage
+  // failure can consume one, and that failure fails the whole
+  // publish, so the sender log shows it. A KV failure here must not
+  // fail the post: it simply carries no seq tag.
+  let seq: number | null = null;
+  if (opts.seq !== undefined) {
+    seq = opts.seq;
+  } else {
+    try {
+      seq = await nextPostSeq();
+    } catch {
+      seq = null;
+    }
+  }
   let event;
   try {
     event = await signDeviceEvent({
       created_at: Math.floor(Date.now() / 1000),
       kind: EVENT_KIND_POST as EventKind,
       geohash,
-      tags: tagsForPublish({ ...opts, displayName, locationSource }),
+      tags: tagsForPublish({ ...opts, displayName, locationSource, seq: seq ?? undefined }),
       content,
     });
   } catch (err) {
@@ -197,9 +265,10 @@ export async function publishPost(body: string, opts: PublishOpts): Promise<stri
   void publishViaTransport(event).catch((err: unknown) => {
     recordMessage({
       id: toHex(event.id),
-      sequence: null,
+      sequence: seq,
       sizeBytes: 0,
       direction: 'outbound',
+      kind: 'post',
       attempts: [
         {
           transport: 'relay',

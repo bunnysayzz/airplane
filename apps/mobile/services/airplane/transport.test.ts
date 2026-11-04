@@ -279,6 +279,87 @@ describe('transport manager', () => {
     __setBlePortForTests(null);
   });
 
+  test('outbound post lines carry kind and the signed sequence number', async () => {
+    resetDiagnosticsForTests();
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const event = { ...makeSignedEvent(), tags: [['seq', '9']] };
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'relay',
+      status: 'relayed',
+      blePeers: 0,
+      relays: ['wss://test.relay'],
+      relayTried: true,
+      relayDetail: null,
+    });
+    await publishViaTransport(event);
+    const lines = getDiagnosticsSnapshot().messages;
+    const line = lines.find((m) => m.direction === 'outbound' && m.kind === 'post');
+    expect(line).toBeDefined();
+    expect(line!.sequence).toBe(9);
+    expect(line!.finalStatus).toBe('relayed');
+  });
+
+  test('drainPostOutbox logs one message line per drained row', async () => {
+    resetDiagnosticsForTests();
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const older = { ...makeSignedEvent(), id: new Uint8Array(32).fill(31), created_at: Math.floor(Date.now() / 1000) - 600, tags: [['seq', '4']] };
+    const newer = { ...makeSignedEvent(), id: new Uint8Array(32).fill(32), created_at: Math.floor(Date.now() / 1000) };
+    for (const e of [older, newer]) {
+      await store.saveEvent(e);
+      await store.enqueuePostOutbox(toHex(e.id), e.created_at);
+    }
+    jest.spyOn(hybrid!, 'sendOverMesh').mockResolvedValue(1);
+    __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
+    expect(await drainPostOutbox()).toBe(2);
+    const lines = getDiagnosticsSnapshot().messages.filter(
+      (m) => m.direction === 'outbound' && m.kind === 'post' && m.finalStatus === 'handed to radio over BLE',
+    );
+    expect(lines).toHaveLength(2);
+    expect(lines.some((m) => m.sequence === 4)).toBe(true);
+    expect(lines.every((m) => m.attempts[0]?.detail === 'drain ble sent to 1 peers')).toBe(true);
+    __setBlePortForTests(null);
+  });
+
+  test('inbound stars log a message line instead of returning silently', async () => {
+    resetDiagnosticsForTests();
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const star = { ...makeSignedEvent(), kind: 4, tags: [['e', 'c'.repeat(64)]] };
+    hybrid!.ingress(star as never, 'nostr');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const lines = getDiagnosticsSnapshot().messages;
+    expect(lines.some((m) => m.direction === 'inbound' && m.kind === 'star' && m.finalStatus === 'received')).toBe(true);
+  });
+
+  test('inbound reshares log a message line on success', async () => {
+    resetDiagnosticsForTests();
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const crypto = new NobleCrypto();
+    const other = crypto.generateKeypair();
+    const postId = 'd'.repeat(64);
+    const author = 'a'.repeat(64);
+    const reshare = createReshare({
+      crypto,
+      secretKey: other.secretKey,
+      pubkey: other.publicKey,
+      geohash5: 'tdr1v',
+      originalPostId: fromHex(postId),
+      originalAuthorPubkey: fromHex(author),
+    });
+    hybrid!.ingress(reshare, 'ble');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const lines = getDiagnosticsSnapshot().messages;
+    expect(lines.some((m) => m.direction === 'inbound' && m.kind === 'reshare' && m.finalStatus === 'received')).toBe(true);
+  });
+
   test('drainPostOutbox sends nothing when no live queued row exists', async () => {
     await startTransport();
     const hybrid = __getHybridForTests();

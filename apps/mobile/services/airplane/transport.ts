@@ -364,11 +364,62 @@ export function __resetFailedInboundForTests(): void {
   failedInboundIds.clear();
 }
 
+/**
+ * Diagnostics traffic class for an event kind. DM kind 1059 is
+ * DM_EVENT_KIND in packages/transport; the app maps it literally here
+ * rather than importing the transport package into the app layer.
+ */
+function messageKindForEventKind(kind: number): 'post' | 'dm' | 'star' | 'reshare' | 'receipt' | 'other' {
+  if (kind === EVENT_KIND_POST) return 'post';
+  if (kind === EVENT_KIND_RECEIPT) return 'receipt';
+  if (kind === EVENT_KIND_STAR) return 'star';
+  if (kind === EVENT_KIND_RESHARE) return 'reshare';
+  if (kind === 1059) return 'dm';
+  return 'other';
+}
+
+/**
+ * Per-sender post sequence number from the signed seq tag, or null
+ * when the sender is an older version (no tag) or the tag is malformed.
+ * The tag is part of the signed event, so a tampered number fails
+ * signature verification upstream; a missing number is honest, never
+ * guessed. Non-post kinds carry no seq tag and always read null.
+ */
+function postSeqOf(event: SignedEvent): number | null {
+  if (event.kind !== EVENT_KIND_POST) return null;
+  const row = event.tags.find((tag) => tag[0] === 'seq');
+  if (!row) return null;
+  const n = Number(row[1]);
+  if (!Number.isInteger(n) || n < 1) return null;
+  return n;
+}
+
 async function handleIncoming(event: SignedEvent, source: string): Promise<void> {
   // STAR MVP: kind-4 events never reach the events table - its schema
   // CHECKs kind IN (1,2,3). They go to the in-memory star counter instead
   // (same BLE + Nostr ingress path, same event-id dedup upstream).
   if (event.kind === EVENT_KIND_STAR) {
+    // Stars used to return before the generic inbound line below,
+    // so a received star moved data with no message-level line at
+    // all. Log it like any other arrival: kind star, received.
+    if (source === 'nostr' || source === 'ble') {
+      recordMessage({
+        id: toHex(event.id),
+        sequence: postSeqOf(event),
+        sizeBytes: encodeEvent(event).length,
+        direction: 'inbound',
+        kind: 'star',
+        attempts: [
+          {
+            transport: source === 'nostr' ? 'relay' : 'ble',
+            atMs: Date.now(),
+            outcome: 'ok',
+            detail: null,
+          },
+        ],
+        finalStatus: 'received',
+      });
+    }
     if (applyIncomingStar(event)) scheduleFeedNotify();
     return;
   }
@@ -382,25 +433,26 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
     const result = recordReshareEvent(event);
     if (result === 'pending') void pullOriginalForReshare(event);
     const saved = await saveWithRetry(() => getStore().saveReshareEvent(event));
-    if (!saved.ok && (source === 'nostr' || source === 'ble')) {
-      // The count already applied; rehydration reconciles later. The
-      // failure is logged with its reason instead of swallowed, so a
-      // reshare persistence problem is visible in the next log. Local
-      // publish echoes are not logged as inbound failures.
+    if (source === 'nostr' || source === 'ble') {
+      // A reshare arrival used to log only on save failure, so a
+      // successful reshare moved data with no message-level line.
+      // Success logs received; failure logs receive failed with the
+      // reason code. Local publish echoes are not logged as inbound.
       recordMessage({
         id: toHex(event.id),
-        sequence: null,
+        sequence: postSeqOf(event),
         sizeBytes: encodeEvent(event).length,
         direction: 'inbound',
+        kind: 'reshare',
         attempts: [
           {
             transport: source === 'nostr' ? 'relay' : 'ble',
             atMs: Date.now(),
-            outcome: 'failed',
-            detail: `store save failed reshare ${saved.code}`,
+            outcome: saved.ok ? 'ok' : 'failed',
+            detail: saved.ok ? null : `store save failed reshare ${saved.code}`,
           },
         ],
-        finalStatus: 'receive failed',
+        finalStatus: saved.ok ? 'received' : 'receive failed',
       });
     }
     scheduleFeedNotify();
@@ -411,9 +463,10 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
   if (source === 'nostr' || source === 'ble') {
     recordMessage({
       id: toHex(event.id),
-      sequence: null,
+      sequence: postSeqOf(event),
       sizeBytes: encodeEvent(event).length,
       direction: 'inbound',
+      kind: messageKindForEventKind(event.kind),
       attempts: [
         {
           transport: source === 'nostr' ? 'relay' : 'ble',
@@ -440,9 +493,10 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
       if (source === 'nostr' || source === 'ble') {
         recordMessage({
           id: toHex(event.id),
-          sequence: null,
+          sequence: postSeqOf(event),
           sizeBytes: encodeEvent(event).length,
           direction: 'inbound',
+          kind: 'receipt',
           attempts: [
             {
               transport: source === 'nostr' ? 'relay' : 'ble',
@@ -482,9 +536,10 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
     if (source === 'nostr' || source === 'ble') {
       recordMessage({
         id: toHex(event.id),
-        sequence: null,
+        sequence: postSeqOf(event),
         sizeBytes: encodeEvent(event).length,
         direction: 'inbound',
+        kind: messageKindForEventKind(event.kind),
         attempts: [
           {
             transport: source === 'nostr' ? 'relay' : 'ble',
@@ -700,6 +755,27 @@ export async function startTransport(): Promise<void> {
   const ble = new BleTransport(blePort.port, {
     verify: (event) => verifyEvent(crypto, event),
     onDedupDrop: (peerId) => recordDedupDrop(peerId),
+    // A flood forward used to move a post with no message-level line:
+    // only frame counters showed it. Log each forward as its own
+    // outbound line, so a bridge phone's log traces the post onward.
+    onFloodForward: (event, peerCount, ttl) => {
+      recordMessage({
+        id: toHex(event.id),
+        sequence: postSeqOf(event),
+        sizeBytes: encodeEvent(event).length,
+        direction: 'outbound',
+        kind: messageKindForEventKind(event.kind),
+        attempts: [
+          {
+            transport: 'ble',
+            atMs: Date.now(),
+            outcome: 'ok',
+            detail: `flood forward ${peerCount} peers ttl ${ttl}`,
+          },
+        ],
+        finalStatus: 'forwarded via BLE',
+      });
+    },
   });
   // Relay list is user-configurable in Settings > Relays and persisted in
   // AsyncStorage (src/lib/relays.ts). loadRelayUrls() already falls back to
@@ -775,12 +851,42 @@ export async function startTransport(): Promise<void> {
     hybrid.nostr.setSubscribeCells(pendingSubscribeCells);
     pendingSubscribeCells = null;
   }
-  sync = new WorldSync(hybrid.nostr, {
-    markWorldConfirmed: (id: Hex64) => getStore().markWorldConfirmed(id),
-    isWorldConfirmed: (id: Hex64) => getStore().isWorldConfirmed(id),
-    getUnconfirmed: () => getStore().getUnconfirmed(),
-    getEvent: (id: Hex64) => getStore().getEvent(id),
-  } satisfies WorldConfirmStore);
+  sync = new WorldSync(
+    hybrid.nostr,
+    {
+      markWorldConfirmed: (id: Hex64) => getStore().markWorldConfirmed(id),
+      isWorldConfirmed: (id: Hex64) => getStore().isWorldConfirmed(id),
+      getUnconfirmed: () => getStore().getUnconfirmed(),
+      getEvent: (id: Hex64) => getStore().getEvent(id),
+    } satisfies WorldConfirmStore,
+    {
+      // A sync re-push used to leave no line, so a post recovered by
+      // WorldSync (like the v0.1.23 163B post, seen only as an inbound
+      // line on the peer) was invisible on the sender's log. Log each
+      // pushed event as its own relay line, distinct from the
+      // publish-time relay line, so a recovery is traceable.
+      onPushed: (events) => {
+        for (const event of events) {
+          recordMessage({
+            id: toHex(event.id),
+            sequence: postSeqOf(event),
+            sizeBytes: encodeEvent(event).length,
+            direction: 'outbound',
+            kind: messageKindForEventKind(event.kind),
+            attempts: [
+              {
+                transport: 'relay',
+                atMs: Date.now(),
+                outcome: 'ok',
+                detail: 'sync push relay OK',
+              },
+            ],
+            finalStatus: 'relayed via sync',
+          });
+        }
+      },
+    },
+  );
 
   // Relay-observed posts are, by definition, on World: confirmListener marks
   // them confirmed so the feed's globe icon lights up. Inbound posts still
@@ -1298,6 +1404,26 @@ export async function drainPostOutbox(): Promise<number> {
       } else {
         await store.markPostOutboxAttempt(row.eventId, 'unsent').catch(() => {});
       }
+      // A drain send used to leave no line at all, so a redelivery (or
+      // its failure) was invisible in the next log: the v0.1.23
+      // regression could not tell whether the outbox had drained. Drain
+      // rows are kind-1 posts by construction (only posts queue here).
+      recordMessage({
+        id: row.eventId,
+        sequence: postSeqOf(event),
+        sizeBytes: encodeEvent(event).length,
+        direction: 'outbound',
+        kind: 'post',
+        attempts: [
+          {
+            transport: 'ble',
+            atMs: Date.now(),
+            outcome: sent > 0 ? 'ok' : 'failed',
+            detail: sent > 0 ? `drain ble sent to ${sent} peers` : 'drain ble send failed',
+          },
+        ],
+        finalStatus: sent > 0 ? 'handed to radio over BLE' : 'not delivered to any transport',
+      });
     }
   } catch {
     // A drain failure must never break the caller (mesh poll, start,
@@ -1438,9 +1564,10 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
   }
   recordMessage({
     id: toHex(event.id),
-    sequence: null,
+    sequence: postSeqOf(event),
     sizeBytes: encodeEvent(event).length,
     direction: 'outbound',
+    kind: messageKindForEventKind(event.kind),
     attempts,
     finalStatus:
       result.transport === 'relay'

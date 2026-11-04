@@ -4,7 +4,7 @@
 // still propagates unwrapped (the UI maps it to location copy, never the
 // generic "Publishing failed" dialog).
 
-import { publishPost, PublishError } from './composer';
+import { publishPost, tagsForPublish, PublishError } from './composer';
 import {
   LocationError,
   locationError,
@@ -14,6 +14,8 @@ import {
 import { getStore, __resetStoreForTests } from './store';
 import { setKeyStore, __resetDeviceKeypairForTests } from './identity';
 import { subscribeFeed, __resetFeedListenersForTests } from './feed';
+import { __setKvForTests, __resetKvForTests } from './kv';
+import { MemoryKv } from '@airplane/storage';
 import type { KeyStorePort } from '@airplane/crypto';
 
 beforeEach(() => {
@@ -27,6 +29,26 @@ afterEach(() => {
   __resetLocationProviderForTests();
   __resetFeedListenersForTests();
   __resetDeviceKeypairForTests();
+  __resetKvForTests();
+});
+
+describe('post sequence tags', () => {
+  test('tagsForPublish carries a seq tag only for a valid number', () => {
+    expect(tagsForPublish({ seq: 7 })).toEqual([['seq', '7']]);
+    expect(tagsForPublish({ seq: 0 })).toEqual([]);
+    expect(tagsForPublish({ seq: -3 })).toEqual([]);
+    expect(tagsForPublish({})).toEqual([]);
+  });
+
+  test('publishPost assigns durable incrementing sequence numbers', async () => {
+    __setKvForTests(new MemoryKv());
+    const id1 = await publishPost('first', { geohash5: 'tdr1v' });
+    const id2 = await publishPost('second', { geohash5: 'tdr1v' });
+    const ev1 = await getStore().getEvent(id1);
+    const ev2 = await getStore().getEvent(id2);
+    expect(ev1?.tags).toContainEqual(['seq', '1']);
+    expect(ev2?.tags).toContainEqual(['seq', '2']);
+  });
 });
 
 function throwingStore(message: string): KeyStorePort {

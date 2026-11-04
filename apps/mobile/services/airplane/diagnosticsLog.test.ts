@@ -359,6 +359,7 @@ describe('diagnostics log sink wiring and privacy', () => {
       sequence: null,
       sizeBytes: 180,
       direction: 'outbound',
+      kind: 'post',
       attempts: [{ transport: 'relay', atMs: Date.now(), outcome: 'ok', detail: 'published to 2 relays' }],
       finalStatus: 'relayed',
     };
@@ -368,7 +369,7 @@ describe('diagnostics log sink wiring and privacy', () => {
     const lines = writer.getLines();
     expect(lines.some((l) => l.includes('advertise failed addService'))).toBe(true);
     expect(lines.some((l) => l.includes('peer seen tag:0123456789abcdef'))).toBe(true);
-    expect(lines.some((l) => l.includes('message outbound 180B relayed'))).toBe(true);
+    expect(lines.some((l) => l.includes('message outbound post seq=none 180B relayed'))).toBe(true);
     // The planted values below appear nowhere in any log line.
     const joined = lines.join('\n');
     expect(joined).not.toContain('deadbeef');

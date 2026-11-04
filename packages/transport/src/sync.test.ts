@@ -79,6 +79,22 @@ describe('WorldSync', () => {
     expect(nostr.queried[0]).toEqual(expect.arrayContaining([id1, id2]));
   });
 
+  test('onPushed fires with the pushed events after the push phase', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    const pushed: SignedEvent[][] = [];
+    const sync = new WorldSync(nostr as never, store, { onPushed: (events) => pushed.push(events) });
+
+    const e1 = makePost('push hook 1');
+    store.add(e1);
+
+    const report = await sync.sync();
+    expect(report.pushed).toHaveLength(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]).toHaveLength(1);
+    expect(pushed[0][0]).toBe(e1);
+  });
+
   test('sync is a no-op when offline', async () => {
     const store = new FakeConfirmStore();
     const nostr = new FakeNostr();

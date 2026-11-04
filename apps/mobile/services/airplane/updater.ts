@@ -227,12 +227,37 @@ export const checkForUpdate = async (
     if (latest === null) return { available: false, error: 'malformed-release' };
     if (compareVersions(latest, current) <= 0) return { available: false };
     return { available: true, update: release };
-  } catch {
-    return { available: false, error: 'check-failed' };
+  } catch (error: unknown) {
+    return { available: false, error: classifyCheckError(error) };
   } finally {
     if (timeoutId !== undefined) clearTimeout(timeoutId);
   }
 };
+
+/**
+ * Classify a check failure into a distinct reason code for the
+ * update check failed line. The v0.1.23 log showed only
+ * check-failed for a launch check 76 ms after start (the phone
+ * offline, network never validated), which cannot distinguish
+ * offline from a slow server from a broken payload. Timeout, HTTP
+ * status (http-<status>, returned above, not here) and malformed
+ * payload (malformed-release, returned above, plus JSON parse
+ * failures here) each keep their own code; only a truly
+ * unclassified failure stays check-failed.
+ */
+function classifyCheckError(error: unknown): string {
+  if (error instanceof SyntaxError) return 'malformed-release';
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === 'check-timeout' || /timed out|timeout/i.test(message)) return 'check-timeout';
+  if (
+    /network|failed to fetch|fetch failed|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|offline|not reachable|network request failed/i.test(
+      message,
+    )
+  ) {
+    return 'check-unreachable';
+  }
+  return 'check-failed';
+}
 
 /**
  * T14 in-app install: the release's SHA256SUMS.txt asset. Every release

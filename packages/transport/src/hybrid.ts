@@ -48,7 +48,7 @@ export class BleTransport {
   private readonly ttl: number;
   private readonly verify: ((event: SignedEvent) => boolean) | undefined;
   private readonly onDedupDrop: ((peerId: string) => void) | undefined;
-  private readonly onFloodForward: ((eventId: Hex64, peerCount: number, ttl: number) => void) | undefined;
+  private readonly onFloodForward: ((event: SignedEvent, peerCount: number, ttl: number) => void) | undefined;
   private readonly floodForwardDelayMs: number | undefined;
   private readonly floodJitterRand: (() => number) | undefined;
   private readonly floodForwardEnabled: boolean;
@@ -94,8 +94,11 @@ export class BleTransport {
       /**
        * Called when a flood forward actually sends to at least one
        * peer. Diagnostics hook only; no routing decision reads it.
+       * Receives the forwarded event (not just its id) so the app
+       * can log a message-level line with kind, size and sequence:
+       * a forward otherwise moves data with no message line at all.
        */
-      onFloodForward?: (eventId: Hex64, peerCount: number, ttl: number) => void;
+      onFloodForward?: (event: SignedEvent, peerCount: number, ttl: number) => void;
       /**
        * Test seam: fixed flood-forward delay in ms, replacing the
        * sampled jitter. Production callers never pass this.
@@ -244,7 +247,7 @@ export class BleTransport {
         const targets = peers.filter((p) => p !== ingressPeerId);
         if (targets.length === 0) return;
         const sent = await this.broadcast(event, targets, nextTtl);
-        if (sent > 0) this.onFloodForward?.(idHex, sent, nextTtl);
+        if (sent > 0) this.onFloodForward?.(event, sent, nextTtl);
       })().catch(() => {
         // A forward failure is local only: the event was already
         // delivered to handlers, and no retry is scheduled here.

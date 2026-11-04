@@ -31,6 +31,7 @@ import {
   ExpoLocationProvider,
   getLocatedCell,
   warmLocationCell,
+  subscribeWatchCancelOnBackground,
   __resetLocationProviderForTests,
   locationError,
   failureCodeForPublishError,
@@ -236,11 +237,64 @@ describe('background revalidation', () => {
     await provider.getLocatedCell();
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(locationLines()).toContain('location revalidate failed');
+    expect(locationLines()).toContain('location revalidate failed unavailable:Error');
     await expect(provider.getLocatedCell()).resolves.toEqual({
       cell: BLR_CELL,
       source: 'cached',
     });
+  });
+
+  it('a timed-out refresh logs the timeout code, not a bare failure', async () => {
+    let now = 1_000_000;
+    grantPermission();
+    enableServices();
+    noLastKnown();
+    Location.getCurrentPositionAsync.mockResolvedValue({ coords: BLR });
+    const provider = new ExpoLocationProvider({ now: () => now });
+    await provider.getLocatedCell();
+    now += REVALIDATE_AFTER_MS + 1000;
+    Location.getCurrentPositionAsync.mockRejectedValue(new Error('fix timeout'));
+    await provider.getLocatedCell();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(locationLines()).toContain('location revalidate failed timeout');
+  });
+
+  it('a backgrounded watch logs cancelled and falls through to the fallback', async () => {
+    grantPermission();
+    enableServices();
+    noLastKnown();
+    Location.getCurrentPositionAsync.mockRejectedValue(new Error('fix timeout'));
+    // Once only: a persisting implementation would leak into the
+    // fallback tests below (clearAllMocks keeps implementations),
+    // and their watches would then never deliver.
+    Location.watchPositionAsync.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ remove: () => {} }), 0);
+        }),
+    );
+    const listeners = new Set<(state: string) => void>();
+    const fakeAppState = {
+      addEventListener: (_type: 'change', cb: (state: string) => void) => {
+        listeners.add(cb);
+        return {
+          remove: () => {
+            listeners.delete(cb);
+          },
+        };
+      },
+    };
+    const unsubscribe = subscribeWatchCancelOnBackground(fakeAppState);
+    const provider = new ExpoLocationProvider({ now: () => Date.now() });
+    const run = provider.getLocatedCell();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(locationLines()).toContain('location watch started');
+    for (const cb of [...listeners]) cb('background');
+    await expect(run).rejects.toThrow();
+    expect(locationLines()).toContain('location watch cancelled backgrounded');
+    expect(locationLines()).not.toContain('location watch failed');
+    unsubscribe();
   });
 });
 

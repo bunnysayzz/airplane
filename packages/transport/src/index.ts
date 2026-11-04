@@ -79,6 +79,10 @@ export type {
   DmRelaySubscribeOpts,
   DmMeshPort,
   DmServiceOpts,
+  DmEvent,
+  DmTrafficEvent,
+  DmTrafficAttempt,
+  DmStateEvent,
 } from './dmService';
 
 export {

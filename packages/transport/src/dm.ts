@@ -371,6 +371,16 @@ export interface DmRumor {
   created_at: number;
   tags: string[][]; // [['p', recipientHex]]
   content: string; // plaintext DM text
+  /**
+   * Per-sender message sequence number, durable across restarts.
+   * Additive only: older installs parse the rumor with JSON field
+   * access and ignore unknown fields, so they accept a rumor with
+   * seq exactly like one without it, and the ack proof covers only
+   * the delivery id, never the rumor body, so proofs are unaffected.
+   * Absent on rumors from older senders and on rows sealed before
+   * this field existed: the log then reads seq=none, never a guess.
+   */
+  seq?: number;
 }
 
 export interface DmEnvelope {
@@ -405,8 +415,9 @@ export function sealDm(
   senderMeshHex: string,
   recipientMeshHex: string,
   createdAtSec?: number,
+  seq?: number,
 ): DmEnvelope {
-  return sealDmInternal(text, senderMeshHex, recipientMeshHex, createdAtSec).envelope;
+  return sealDmInternal(text, senderMeshHex, recipientMeshHex, createdAtSec, seq).envelope;
 }
 
 /**
@@ -421,8 +432,9 @@ export function sealDmWithAckProof(
   senderMeshHex: string,
   recipientMeshHex: string,
   createdAtSec?: number,
+  seq?: number,
 ): { envelope: DmEnvelope; ackProof: string } {
-  const { envelope, convKey } = sealDmInternal(text, senderMeshHex, recipientMeshHex, createdAtSec);
+  const { envelope, convKey } = sealDmInternal(text, senderMeshHex, recipientMeshHex, createdAtSec, seq);
   const deliveryId = envelope.deliveryId as string;
   return { envelope, ackProof: dmAckProof(convKey, deliveryId) };
 }
@@ -432,6 +444,7 @@ function sealDmInternal(
   senderMeshHex: string,
   recipientMeshHex: string,
   createdAtSec?: number,
+  seq?: number,
 ): { envelope: DmEnvelope; convKey: Uint8Array } {
   // Normalize case at the seal boundary: the service rejects uppercase
   // hex, but the hex parser accepts it, so an uppercase recipient used to
@@ -452,6 +465,7 @@ function sealDmInternal(
     created_at: createdAtSec ?? Math.floor(Date.now() / 1000),
     tags: [['p', recipientHex]],
     content: text,
+    ...(seq !== undefined ? { seq } : {}),
   };
   const envelope: DmEnvelope = {
     ephemeralPubkeyHex: dmToHex(ephemeralPubkey),

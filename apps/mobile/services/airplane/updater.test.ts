@@ -168,10 +168,32 @@ describe('checkForUpdate', () => {
     const result = await check('unknown', fetchReturning(okResponse(releasePayload())));
     expect(result.available).toBe(false);
   });
-  test('network failure tolerated: no crash, no prompt', async () => {
+  test('network failure tolerated: no crash, no prompt, with its own code', async () => {
     const result = await check('0.1.3', fetchThrowing());
     expect(result.available).toBe(false);
-    expect(result.error).toBe('check-failed');
+    expect(result.error).toBe('check-unreachable');
+  });
+  test('timeout gets its own code, not check-failed', async () => {
+    const result = await check(
+      '0.1.3',
+      jest.fn(() => new Promise(() => {})),
+    );
+    expect(result.available).toBe(false);
+    expect(result.error).toBe('check-timeout');
+  });
+  test('a JSON SyntaxError maps to malformed-release, not check-failed', async () => {
+    const result = await check(
+      '0.1.3',
+      fetchReturning({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError('Unexpected token');
+        },
+      }),
+    );
+    expect(result.available).toBe(false);
+    expect(result.error).toBe('malformed-release');
   });
   test('non-2xx tolerated: no crash, no prompt', async () => {
     const result = await check(

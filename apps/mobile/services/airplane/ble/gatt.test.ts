@@ -92,7 +92,11 @@ class FakeCentral implements CentralAdapter {
     return this.mtu;
   }
   failReadOnce = false;
+  failReadAlways = false;
   async read(): Promise<Uint8Array> {
+    if (this.failReadAlways) {
+      throw new Error('Characteristic 9e849f21-2e3b-42d4-b3b7-4e9a0ead3116 not found');
+    }
     if (this.failReadOnce) {
       this.failReadOnce = false;
       throw new Error('Characteristic 9e849f21-2e3b-42d4-b3b7-4e9a0ead3116 not found');
@@ -919,10 +923,43 @@ describe('auto-connect bounded retry (audit P1-19)', () => {
     const lines: string[] = [];
     setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
     central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
-    await tick(50);
+    // The retry now waits a 300 ms settle before the second read, so
+    // a 50 ms tick is too short; and a retry that succeeds must leave
+    // no failed line behind, only the later peer connected line.
+    await new Promise((r) => setTimeout(r, 600));
     expect(port.peerCount).toBe(1);
-    expect(lines.some((l) => l.includes(`ident retry tag:${toHex(PEER_TAG)}`))).toBe(true);
+    expect(lines.some((l) => l.includes('peer connect failed'))).toBe(false);
     expect(lines.some((l) => l.includes('ble-1'))).toBe(false);
+    resetDiagnosticsForTests();
+    await port.close();
+  });
+
+  test('repeated sightings during an IDENT outage stay quiet after the first failure and one retry', async () => {
+    const { deps, central } = makeDeps();
+    central.failReadAlways = true;
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    // Storm cadence: the same peer sighted five times in quick
+    // succession while its GATT server is gone.
+    for (let i = 0; i < 5; i++) {
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    }
+    // Past the 2 s scheduled retry: first attempt + one retry, then
+    // the cooldown gates every later sighting. The retry itself
+    // takes ~300 ms past its 2 s timer (the IDENT settle delay),
+    // so 2.6 s would race its second read; wait past that.
+    await new Promise((r) => setTimeout(r, 3200));
+    expect(central.connectAttempts.length).toBe(2);
+    const failures = lines.filter((l) => l.includes('peer connect failed'));
+    expect(failures).toHaveLength(2);
+    expect(failures[0]).toContain('auto-connect');
+    expect(failures[1]).toContain('auto-connect retry failed');
+    expect(failures[1]).toContain('ident retry failed');
+    expect(lines.some((l) => l.includes('ident retry tag:'))).toBe(false);
     resetDiagnosticsForTests();
     await port.close();
   });

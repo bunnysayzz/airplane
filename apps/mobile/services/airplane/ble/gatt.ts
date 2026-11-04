@@ -229,6 +229,26 @@ function isProvisionalKey(key: string): boolean {
  */
 /** Single auto-connect retry delay (ms). One retry only, never a loop. */
 export const AUTO_CONNECT_RETRY_MS = 2000;
+/**
+ * Sightings-driven connect cooldown after a failed IDENT read:
+ * first IDENT failure cools the peer for 10 seconds, doubling per
+ * further IDENT failure up to 60 seconds. A sighting during
+ * cooldown starts no connect and logs nothing: the v0.1.23 storm
+ * was sightings at sub-second cadence each starting a connect
+ * against a peer whose GATT server was transiently gone, 35 ident
+ * retry lines in about a minute, every one an IDENT not-found.
+ * The gate arms ONLY on IDENT failures (the observed storm shape):
+ * other auto-connect failures (hello-write, tag mismatch, connect
+ * refused) keep immediate sighting retries, preserving the
+ * established bleId-reuse contract that a fixed peer reconnects
+ * on its next sighting. The single scheduled 2 second retry stays
+ * exempt as the one prompt retry; after it is spent, sightings
+ * stay quiet until the cooldown expires or a fresh episode starts.
+ */
+export const AUTO_CONNECT_COOLDOWN_BASE_MS = 10_000;
+export const AUTO_CONNECT_COOLDOWN_MAX_MS = 60_000;
+/** Settle delay before the IDENT re-read after fresh discovery. */
+export const IDENT_RETRY_SETTLE_MS = 300;
 
 /** Discovered peers older than this are stale (pruned on discover and before connect). */
 export const DISCOVERED_STALE_MS = 60_000;
@@ -302,6 +322,10 @@ export class GattBlePort implements TransportPort {
   private readonly pendingConnects = new Set<string>();
   /** One scheduled auto-connect retry per bleId (single retry, about 2s). */
   private readonly autoConnectRetries = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Sighting-connect cooldown per bleId (epoch ms until quiet ends). */
+  private readonly connectCooldownUntil = new Map<string, number>();
+  /** Consecutive auto-connect failures per bleId (drives the backoff). */
+  private readonly connectCooldownFailures = new Map<string, number>();
   private peripheral: PeripheralAdapter | null = null;
   private readonly peripheralUnsubs: (() => void)[] = [];
   private centralUnsubs: (() => void)[] = [];
@@ -598,7 +622,9 @@ export class GattBlePort implements TransportPort {
         }
       }
       if (stalest === null) break;
+      const evicted = this.discovered.get(stalest);
       this.discovered.delete(stalest);
+      if (evicted) this.clearConnectCooldown(evicted.bleId);
     }
     recordPeerSeen(key, rssi, toHex(tag));
     if (!known) {
@@ -612,6 +638,12 @@ export class GattBlePort implements TransportPort {
     }
     if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) return;
     if (this.bleIndex.has(id) || this.pendingConnects.has(id)) return; // already connecting/connected
+    // Cooldown gate: a peer that just failed stays quiet on further
+    // sightings until the backoff expires. No line here: the failure
+    // that started the cooldown already logged one, and a line per
+    // gated sighting would be the storm all over again.
+    const cooledUntil = this.connectCooldownUntil.get(id);
+    if (cooledUntil !== undefined && Date.now() < cooledUntil) return;
     // Both sides initiate: the old smaller-tag tie-break left the
     // larger-tag side with no connection and no way to get one, because
     // the inbound link it waited for never registers (peripheral write
@@ -622,23 +654,53 @@ export class GattBlePort implements TransportPort {
     void this.connectCentral(id, tag).catch((err) => {
       // Auto-connect failures used to be swallowed with an empty catch
       // and, with allowDuplicates false, the peer was never retried for
-      // the session. Record a stage-tagged failure and schedule exactly
-      // one bounded retry. The tag, never the BLE address, identifies
-      // the peer in the line: a raw address in the log file is a
-      // privacy leak (P0-2), and the tag is what every other peer line
-      // already uses.
+      // the session. Record a stage-tagged failure, start the
+      // sighting cooldown, and schedule exactly one bounded retry.
+      // The tag, never the BLE address, identifies the peer in the
+      // line: a raw address in the log file is a privacy leak (P0-2),
+      // and the tag is what every other peer line already uses.
       recordConnectFailure(
         `auto-connect tag:${toHex(tag)}: ${err instanceof Error ? err.message : String(err)}`,
       );
+      this.noteIdentFailure(id, err);
       this.scheduleAutoConnectRetry(id, tag);
     });
+  }
+
+  /**
+   * Record one IDENT failure for a bleId and start (or extend) its
+   * sighting cooldown: base delay doubling per consecutive IDENT
+   * failure, capped. Non-IDENT failures do not arm the gate (see the
+   * constant comment above). A successful connect or a disconnect
+   * clears the counters (see registerConn and dropConn), so the
+   * backoff spans one disconnect episode, not the whole session.
+   */
+  private noteIdentFailure(bleId: string, err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/ident retry failed/i.test(message)) return;
+    const failures = (this.connectCooldownFailures.get(bleId) ?? 0) + 1;
+    this.connectCooldownFailures.set(bleId, failures);
+    const delay = Math.min(
+      AUTO_CONNECT_COOLDOWN_BASE_MS * 2 ** (failures - 1),
+      AUTO_CONNECT_COOLDOWN_MAX_MS,
+    );
+    this.connectCooldownUntil.set(bleId, Date.now() + delay);
+  }
+
+  /** Clear the sighting cooldown for a bleId (fresh episode). */
+  private clearConnectCooldown(bleId: string): void {
+    this.connectCooldownUntil.delete(bleId);
+    this.connectCooldownFailures.delete(bleId);
   }
 
   /**
    * Schedule the single bounded auto-connect retry for a bleId (about 2s
    * out). No retry is scheduled when one is already pending or the peer
    * limit is hit; the timer is cancelled on disconnect (see dropConn) and
-   * on close, and the retry never schedules a further retry.
+   * on close, and the retry never schedules a further retry. The retry
+   * is exempt from the sighting cooldown (it is the one prompt retry),
+   * but its own failure extends the cooldown, so later sightings stay
+   * quiet after the retry is spent.
    */
   private scheduleAutoConnectRetry(bleId: string, tag: Uint8Array): void {
     if (this.autoConnectRetries.has(bleId)) return;
@@ -654,6 +716,7 @@ export class GattBlePort implements TransportPort {
         recordConnectFailure(
           `auto-connect retry failed tag:${toHex(tag)}: ${err instanceof Error ? err.message : String(err)}`,
         );
+        this.noteIdentFailure(bleId, err);
       });
     }, AUTO_CONNECT_RETRY_MS);
     this.autoConnectRetries.set(bleId, timer);
@@ -672,7 +735,10 @@ export class GattBlePort implements TransportPort {
   /** Drop discovered entries not seen within the stale window. */
   private pruneDiscovered(nowMs: number = Date.now()): void {
     for (const [key, entry] of this.discovered) {
-      if (nowMs - entry.lastSeenMs > DISCOVERED_STALE_MS) this.discovered.delete(key);
+      if (nowMs - entry.lastSeenMs > DISCOVERED_STALE_MS) {
+        this.discovered.delete(key);
+        this.clearConnectCooldown(entry.bleId);
+      }
     }
   }
 
@@ -728,18 +794,30 @@ export class GattBlePort implements TransportPort {
       // IDENT read race: right after service discovery, some Android
       // stacks report the characteristic as not found even though the
       // service is there, and the peer then connects fine moments
-      // later. On a not-found error only, re-run discovery once and
-      // read once more before giving up, and log the retry so the
-      // next log shows whether the retry or the failure won.
+      // later. On a not-found error only, re-run discovery, wait a
+      // brief settle so the peer GATT table is actually ready, and
+      // read once more before giving up. No line is logged here: the
+      // caller logs one auto-connect failure line per attempt, and a
+      // retry that then succeeds must leave only the later peer
+      // connected line, not a stale failed line (the v0.1.23 code
+      // logged the retry as failed before the second read ran).
+      // When the second read also fails, the thrown message carries
+      // an ident retry failed marker, so the caller's single failure
+      // line still shows the retry happened and lost.
       let identRaw: Uint8Array;
       try {
         identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         if (!/not found/i.test(message)) throw error;
-        recordConnectFailure(`ident retry tag:${toHex(tag)}`);
         await withBleTimeout(central.retrieveServices(bleId), BLE_TIMEOUT_MS.retrieveServices, 'retrieveServices');
-        identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
+        await new Promise((resolve) => setTimeout(resolve, IDENT_RETRY_SETTLE_MS));
+        try {
+          identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
+        } catch (retryError: unknown) {
+          const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+          throw new Error(`ble: ident retry failed: ${retryMessage}`);
+        }
       }
       const peerId = new TextDecoder().decode(identRaw);
       if (!HEX64_RE.test(peerId)) throw new Error('ble: peer IDENT malformed');
@@ -959,6 +1037,9 @@ export class GattBlePort implements TransportPort {
     if (existing && existing !== conn) this.dropConn(key);
     this.conns.set(key, conn);
     this.bleIndex.set(conn.bleId, key);
+    // A connected peer starts a fresh episode: past failures no
+    // longer gate its next sightings after a later disconnect.
+    this.clearConnectCooldown(conn.bleId);
   }
 
   private rekeyConn(conn: PeerConn, peerId: string): void {
@@ -982,6 +1063,9 @@ export class GattBlePort implements TransportPort {
     const conn = this.conns.get(key);
     if (!conn) return;
     this.cancelAutoConnectRetry(conn.bleId);
+    // A disconnect starts a fresh episode: the next sightings after
+    // it are not gated by failures from the previous episode.
+    this.clearConnectCooldown(conn.bleId);
     recordPeerDisconnected(key);
     this.conns.delete(key);
     if (this.bleIndex.get(conn.bleId) === key) this.bleIndex.delete(conn.bleId);
