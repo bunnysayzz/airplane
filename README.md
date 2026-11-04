@@ -875,6 +875,18 @@ Design references and prior art, all verified open:
 - [Reticulum](https://reticulum.network): protocol ideas for resilient,
   infrastructure-independent networking
 
+## Testing log inbox (temporary)
+
+TESTING ONLY, REMOVE AFTER TESTING. During the testing phase the
+Diagnostics screen has a "Send to test inbox" button next to "Share
+log". One tap shows a confirm dialog with the log size and a
+redacted-only note, then uploads the same redacted diagnostics log
+file to the test inbox endpoint, which stores one object per upload
+in an unlisted store and returns an id shown as "Sent, id <id>".
+Payload is the log text plus app version and timestamp only, and no
+secret lives in the app. When testing ends, delete the button, the
+`logInbox` service and its tests, the endpoint, and the store.
+
 UI adapted from MIT-licensed open source (see [NOTICE](NOTICE) for
 details):
 

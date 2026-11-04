@@ -457,6 +457,11 @@ export const en = {
     diagnosticsRefresh: 'Refresh',
     diagnosticsRetryBle: 'Retry Bluetooth',
     diagnosticsShareLog: 'Share diagnostics log',
+    diagnosticsSendToInbox: 'Send to test inbox',
+    diagnosticsSendToInboxConfirm:
+      'This sends {{size}} of redacted diagnostics log to the test inbox. TESTING ONLY. Nothing else leaves this phone.',
+    diagnosticsSendToInboxSent: 'Sent, id {{id}}',
+    diagnosticsSendToInboxFailed: 'Test inbox upload failed. Use Share log instead.',
     diagnosticsLogFile: 'Log file: {{count}} lines',
     diagnosticsLogLoaded: 'Loaded from file: {{count}} lines',
     diagnosticsLogWrite: 'Last write: {{status}}',
