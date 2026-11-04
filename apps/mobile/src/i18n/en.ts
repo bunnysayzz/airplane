@@ -427,10 +427,19 @@ export const en = {
     updateAvailable: 'Update {{version}} available',
     updateTitle: 'Update available',
     updateMessage:
-      'Airplane {{version}} is available. Downloading opens the new APK. Nothing installs automatically, and you can install it when you are ready.',
+      'Airplane {{version}} is available. Downloading verifies the update, then the system installer opens. Nothing installs automatically, and you can install it when you are ready.',
     updateDownload: 'Download',
     updateLater: 'Later',
     updateOpenFailed: 'Could not open the download',
+    updateDownloading: 'Downloading update…',
+    updateDownloadingPercent: 'Downloading update… {{percent}}%',
+    updateDownloadFailed: 'Could not download the update',
+    updateVerifyFailed: 'Update verification failed',
+    updatePermissionTitle: 'Allow app installs',
+    updatePermissionMessage:
+      'Airplane needs permission to install updates. Allow installs from Airplane in system settings, then return here to continue.',
+    updatePermissionOpenSettings: 'Open settings',
+    updatePermissionDenied: 'App install permission is still off',
     privacy: 'Privacy Policy',
     privacyHint: 'Opens the in-app privacy policy',
     // The in-app privacy page reuses onboarding card 2; full policy is PRIVACY.md in the repo

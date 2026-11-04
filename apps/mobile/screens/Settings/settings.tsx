@@ -46,17 +46,27 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   >('main');
   const { t } = useI18n();
   const coatName = t(`coats.${getCoat(coat).key}`);
-  // T14: manual update check. Android only — a sideloaded iOS app cannot
+  // T14: manual update check. Android only - a sideloaded iOS app cannot
   // install itself, so no iOS updater is offered (see updateCheck.ts).
   const [updateStatus, setUpdateStatus] = useState<
-    'idle' | 'checking' | 'uptodate' | 'available' | 'failed'
+    'idle' | 'checking' | 'uptodate' | 'available' | 'failed' | 'downloading'
   >('idle');
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
 
   const onCheckForUpdates = () => {
-    if (updateStatus === 'checking') return;
+    if (updateStatus === 'checking' || updateStatus === 'downloading') return;
     setUpdateStatus('checking');
-    checkForUpdateFromSettings()
+    checkForUpdateFromSettings({
+      onDownloadProgress: (fraction) => {
+        setUpdateStatus('downloading');
+        setDownloadProgress(fraction);
+      },
+      onDownloadEnd: (status) => {
+        setDownloadProgress(null);
+        setUpdateStatus(status === 'failed' ? 'failed' : 'available');
+      },
+    })
       .then((result) => {
         if (result.available && result.update) {
           // The prompt itself is shown by the check; the row just remembers it.
@@ -78,7 +88,11 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const updateRowText =
     updateStatus === 'checking'
       ? t('settings.updateChecking')
-      : updateStatus === 'available' && updateVersion
+      : updateStatus === 'downloading'
+        ? downloadProgress !== null
+          ? t('settings.updateDownloadingPercent', { percent: Math.round(downloadProgress * 100) })
+          : t('settings.updateDownloading')
+        : updateStatus === 'available' && updateVersion
         ? t('settings.updateAvailable', { version: updateVersion })
         : updateStatus === 'uptodate'
           ? t('settings.updateUpToDate')

@@ -12,3 +12,8 @@
 -keep class com.facebook.react.turbomodule.** { *; }
 
 # Add any project specific keep options here:
+
+# T14 in-app updater: the installer module is reached by reflection from JS,
+# so a future minify-enabled build must not strip or rename it.
+-keep class com.bunnysayzz.airplane.AirplaneInstallerModule { *; }
+-keep class com.bunnysayzz.airplane.AirplaneInstallerPackage { *; }
