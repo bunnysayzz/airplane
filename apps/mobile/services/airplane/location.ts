@@ -81,6 +81,15 @@ export const REVALIDATE_AFTER_MS = 3 * 60_000;
 // The OS last known fix is a cached value, not a provider activation, so
 // it answers fast or not at all; past this wait it is treated as absent.
 export const LAST_KNOWN_TIMEOUT_MS = 5_000;
+// Bounded second chance for a live fix (logging coverage fix): when the
+// one-shot fix times out, one watch attempt runs for at most this long
+// before the last-known fallback. The watch path is a different native
+// call (location updates listener) from the one-shot call that hangs on
+// some Android builds, so it can deliver where the one-shot never
+// resolves. Same Balanced accuracy, same fail-loud contract: a watch
+// that also fails falls through to the marked last-known fallback, and
+// permission or services failures never reach this path at all.
+export const WATCH_TIMEOUT_MS = 10_000;
 
 /** Where a resolved cell came from. 'fresh' is a current fix (a live
  * provider fix, or an OS last known fix within the cache window, which
@@ -305,15 +314,83 @@ export class ExpoLocationProvider implements LocationProvider {
   }
 
   /**
+   * One bounded watch attempt for a live fix, used only after the
+   * one-shot fix times out or is unavailable. The watch path is a
+   * different native call (location updates listener) from the
+   * one-shot call that hangs on some Android builds, so it can deliver
+   * where the one-shot never resolves. Returns null when the watch
+   * delivers nothing in time, when it delivers unusable coordinates,
+   * or when the API is absent; it never throws, so a failed watch
+   * always falls through to the last-known fallback below. The
+   * subscription is removed on every path, including a late arrival
+   * after the timeout, so a timed-out watch cannot leak a listener.
+   */
+  private async watchFix(
+    Location: typeof ExpoLocationTypes,
+  ): Promise<{ latitude: number; longitude: number } | null> {
+    if (typeof Location.watchPositionAsync !== 'function') return null;
+    // Holder object, not a plain variable: TS narrows a captured
+    // variable to its initial null after the await, which would make
+    // the removal below untypable. A property read is not narrowed.
+    const holder: { current: { remove: () => void } | null } = { current: null };
+    let finished = false;
+    try {
+      return await withTimeout(
+        new Promise<{ latitude: number; longitude: number }>((resolve, reject) => {
+          void Location.watchPositionAsync(
+            { accuracy: Location.LocationAccuracy.Balanced },
+            (position) => {
+              const { latitude, longitude } = position.coords;
+              if (this.validCoords(latitude, longitude)) {
+                resolve({ latitude, longitude });
+              } else {
+                reject(new Error('watch invalid coords'));
+              }
+            },
+          )
+            .then((s) => {
+              if (finished) {
+                try {
+                  s.remove();
+                } catch {
+                  // Already timed out: removal is best-effort.
+                }
+              } else {
+                holder.current = s;
+              }
+            })
+            .catch(reject);
+        }),
+        WATCH_TIMEOUT_MS,
+        () => new Error('watch timeout'),
+      );
+    } catch {
+      return null;
+    } finally {
+      finished = true;
+      if (holder.current !== null) {
+        try {
+          holder.current.remove();
+        } catch {
+          // Removal is best-effort.
+        }
+        holder.current = null;
+      }
+    }
+  }
+
+  /**
    * The fresh path: a current fix, or the last resort fallback. Order
    * matters. First the OS last known fix when it is within the cache
    * window: that is a current fix for a 4.9 km cell, and reading it
    * avoids the provider call that hangs on some Android builds. Then
    * the live provider fix. Only when that race fails with timeout or
-   * unavailable does the fallback run: the OS last known fix at any
-   * age, else the app's own expired cache cell. Permission and
-   * services failures never reach this fallback (they throw earlier),
-   * and a fallback cell is never written back into the fresh cache.
+   * unavailable does the second chance run: one bounded watch attempt,
+   * and only when that also fails does the fallback run: the OS last
+   * known fix at any age, else the app's own expired cache cell.
+   * Permission and services failures never reach this fallback (they
+   * throw earlier), and a fallback cell is never written back into
+   * the fresh cache.
    */
   private async freshLocated(
     Location: typeof ExpoLocationTypes,
@@ -341,6 +418,16 @@ export class ExpoLocationProvider implements LocationProvider {
       if (mapped.code !== 'timeout' && mapped.code !== 'unavailable') {
         throw mapped;
       }
+      recordLocationEvent('watch started');
+      const watched = await this.watchFix(Location);
+      if (watched) {
+        const cell = encodeGeohash(watched.latitude, watched.longitude, 5);
+        this.cached = { cell, atMs: this.now() };
+        this.noteFreshPathOutcome('fresh');
+        recordLocationEvent('watch fresh-ok');
+        return { cell, source: 'fresh' };
+      }
+      recordLocationEvent('watch failed');
       const stale = await this.readLastKnown(Location);
       if (stale) {
         recordLocationEvent('fresh last-known');

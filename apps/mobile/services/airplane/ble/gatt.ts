@@ -623,8 +623,13 @@ export class GattBlePort implements TransportPort {
       // Auto-connect failures used to be swallowed with an empty catch
       // and, with allowDuplicates false, the peer was never retried for
       // the session. Record a stage-tagged failure and schedule exactly
-      // one bounded retry; the retry itself stays silent on failure.
-      recordConnectFailure(`auto-connect ${id}: ${err instanceof Error ? err.message : String(err)}`);
+      // one bounded retry. The tag, never the BLE address, identifies
+      // the peer in the line: a raw address in the log file is a
+      // privacy leak (P0-2), and the tag is what every other peer line
+      // already uses.
+      recordConnectFailure(
+        `auto-connect tag:${toHex(tag)}: ${err instanceof Error ? err.message : String(err)}`,
+      );
       this.scheduleAutoConnectRetry(id, tag);
     });
   }
@@ -642,8 +647,13 @@ export class GattBlePort implements TransportPort {
       this.autoConnectRetries.delete(bleId);
       if (this.bleIndex.has(bleId) || this.pendingConnects.has(bleId)) return;
       if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) return;
-      void this.connectCentral(bleId, tag).catch(() => {
-        // Single retry spent; a further failure stays silent.
+      void this.connectCentral(bleId, tag).catch((err) => {
+        // Single retry spent. Its outcome is logged now: a spent retry
+        // used to stay silent, so a peer that never connected left
+        // only the first failure line and no trace of the retry.
+        recordConnectFailure(
+          `auto-connect retry failed tag:${toHex(tag)}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       });
     }, AUTO_CONNECT_RETRY_MS);
     this.autoConnectRetries.set(bleId, timer);
@@ -715,7 +725,22 @@ export class GattBlePort implements TransportPort {
       } catch {
         // keep default 23
       }
-      const identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
+      // IDENT read race: right after service discovery, some Android
+      // stacks report the characteristic as not found even though the
+      // service is there, and the peer then connects fine moments
+      // later. On a not-found error only, re-run discovery once and
+      // read once more before giving up, and log the retry so the
+      // next log shows whether the retry or the failure won.
+      let identRaw: Uint8Array;
+      try {
+        identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/not found/i.test(message)) throw error;
+        recordConnectFailure(`ident retry tag:${toHex(tag)}`);
+        await withBleTimeout(central.retrieveServices(bleId), BLE_TIMEOUT_MS.retrieveServices, 'retrieveServices');
+        identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
+      }
       const peerId = new TextDecoder().decode(identRaw);
       if (!HEX64_RE.test(peerId)) throw new Error('ble: peer IDENT malformed');
       // Bind the claimed identity to the discovery hint: the IDENT pubkey

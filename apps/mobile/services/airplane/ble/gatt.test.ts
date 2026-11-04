@@ -91,7 +91,12 @@ class FakeCentral implements CentralAdapter {
   async requestMtu(): Promise<number> {
     return this.mtu;
   }
+  failReadOnce = false;
   async read(): Promise<Uint8Array> {
+    if (this.failReadOnce) {
+      this.failReadOnce = false;
+      throw new Error('Characteristic 9e849f21-2e3b-42d4-b3b7-4e9a0ead3116 not found');
+    }
     return ascii(this.identHex);
   }
   async write(id: string, _svc: string, char: string, chunk: Uint8Array): Promise<void> {
@@ -874,7 +879,10 @@ describe('auto-connect bounded retry (audit P1-19)', () => {
     setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
     central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
     await tick(50);
-    expect(lines.some((l) => l.includes('connect failed auto-connect ble-1'))).toBe(true);
+    expect(
+      lines.some((l) => l.includes(`connect failed auto-connect tag:${toHex(PEER_TAG)}`)),
+    ).toBe(true);
+    expect(lines.some((l) => l.includes('ble-1'))).toBe(false);
     expect(port.peerCount).toBe(0);
     // The single retry fires after about 2s and fails again (still refused).
     await new Promise((r) => setTimeout(r, 2200));
@@ -898,6 +906,24 @@ describe('auto-connect bounded retry (audit P1-19)', () => {
     central.failConnect.clear();
     await new Promise((r) => setTimeout(r, 2200));
     expect(port.peerCount).toBe(1);
+    await port.close();
+  });
+
+  test('an IDENT not-found read retries discovery once and connects', async () => {
+    const { deps, central } = makeDeps();
+    central.failReadOnce = true;
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(1);
+    expect(lines.some((l) => l.includes(`ident retry tag:${toHex(PEER_TAG)}`))).toBe(true);
+    expect(lines.some((l) => l.includes('ble-1'))).toBe(false);
+    resetDiagnosticsForTests();
     await port.close();
   });
 });

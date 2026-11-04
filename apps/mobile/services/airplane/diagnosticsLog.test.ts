@@ -51,9 +51,11 @@ describe('diagnostics log line format', () => {
   });
 
   test('rotation counts UTF-8 bytes, not UTF-16 code units', () => {
-    // 1.5M e-acute chars are 1.5M code units but 3M UTF-8 bytes, so
-    // the 2MB byte cap drops the line; a code-unit count would keep it.
-    expect(rotateDiagnosticsLogLines(['é'.repeat(1_500_000)])).toEqual([]);
+    // Just over half the byte cap in e-acute chars is just over the
+    // cap in UTF-8 bytes but well under it in code units, so the byte
+    // cap drops the line; a code-unit count would keep it.
+    const chars = Math.floor(MAX_DIAGNOSTICS_LOG_BYTES / 2) + 1;
+    expect(rotateDiagnosticsLogLines(['é'.repeat(chars)])).toEqual([]);
   });
 
   test('rotation keeps the newest lines under both caps', () => {

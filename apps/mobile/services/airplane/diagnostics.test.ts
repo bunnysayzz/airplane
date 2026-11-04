@@ -22,9 +22,13 @@ import {
   recordScanSightings,
   recordScanStarted,
   recordScanStopped,
+  recordConnectFailure,
+  recordInboxEvent,
+  recordServiceEvent,
   recordTransportFailure,
   recordUiEvent,
   recordUiNavigation,
+  recordUpdateEvent,
   resetDiagnosticsForTests,
   setDiagnosticsAdapterState,
   setDiagnosticsLogSink,
@@ -399,6 +403,93 @@ describe('ui event logging', () => {
       recordUiNavigation('back', 'feed');
       recordUiNavigation('forward', '/post/abc123def456');
       expect(lines).toEqual(['ui nav forward post', 'ui nav back feed', 'ui nav forward unknown-screen']);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+});
+
+describe('updater, inbox, and service event lines', () => {
+  beforeEach(() => {
+    resetDiagnosticsForTests();
+  });
+
+  test('updater check, download, and install outcomes each log one line', () => {
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => {
+      lines.push(`${kind} ${detail}`);
+    });
+    try {
+      recordUpdateEvent('check up-to-date 0.1.22');
+      recordUpdateEvent('check available 0.1.23');
+      recordUpdateEvent('check failed http-403');
+      recordUpdateEvent('download started 0.1.23');
+      recordUpdateEvent('download progress 50');
+      recordUpdateEvent('verify ok 0.1.23');
+      recordUpdateEvent('install intent fired 0.1.23');
+      expect(lines).toEqual([
+        'update check up-to-date 0.1.22',
+        'update check available 0.1.23',
+        'update check failed http-403',
+        'update download started 0.1.23',
+        'update download progress 50',
+        'update verify ok 0.1.23',
+        'update install intent fired 0.1.23',
+      ]);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
+  test('inbox upload outcomes log without any id', () => {
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => {
+      lines.push(`${kind} ${detail}`);
+    });
+    try {
+      recordInboxEvent('upload started');
+      recordInboxEvent('upload truncated original=3000000');
+      recordInboxEvent('upload sent');
+      recordInboxEvent('upload failed upload failed: 413');
+      expect(lines).toEqual([
+        'inbox upload started',
+        'inbox upload truncated original=3000000',
+        'inbox upload sent',
+        'inbox upload failed upload failed: 413',
+      ]);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
+  test('connect failure codes never carry a raw BLE address', () => {
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => {
+      lines.push(`${kind} ${detail}`);
+    });
+    try {
+      recordConnectFailure('auto-connect 63:B2:5A:AC:6F:81: ble: connect failed: Characteristic not found');
+      expect(lines).toEqual([
+        'peer connect failed auto-connect mac-peer: ble: connect failed: Characteristic not found',
+      ]);
+      expect(lines.join('\n')).not.toContain('63:B2:5A:AC:6F:81');
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
+  test('service failures log instead of vanishing', () => {
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => {
+      lines.push(`${kind} ${detail}`);
+    });
+    try {
+      recordServiceEvent('dm start failed relay');
+      recordServiceEvent('sync pass failed');
+      expect(lines).toEqual([
+        'service dm start failed relay',
+        'service sync pass failed',
+      ]);
     } finally {
       setDiagnosticsLogSink(null);
     }

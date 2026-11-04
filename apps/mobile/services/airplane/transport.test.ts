@@ -550,10 +550,12 @@ describe('transport manager', () => {
     const spy = jest.spyOn(store, 'saveEvent').mockRejectedValue(new Error('disk full'));
     const event = makeSignedEvent();
     // ingress is void-called by the real wiring; a rejection here would
-    // previously escape unhandled. It must resolve cleanly now.
+    // previously escape unhandled. It must resolve cleanly now. The
+    // timer advance drains the bounded save retry loop.
     hybrid!.ingress(event, 'ble');
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await jest.advanceTimersByTimeAsync(1000);
     expect(await store.getEvent('07'.repeat(32))).toBeNull();
+    expect(spy).toHaveBeenCalledTimes(3);
     spy.mockRestore();
     // The handler survives the failure: a later post still stores.
     const later = makeSignedEvent();
@@ -561,6 +563,53 @@ describe('transport manager', () => {
     hybrid!.ingress(later, 'ble');
     for (let i = 0; i < 10; i++) await Promise.resolve();
     expect(await store.getEvent('09'.repeat(32))).not.toBeNull();
+  });
+
+  test('inbound post with transient storage failure stores after retry', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    resetDiagnosticsForTests();
+    const store = getStore();
+    const spy = jest
+      .spyOn(store, 'saveEvent')
+      .mockRejectedValueOnce(new Error('database is locked'))
+      .mockRejectedValueOnce(new Error('database is locked'));
+    const event = makeSignedEvent();
+    hybrid!.ingress(event, 'ble');
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(await store.getEvent('07'.repeat(32))).not.toBeNull();
+    expect(spy).toHaveBeenCalledTimes(3);
+    const messages = getDiagnosticsSnapshot().messages;
+    expect(
+      messages.some((m) =>
+        m.attempts.some((a) => (a.detail ?? '').includes('store save failed')),
+      ),
+    ).toBe(false);
+    spy.mockRestore();
+  });
+
+  test('inbound post with permanent storage failure logs the reason code', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    resetDiagnosticsForTests();
+    const store = getStore();
+    const spy = jest.spyOn(store, 'saveEvent').mockRejectedValue(new Error('database is locked'));
+    const event = makeSignedEvent();
+    hybrid!.ingress(event, 'ble');
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(await store.getEvent('07'.repeat(32))).toBeNull();
+    expect(spy).toHaveBeenCalledTimes(3);
+    const messages = getDiagnosticsSnapshot().messages;
+    expect(
+      messages.some(
+        (m) =>
+          m.finalStatus === 'receive failed' &&
+          m.attempts.some((a) => a.detail === 'store save failed locked'),
+      ),
+    ).toBe(true);
+    spy.mockRestore();
   });
 
   test('inbound receipts count views once via the counting path', async () => {

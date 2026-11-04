@@ -470,6 +470,7 @@ export const en = {
     diagnosticsLogWriteFailed: 'failed',
     diagnosticsLogWritePending: 'none yet',
     diagnosticsLogWriteError: 'Write error',
+    diagnosticsLogStartError: 'Log start error',
     diagnosticsLogLoadFailed: 'File could not be read at launch, so the count starts from this launch only.',
     diagnosticsLogPath: 'File: {{path}}',
     diagnosticsLogLoading: 'Log file: loading...',

@@ -32,6 +32,7 @@ import {
   dmToHex,
 } from '@airplane/transport';
 import { getDeviceKeypair, onIdentityChange } from './identity';
+import { recordServiceEvent } from './diagnostics';
 import { loadRelayUrls } from '../../src/lib/relays';
 import { SqliteDmStore } from './dmSqlite';
 import { createSqliteDatabasePort } from './sqlite';
@@ -169,7 +170,22 @@ export async function sendDm(peerHex: string, text: string): Promise<void> {
  * break launch, and the next Messages open retries via getDmService.
  */
 export async function startDmServiceAtLaunch(): Promise<void> {
-  await getDmService();
+  try {
+    await getDmService();
+  } catch (error: unknown) {
+    // Callers fire-and-forget this (see _layout), so a launch failure
+    // used to vanish entirely; the next Messages open retries, but the
+    // failure itself left no line. The reason is a short code word, not
+    // the raw error, so nothing sensitive can ride along.
+    const message = error instanceof Error ? error.message : String(error);
+    const code = /key|identity/i.test(message)
+      ? 'identity'
+      : /relay|network|socket/i.test(message)
+        ? 'relay'
+        : 'failed';
+    recordServiceEvent(`dm start failed ${code}`);
+    throw error;
+  }
 }
 
 /**

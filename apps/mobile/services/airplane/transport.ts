@@ -46,10 +46,47 @@ import {
   recordDedupDrop,
   recordMessage,
   recordScanStopped,
+  recordServiceEvent,
   recordTransportFailure,
   setDiagnosticsAdapterState,
   type DiagnosticsMessageAttempt,
 } from './diagnostics';
+
+/**
+ * Map a store failure onto a short reason code for the Diagnostics line.
+ * The raw error is never logged: it can carry SQL text, and the line
+ * needs a stable outcome word, not a dump. Transient lock contention
+ * (backfill bursts writing at once) is the retryable class; anything
+ * else still retries, because a second attempt costs milliseconds and
+ * relay replay remains the backstop when every attempt fails.
+ */
+function storeFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/locked|busy/i.test(message)) return 'locked';
+  if (/constraint|unique/i.test(message)) return 'constraint';
+  return 'failed';
+}
+
+const STORE_SAVE_ATTEMPTS = 3;
+const STORE_SAVE_DELAYS_MS = [100, 300];
+
+/** Run one store save with bounded retries. Never throws. */
+async function saveWithRetry<T>(
+  save: () => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; code: string }> {
+  let lastCode = 'failed';
+  for (let attempt = 0; attempt < STORE_SAVE_ATTEMPTS; attempt += 1) {
+    try {
+      return { ok: true, value: await save() };
+    } catch (error: unknown) {
+      lastCode = storeFailureCode(error);
+      if (attempt < STORE_SAVE_DELAYS_MS.length) {
+        await new Promise((resolve) => setTimeout(resolve, STORE_SAVE_DELAYS_MS[attempt]));
+      }
+    }
+  }
+  return { ok: false, code: lastCode };
+}
 
 /**
  * NetInfo is a native module. If it fails to load (not linked, Expo Go,
@@ -303,10 +340,27 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
   if (event.kind === EVENT_KIND_RESHARE) {
     const result = recordReshareEvent(event);
     if (result === 'pending') void pullOriginalForReshare(event);
-    try {
-      await getStore().saveReshareEvent(event);
-    } catch {
-      // The count already applied; rehydration reconciles later.
+    const saved = await saveWithRetry(() => getStore().saveReshareEvent(event));
+    if (!saved.ok && (source === 'nostr' || source === 'ble')) {
+      // The count already applied; rehydration reconciles later. The
+      // failure is logged with its reason instead of swallowed, so a
+      // reshare persistence problem is visible in the next log. Local
+      // publish echoes are not logged as inbound failures.
+      recordMessage({
+        id: toHex(event.id),
+        sequence: null,
+        sizeBytes: encodeEvent(event).length,
+        direction: 'inbound',
+        attempts: [
+          {
+            transport: source === 'nostr' ? 'relay' : 'ble',
+            atMs: Date.now(),
+            outcome: 'failed',
+            detail: `store save failed reshare ${saved.code}`,
+          },
+        ],
+        finalStatus: 'receive failed',
+      });
     }
     scheduleFeedNotify();
     return;
@@ -337,16 +391,31 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
   // actually moves the feed. Previously inbound receipts were stored
   // but never counted, so relay views changed nothing.
   if (event.kind === EVENT_KIND_RECEIPT) {
-    let counted = false;
-    try {
-      counted = await getStore().saveReceipt(event);
-    } catch {
+    const receipt = await saveWithRetry(() => getStore().saveReceipt(event));
+    if (!receipt.ok) {
       addBreadcrumb('transport: inbound receipt store failed', {
         id: toHex(event.id).slice(0, 16),
       });
+      if (source === 'nostr' || source === 'ble') {
+        recordMessage({
+          id: toHex(event.id),
+          sequence: null,
+          sizeBytes: encodeEvent(event).length,
+          direction: 'inbound',
+          attempts: [
+            {
+              transport: source === 'nostr' ? 'relay' : 'ble',
+              atMs: Date.now(),
+              outcome: 'failed',
+              detail: `store save failed receipt ${receipt.code}`,
+            },
+          ],
+          finalStatus: 'receive failed',
+        });
+      }
       return;
     }
-    if (counted) notifyFeedListeners();
+    if (receipt.value) notifyFeedListeners();
     return;
   }
   // Store the event (deduped by HybridTransport already).
@@ -354,29 +423,34 @@ async function handleIncoming(event: SignedEvent, source: string): Promise<void>
   // Diagnostics and the feed is NOT notified: an unhandled rejection
   // here used to drop the event while Hybrid already marked it seen.
   // A storage failure must not escape as an unhandled rejection (the
-  // caller uses void handleIncoming) and must not be silent: record a
-  // Diagnostics message and a stage-tagged breadcrumb, and drop this
-  // pass only. The event is not queued durably here (no inbound queue
-  // exists in the store schema); it re-arrives via relay replay or BLE
-  // redelivery, and the next sync pass re-checks it.
-  try {
-    await store.saveEvent(event);
-  } catch {
-    recordMessage({
-      id: toHex(event.id),
-      sequence: null,
-      sizeBytes: encodeEvent(event).length,
-      direction: 'inbound',
-      attempts: [
-        {
-          transport: source === 'nostr' ? 'relay' : 'ble',
-          atMs: Date.now(),
-          outcome: 'failed',
-          detail: 'store save failed',
-        },
-      ],
-      finalStatus: 'receive failed',
-    });
+  // caller uses void handleIncoming) and must not be silent: the save
+  // retries a bounded number of times first (backfill bursts contend
+  // for the store), and only a final failure records a Diagnostics
+  // message with its reason code plus a stage-tagged breadcrumb, and
+  // drops this pass only. The event is not queued durably here (no
+  // inbound queue exists in the store schema); it re-arrives via relay
+  // replay or BLE redelivery, and the next sync pass re-checks it.
+  const saved = await saveWithRetry(() => store.saveEvent(event));
+  if (!saved.ok) {
+    // Local publish echoes are not logged as inbound failures; the
+    // breadcrumb below still records them.
+    if (source === 'nostr' || source === 'ble') {
+      recordMessage({
+        id: toHex(event.id),
+        sequence: null,
+        sizeBytes: encodeEvent(event).length,
+        direction: 'inbound',
+        attempts: [
+          {
+            transport: source === 'nostr' ? 'relay' : 'ble',
+            atMs: Date.now(),
+            outcome: 'failed',
+            detail: `store save failed ${saved.code}`,
+          },
+        ],
+        finalStatus: 'receive failed',
+      });
+    }
     addBreadcrumb('transport: inbound store failed', {
       id: toHex(event.id).slice(0, 16),
     });
@@ -441,7 +515,10 @@ async function runSync(): Promise<void> {
       notifyFeedListeners(); // globe icons may have appeared
     }
   } catch {
-    // Sync failures are non-fatal; retry on next interval.
+    // Sync failures are non-fatal; retry on next interval. The failure
+    // is logged instead of swallowed: a sync that never succeeds must
+    // be visible in the next log, not just absent.
+    recordServiceEvent('sync pass failed');
   }
 }
 

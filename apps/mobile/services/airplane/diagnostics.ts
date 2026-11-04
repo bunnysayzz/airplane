@@ -444,6 +444,15 @@ export function recordPeerConnected(
   notifyThrottled();
 }
 
+/** MAC addresses must never reach the log file (P0-2): a failure code
+ * built from a native error can carry the peer BLE address, so every
+ * connect failure code is scrubbed here, whatever the caller passed. */
+const MAC_ADDRESS_RE = /[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}/g;
+
+function scrubConnectFailureCode(code: string): string {
+  return code.replace(MAC_ADDRESS_RE, 'mac-peer');
+}
+
 /**
  * Stage-tagged auto-connect failure line. Log-only on purpose: a single
  * peer failing to connect must not flip the scanning state (that is what
@@ -451,8 +460,61 @@ export function recordPeerConnected(
  * bounded retry for the same bleId; this line is its only trail.
  */
 export function recordConnectFailure(code: string): void {
-  logEvent('peer', `connect failed ${code}`);
+  logEvent('peer', `connect failed ${scrubConnectFailureCode(code)}`);
   notifyThrottled();
+}
+
+/**
+ * Updater outcome lines. The detail is a fixed outcome token plus, at
+ * most, a version string or a short failure code: versions and codes
+ * are not identifiers, so a check result line can never leak identity,
+ * location, or content. Every check (launch and manual), every
+ * download, and every install outcome logs exactly one line, so a
+ * missing result line can no longer be read as "the check never ran".
+ */
+export type UpdateLogDetail =
+  | `check up-to-date ${string}`
+  | `check available ${string}`
+  | `check failed ${string}`
+  | `download started ${string}`
+  | `download progress ${number}`
+  | `download failed ${string}`
+  | `verify ok ${string}`
+  | `verify failed ${string}`
+  | `install intent fired ${string}`
+  | `install failed ${string}`
+  | `browser fallback ${string}`
+  | `permission required ${string}`
+  | `permission denied ${string}`;
+
+export function recordUpdateEvent(detail: UpdateLogDetail): void {
+  logEvent('update', detail);
+}
+
+/**
+ * Test inbox upload lines. The id is never logged: the stored object
+ * pathname is a timestamp plus random characters plus version, but the
+ * upload line needs no reference at all, only the outcome, so the
+ * tester is never asked to relay anything and the file stays free of
+ * anything that looks like a handle to chase.
+ */
+export type InboxLogDetail =
+  | 'upload started'
+  | 'upload sent'
+  | `upload failed ${string}`
+  | `upload truncated original=${number}`
+  | `read failed ${string}`;
+
+export function recordInboxEvent(detail: InboxLogDetail): void {
+  logEvent('inbox', detail);
+}
+
+/** Service lifecycle failures that used to die in a swallowed catch:
+ * a launch start that fails must leave a line, not silence. */
+export type ServiceLogDetail = `dm start failed ${string}` | 'sync pass failed';
+
+export function recordServiceEvent(detail: ServiceLogDetail): void {
+  logEvent('service', detail);
 }
 
 /**
@@ -629,6 +691,9 @@ export type LocationLogDetail =
   | 'warmup skipped denied'
   | 'warmup skipped undetermined'
   | 'fresh last-known'
+  | 'watch started'
+  | 'watch fresh-ok'
+  | 'watch failed'
   | 'revalidate started'
   | 'revalidate ok'
   | 'revalidate failed'
