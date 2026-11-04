@@ -190,6 +190,23 @@ describe('hash gate', () => {
   });
 });
 
+describe('install intent failure', () => {
+  test('a rejected install intent falls back to the browser, never a dead button', async () => {
+    const installer = makeInstaller({
+      installApk: jest.fn(async () => {
+        throw new Error('no activity');
+      }),
+    });
+    setInstallerForTests(installer);
+    mockedFetchSums().mockResolvedValue(sumsWith(GOOD_HASH));
+    const openURL = jest.fn(async () => {});
+    (RN as unknown as Record<string, unknown>).Linking = { openURL };
+    const status = await startUpdateDownload(update);
+    expect(status).toBe('browser');
+    expect(openURL).toHaveBeenCalledWith(update.downloadUrl);
+  });
+});
+
 describe('progress callbacks', () => {
   test('emitted progress reaches the callback as a fraction', async () => {
     let resolveDownload!: (value: { path: string; sha256: string; bytes: number }) => void;

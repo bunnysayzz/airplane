@@ -21,7 +21,8 @@
 // nothing installs. On match the system install sheet opens and the user
 // taps Install. When the native module is unavailable for any reason, the
 // flow falls back to opening the APK URL in the browser (the pre-v0.1.21
-// behavior), never a dead button. Honest ceiling: Android never allows a
+// behavior), never a dead button, and the same fallback applies when the
+// install intent itself cannot fire. Honest ceiling: Android never allows a
 // fully silent install for a sideloaded app; only Play can do that, and
 // only for Play-installed apps.
 
@@ -246,9 +247,11 @@ export const startUpdateDownload = async (
   try {
     await installer.installApk(downloaded.path);
   } catch {
-    dialog.toast(t('settings.updateOpenFailed'));
-    opts.onDownloadEnd?.('failed');
-    return 'failed';
+    // Never a dead button: if the install intent cannot fire (for
+    // example on a pre-Android 8 device, where the install intent action
+    // does not resolve), fall back to the browser download instead of
+    // leaving the user with a toast and no way forward.
+    return openBrowserFallback(downloadUrl);
   }
   opts.onDownloadEnd?.('installed');
   return 'installed';
