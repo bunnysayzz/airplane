@@ -9,6 +9,7 @@ import {
   compareVersions,
   expectedApkHash,
   fetchSha256Sums,
+  fetchSha256SumsDetailed,
   isAllowedUpdateUrl,
   parseReleasePayload,
   parseSha256Sums,
@@ -298,6 +299,136 @@ describe('sumsDownloadUrl', () => {
   });
 });
 
+describe('fetchSha256SumsDetailed', () => {
+  const instantSleep = () => Promise.resolve();
+  const textResponse = (text: string) => ({
+    ok: true,
+    status: 200,
+    text: async () => text,
+  });
+  const sumsLine = `${'e'.repeat(64)}  airplane-v0.1.21.apk\n`;
+  const detailed = (tag: string, fetchImpl: (url: string) => Promise<unknown>, extra = {}) =>
+    fetchSha256SumsDetailed(tag, {
+      fetchImpl: fetchImpl as never,
+      timeoutMs: 1000,
+      sleepImpl: instantSleep,
+      ...extra,
+    });
+
+  test('retry succeeds on the second attempt and records both attempts', async () => {
+    let calls = 0;
+    const fn = jest.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('network down');
+      return textResponse(sumsLine);
+    });
+    const result = await detailed('v0.1.21', fn);
+    expect(result.sums?.get('airplane-v0.1.21.apk')).toBe('e'.repeat(64));
+    expect(result.lastReason).toBe('ok');
+    expect(result.attempts).toEqual([
+      { source: 'download', attempt: 1, ok: false, reason: 'network:Error' },
+      { source: 'download', attempt: 2, ok: true, reason: 'ok' },
+    ]);
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  test('primary exhaustion falls back to the API asset route, same file', async () => {
+    const apiPayload = {
+      assets: [
+        {
+          name: 'SHA256SUMS.txt',
+          browser_download_url:
+            'https://objects.githubusercontent.com/abc/SHA256SUMS.txt',
+        },
+      ],
+    };
+    const fn = jest.fn(async (url: string) => {
+      if (url.startsWith('https://api.github.com/')) {
+        return { ok: true, status: 200, json: async () => apiPayload };
+      }
+      if (url.startsWith('https://objects.githubusercontent.com/')) {
+        return textResponse(sumsLine);
+      }
+      return { ok: false, status: 404, text: async () => '' };
+    });
+    const result = await detailed('v0.1.21', fn);
+    expect(result.sums?.get('airplane-v0.1.21.apk')).toBe('e'.repeat(64));
+    expect(result.lastReason).toBe('ok');
+    expect(result.attempts.map((a) => `${a.source}:${a.attempt}:${a.ok}`)).toEqual([
+      'download:1:false',
+      'download:2:false',
+      'download:3:false',
+      'api-meta:1:true',
+      'api-file:1:true',
+    ]);
+    expect(fn).toHaveBeenCalledWith(
+      expect.stringContaining('https://api.github.com/repos/bunnysayzz/airplane/releases/tags/v0.1.21'),
+      expect.anything(),
+    );
+  });
+
+  test('all sources failing carries the last reason, never throws', async () => {
+    // The mock carries json as well as text: a real API 404 is a JSON
+    // response, and the meta path checks for it before reading status.
+    const fn = jest.fn(async () => ({
+      ok: false,
+      status: 404,
+      text: async () => '',
+      json: async () => ({}),
+    }));
+    const result = await detailed('v0.1.21', fn);
+    expect(result.sums).toBeNull();
+    expect(result.lastReason).toBe('http-404');
+    expect(result.attempts[result.attempts.length - 1]).toEqual({
+      source: 'api-meta',
+      attempt: 1,
+      ok: false,
+      reason: 'http-404',
+    });
+  });
+
+  test('a hanging fetch times out with the timeout value in the reason', async () => {
+    const fn = jest.fn(() => new Promise(() => {}));
+    const result = await detailed('v0.1.21', fn, { downloadAttempts: 1, timeoutMs: 50 });
+    expect(result.sums).toBeNull();
+    expect(result.lastReason).toBe('timeout:50ms');
+    expect(result.attempts[0]).toEqual({
+      source: 'download',
+      attempt: 1,
+      ok: false,
+      reason: 'timeout:50ms',
+    });
+  });
+
+  test('garbage body is unparseable, not a success', async () => {
+    const fn = jest.fn(async () => textResponse('not a sums file\n'));
+    const result = await detailed('v0.1.21', fn, { downloadAttempts: 1 });
+    expect(result.sums).toBeNull();
+    expect(result.attempts[0].reason).toBe('unparseable');
+  });
+
+  test('an off-allowlist API asset URL is ignored, never fetched', async () => {
+    const apiPayload = {
+      assets: [
+        {
+          name: 'SHA256SUMS.txt',
+          browser_download_url: 'https://evil.example/SHA256SUMS.txt',
+        },
+      ],
+    };
+    const fn = jest.fn(async (url: string) => {
+      if (url.startsWith('https://api.github.com/')) {
+        return { ok: true, status: 200, json: async () => apiPayload };
+      }
+      return { ok: false, status: 404, text: async () => '' };
+    });
+    const result = await detailed('v0.1.21', fn);
+    expect(result.sums).toBeNull();
+    expect(result.lastReason).toBe('no-sums-asset');
+    expect(fn.mock.calls.every(([url]) => !(url as string).includes('evil.example'))).toBe(true);
+  });
+});
+
 describe('fetchSha256Sums', () => {
   const textResponse = (text: string) => ({
     ok: true,
@@ -314,14 +445,19 @@ describe('fetchSha256Sums', () => {
     expect(sums?.get('airplane-v0.1.21.apk')).toBe('d'.repeat(64));
   });
   test('non-OK and throwing fetch yield null, never throw', async () => {
+    // Instant backoff: the default retry path would sleep 500 + 1500 ms
+    // per call, which is real time the test does not need to spend.
+    const instantSleep = () => Promise.resolve();
     const notOk = await fetchSha256Sums('v0.1.21', {
       fetchImpl: jest.fn(async () => ({ ok: false, status: 404, text: async () => '' })) as never,
       timeoutMs: 1000,
+      sleepImpl: instantSleep,
     });
     expect(notOk).toBeNull();
     const throwing = await fetchSha256Sums('v0.1.21', {
       fetchImpl: fetchThrowing() as never,
       timeoutMs: 1000,
+      sleepImpl: instantSleep,
     });
     expect(throwing).toBeNull();
   });

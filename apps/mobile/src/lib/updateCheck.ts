@@ -32,7 +32,7 @@ import {
   apkFileNameFromUrl,
   checkForUpdate,
   expectedApkHash,
-  fetchSha256Sums,
+  fetchSha256SumsDetailed,
   isAllowedUpdateUrl,
   type UpdateCheckResult,
   type UpdateInfo,
@@ -169,6 +169,22 @@ const openBrowserFallback = async (url: string, reason: string): Promise<Downloa
   }
 };
 
+/** Classify a native download failure for the log line: the old bare
+ *  `download-error` hid whether the network, a timeout, or the module
+ *  itself failed. Unknown failures keep `download-error`. */
+const classifyDownloadError = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/timed out|timeout/i.test(message)) return 'timeout';
+  if (
+    /network|failed to fetch|fetch failed|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|offline|not reachable|network request failed/i.test(
+      message,
+    )
+  ) {
+    return 'network';
+  }
+  return 'download-error';
+};
+
 /**
  * Run one in-app download for an available update. Never throws: every
  * failure path toasts and returns a status. The permission gate runs
@@ -245,25 +261,40 @@ export const startUpdateDownload = async (
   let downloaded: { path: string; sha256: string; bytes: number };
   try {
     downloaded = await installer.downloadApk(downloadUrl, fileName);
-  } catch {
+  } catch (error: unknown) {
     subscription?.remove();
-    recordUpdateEvent(`download failed download-error`);
+    recordUpdateEvent(`download failed ${classifyDownloadError(error)}`);
     dialog.toast(t('settings.updateDownloadFailed'));
     opts.onDownloadEnd?.('failed');
     return 'failed';
   }
   subscription?.remove();
 
-  const sums = await fetchSha256Sums(update.tag);
-  const expected = sums === null ? null : expectedApkHash(sums, fileName);
+  const sumsResult = await fetchSha256SumsDetailed(update.tag);
+  for (const attempt of sumsResult.attempts) {
+    recordUpdateEvent(
+      `sums attempt ${attempt.attempt} ${attempt.source} ${attempt.ok ? 'ok' : `failed ${attempt.reason}`}`,
+    );
+  }
+  const expected =
+    sumsResult.sums === null ? null : expectedApkHash(sumsResult.sums, fileName);
   if (expected === null || expected.toLowerCase() !== downloaded.sha256.toLowerCase()) {
     await installer.deleteFile(downloaded.path).catch(() => {});
     recordUpdateEvent(
-      `verify failed ${expected === null ? 'no-sums' : 'mismatch'}`,
+      `verify failed ${expected === null ? `no-sums ${sumsResult.lastReason}` : 'mismatch'}`,
     );
     dialog.toast(t('settings.updateVerifyFailed'));
-    opts.onDownloadEnd?.('failed');
-    return 'failed';
+    // Never a dead toast: verification failure used to strand the user
+    // on the old version (v0.1.25 rollout, three no-sums failures, no
+    // way forward inside the app). The release page is the safe
+    // fallback here, not the APK URL: the APK just failed verification,
+    // so routing the user straight to its download would bypass the
+    // hash gate. The page lets them see the release and its hashes and
+    // choose. The install intent path below keeps opening the APK URL
+    // because there verification already passed.
+    const fallbackStatus = await openBrowserFallback(update.releaseUrl, 'verify-failed');
+    opts.onDownloadEnd?.(fallbackStatus);
+    return fallbackStatus;
   }
   recordUpdateEvent(`verify ok ${update.version}`);
 

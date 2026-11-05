@@ -16,14 +16,23 @@ jest.mock('./dialog', () => ({
 }));
 jest.mock('../../services/airplane/updater', () => {
   const actual = jest.requireActual('../../services/airplane/updater');
-  return { ...actual, fetchSha256Sums: jest.fn() };
+  return { ...actual, fetchSha256SumsDetailed: jest.fn(), checkForUpdate: jest.fn() };
 });
+jest.mock('../../services/airplane/diagnostics', () => ({
+  recordUpdateEvent: jest.fn(),
+}));
 
 import * as RN from 'react-native';
-import { NativeEventEmitter } from 'react-native';
-import { fetchSha256Sums, type UpdateInfo } from '../../services/airplane/updater';
+import { NativeEventEmitter, Platform } from 'react-native';
+import {
+  checkForUpdate,
+  fetchSha256SumsDetailed,
+  type UpdateInfo,
+} from '../../services/airplane/updater';
+import { recordUpdateEvent } from '../../services/airplane/diagnostics';
 import { dialog } from './dialog';
 import {
+  checkForUpdateOnLaunch,
   resetUpdateCheckForTests,
   resumePendingUpdate,
   setInstallerForTests,
@@ -47,6 +56,20 @@ const OTHER_HASH = 'b'.repeat(64);
 const sumsWith = (hash: string) =>
   new Map<string, string>([['airplane-v0.1.21.apk', hash]]);
 
+/** Detailed sums result shape, as startUpdateDownload consumes it. */
+const detailedSums = (hash: string | null, reason = 'ok') => ({
+  sums: hash === null ? null : sumsWith(hash),
+  attempts: [
+    {
+      source: 'download' as const,
+      attempt: 1,
+      ok: hash !== null,
+      reason: hash === null ? reason : 'ok',
+    },
+  ],
+  lastReason: hash === null ? reason : 'ok',
+});
+
 const makeInstaller = (overrides: Partial<InstallerModule> = {}): InstallerModule & {
   [K in keyof InstallerModule]: jest.Mock;
 } =>
@@ -59,7 +82,9 @@ const makeInstaller = (overrides: Partial<InstallerModule> = {}): InstallerModul
     ...overrides,
   }) as never;
 
-const mockedFetchSums = () => fetchSha256Sums as unknown as jest.Mock;
+const mockedDetailedSums = () => fetchSha256SumsDetailed as unknown as jest.Mock;
+const mockedCheckForUpdate = () => checkForUpdate as unknown as jest.Mock;
+const mockedRecordEvent = () => recordUpdateEvent as unknown as jest.Mock;
 const mockedAlert = () => dialog.alert as unknown as jest.Mock;
 const mockedToast = () => dialog.toast as unknown as jest.Mock;
 
@@ -73,7 +98,9 @@ const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => {
   resetUpdateCheckForTests();
-  mockedFetchSums().mockReset();
+  mockedDetailedSums().mockReset();
+  mockedCheckForUpdate().mockReset();
+  mockedRecordEvent().mockClear();
   mockedAlert().mockClear();
   mockedToast().mockClear();
 });
@@ -86,7 +113,7 @@ describe('permission gate', () => {
   test('denied grant parks the download and opens settings, resume installs', async () => {
     const installer = makeInstaller({ canInstallPackages: jest.fn(async () => false) });
     setInstallerForTests(installer);
-    mockedFetchSums().mockResolvedValue(sumsWith(GOOD_HASH));
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
     const ends: string[] = [];
     const opts: DownloadOptions = { onDownloadEnd: (status) => ends.push(status) };
     const status = await startUpdateDownload(update, opts);
@@ -148,32 +175,55 @@ describe('hash gate', () => {
   test('matching hash installs', async () => {
     const installer = makeInstaller();
     setInstallerForTests(installer);
-    mockedFetchSums().mockResolvedValue(sumsWith(GOOD_HASH));
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
     const status = await startUpdateDownload(update);
     expect(status).toBe('installed');
     expect(installer.installApk).toHaveBeenCalledWith(APK_PATH);
     expect(installer.deleteFile).not.toHaveBeenCalled();
   });
 
-  test('mismatching hash deletes the file and never installs', async () => {
+  test('mismatching hash deletes the file, never installs, opens the release page', async () => {
     const installer = makeInstaller();
     setInstallerForTests(installer);
-    mockedFetchSums().mockResolvedValue(sumsWith(OTHER_HASH));
+    mockedDetailedSums().mockResolvedValue(detailedSums(OTHER_HASH));
+    const openURL = jest.fn(async () => {});
+    (RN as unknown as Record<string, unknown>).Linking = { openURL };
     const status = await startUpdateDownload(update);
-    expect(status).toBe('failed');
+    expect(status).toBe('browser');
     expect(installer.deleteFile).toHaveBeenCalledWith(APK_PATH);
     expect(installer.installApk).not.toHaveBeenCalled();
     expect(mockedToast()).toHaveBeenCalledWith('settings.updateVerifyFailed');
+    // The release page, not the APK URL: the APK just failed
+    // verification, so routing to its download would bypass the gate.
+    expect(openURL).toHaveBeenCalledWith(update.releaseUrl);
+    expect(mockedRecordEvent()).toHaveBeenCalledWith('verify failed mismatch');
   });
 
-  test('missing sums file aborts without installing', async () => {
+  test('missing sums file aborts without installing, with the fetch reason on the line', async () => {
     const installer = makeInstaller();
     setInstallerForTests(installer);
-    mockedFetchSums().mockResolvedValue(null);
+    mockedDetailedSums().mockResolvedValue(detailedSums(null, 'http-404'));
+    const openURL = jest.fn(async () => {});
+    (RN as unknown as Record<string, unknown>).Linking = { openURL };
+    const status = await startUpdateDownload(update);
+    expect(status).toBe('browser');
+    expect(installer.deleteFile).toHaveBeenCalledWith(APK_PATH);
+    expect(installer.installApk).not.toHaveBeenCalled();
+    expect(openURL).toHaveBeenCalledWith(update.releaseUrl);
+    expect(mockedRecordEvent()).toHaveBeenCalledWith('verify failed no-sums http-404');
+    expect(mockedRecordEvent()).toHaveBeenCalledWith('sums attempt 1 download failed http-404');
+  });
+
+  test('verify failure with no browser to open ends failed, not stuck', async () => {
+    const installer = makeInstaller();
+    setInstallerForTests(installer);
+    mockedDetailedSums().mockResolvedValue(detailedSums(null, 'http-404'));
+    (RN as unknown as Record<string, unknown>).Linking = {};
     const status = await startUpdateDownload(update);
     expect(status).toBe('failed');
     expect(installer.deleteFile).toHaveBeenCalledWith(APK_PATH);
     expect(installer.installApk).not.toHaveBeenCalled();
+    expect(mockedToast()).toHaveBeenCalledWith('settings.updateOpenFailed');
   });
 
   test('download failure never reaches install', async () => {
@@ -198,7 +248,7 @@ describe('install intent failure', () => {
       }),
     });
     setInstallerForTests(installer);
-    mockedFetchSums().mockResolvedValue(sumsWith(GOOD_HASH));
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
     const openURL = jest.fn(async () => {});
     (RN as unknown as Record<string, unknown>).Linking = { openURL };
     const status = await startUpdateDownload(update);
@@ -217,7 +267,7 @@ describe('progress callbacks', () => {
     );
     const installer = makeInstaller({ downloadApk: jest.fn(() => downloadPromise) });
     setInstallerForTests(installer);
-    mockedFetchSums().mockResolvedValue(sumsWith(GOOD_HASH));
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
     const fractions: Array<number | null> = [];
     const pending = startUpdateDownload(update, {
       onDownloadProgress: (fraction) => fractions.push(fraction),
@@ -236,5 +286,60 @@ describe('progress callbacks', () => {
     expect(fractions).toContain(0.5);
     resolveDownload({ path: APK_PATH, sha256: GOOD_HASH, bytes: 100 });
     await expect(pending).resolves.toBe('installed');
+  });
+});
+
+describe('launch check', () => {
+  const originalOs = Platform.OS;
+
+  beforeEach(() => {
+    (Platform as unknown as { OS: string }).OS = 'android';
+  });
+
+  afterEach(() => {
+    (Platform as unknown as { OS: string }).OS = originalOs;
+  });
+
+  const pressDownload = async () => {
+    const buttons = alertButtons();
+    const download = buttons.find((b) => b.text === 'settings.updateDownload');
+    expect(download?.onPress).toBeDefined();
+    download?.onPress?.();
+    await flush();
+    await flush();
+    await flush();
+  };
+
+  test('launch check prompts once per tag and accepting runs the full flow', async () => {
+    const installer = makeInstaller();
+    setInstallerForTests(installer);
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
+    mockedCheckForUpdate().mockResolvedValue({ available: true, update });
+    await checkForUpdateOnLaunch();
+    expect(mockedAlert()).toHaveBeenCalledWith(
+      'settings.updateTitle',
+      expect.anything(),
+      expect.anything(),
+    );
+    await pressDownload();
+    expect(installer.downloadApk).toHaveBeenCalledWith(
+      update.downloadUrl,
+      'airplane-v0.1.21.apk',
+    );
+    expect(installer.installApk).toHaveBeenCalledWith(APK_PATH);
+  });
+
+  test('a second launch check for the same tag does not re-prompt', async () => {
+    setInstallerForTests(makeInstaller());
+    mockedCheckForUpdate().mockResolvedValue({ available: true, update });
+    await checkForUpdateOnLaunch();
+    await checkForUpdateOnLaunch();
+    expect(mockedAlert()).toHaveBeenCalledTimes(1);
+  });
+
+  test('no available update prompts nothing on launch', async () => {
+    mockedCheckForUpdate().mockResolvedValue({ available: false });
+    await checkForUpdateOnLaunch();
+    expect(mockedAlert()).not.toHaveBeenCalled();
   });
 });
