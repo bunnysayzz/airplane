@@ -481,6 +481,9 @@ export function recordConnectFailure(code: string): void {
  * location, or content. Every check (launch and manual), every
  * download, and every install outcome logs exactly one line, so a
  * missing result line can no longer be read as "the check never ran".
+ * Sums fetch attempts log one line each (attempt, source, outcome,
+ * reason), so a verify failure is diagnosable from logs alone instead
+ * of hiding behind a bare `no-sums`.
  */
 export type UpdateLogDetail =
   | `check up-to-date ${string}`
@@ -489,6 +492,9 @@ export type UpdateLogDetail =
   | `download started ${string}`
   | `download progress ${number}`
   | `download failed ${string}`
+  | `sums attempt ${number} download ${string}`
+  | `sums attempt ${number} api-meta ${string}`
+  | `sums attempt ${number} api-file ${string}`
   | `verify ok ${string}`
   | `verify failed ${string}`
   | `install intent fired ${string}`

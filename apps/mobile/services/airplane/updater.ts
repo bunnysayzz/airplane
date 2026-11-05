@@ -329,32 +329,88 @@ const isTextResponse = (value: unknown): value is TextResponse =>
   typeof value.text === 'function';
 
 /**
- * Fetch and parse the release's SHA256SUMS.txt. Returns null on any
- * failure (no fetch, timeout, non-2xx, unparseable body): a missing sums
- * file aborts the install, it never falls back to installing unchecked.
+ * Fetch and parse the release's SHA256SUMS.txt, with retries and a
+ * fallback source, but never a bypass. The v0.1.25 rollout stranded one
+ * phone on v0.1.24: its JS fetch of the sums file failed three times
+ * while the native APK download and relay connections worked, and the
+ * old code swallowed the underlying error, so the log line carried only
+ * `no-sums` and the user had no way forward inside the app. This
+ * version therefore (a) retries the primary download URL up to
+ * `downloadAttempts` times with backoff, (b) falls back to the release
+ * assets API route for the same file, and (c) reports every attempt
+ * with its outcome and reason, so the next failure is diagnosable from
+ * logs alone. A missing sums file still aborts the install: it never
+ * falls back to installing unchecked, and no caller may skip the hash
+ * match on the strength of this result.
  */
+export type SumsFetchAttempt = {
+  /** Which source was tried: the direct download URL, the API metadata
+   *  lookup for the sums asset, or the asset file itself. */
+  source: 'download' | 'api-meta' | 'api-file';
+  /** 1-based attempt number within that source. */
+  attempt: number;
+  ok: boolean;
+  /** 'ok' on success, else a greppable reason: `timeout:<ms>`,
+   *  `http-<status>`, `network:<ErrorName>`, `bad-response`,
+   *  `unparseable`, `no-sums-asset`, `no-fetch`, `url-not-allowed`,
+   *  or `fetch-error`. */
+  reason: string;
+};
+
+export type SumsFetchResult = {
+  /** Parsed sums, or null when every source failed. */
+  sums: Map<string, string> | null;
+  /** Every attempt made, in order. */
+  attempts: SumsFetchAttempt[];
+  /** 'ok' when sums were found, else the reason of the last attempt. */
+  lastReason: string;
+};
+
 type FetchSumsOptions = {
   fetchImpl?: (
     url: string,
     init?: { headers?: Record<string, string>; signal?: unknown },
   ) => Promise<unknown>;
   timeoutMs?: number;
+  /** Primary-download attempts before the API fallback (default 3). */
+  downloadAttempts?: number;
+  /** Backoff delays between primary attempts, in ms (default
+   *  [500, 1500]); the last value repeats when attempts outrun the list. */
+  backoffMs?: number[];
+  /** Injectable sleep for tests; defaults to a real timer sleep. */
+  sleepImpl?: (ms: number) => Promise<void>;
 };
 
-export const fetchSha256Sums = async (
-  tag: string,
-  options: FetchSumsOptions = {},
-): Promise<Map<string, string> | null> => {
-  const { timeoutMs = CHECK_TIMEOUT_MS } = options;
-  const url = sumsDownloadUrl(tag);
-  if (!isAllowedUpdateUrl(url)) return null;
-  const fetchFn =
-    options.fetchImpl ??
-    ((typeof globalThis.fetch === 'function'
-      ? globalThis.fetch
-      : null) as FetchSumsOptions['fetchImpl']);
-  if (typeof fetchFn !== 'function') return null;
+type FetchFn = NonNullable<FetchSumsOptions['fetchImpl']>;
 
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Classify a thrown fetch error into a greppable reason. The timeout
+ *  the race itself raises is classified by the caller as
+ *  `timeout:<ms>`; anything else that looks like a timeout lands here
+ *  as plain `timeout`. */
+const classifySumsThrow = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/timed out|timeout/i.test(message)) return 'timeout';
+  if (
+    /network|failed to fetch|fetch failed|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|offline|not reachable|network request failed/i.test(
+      message,
+    )
+  ) {
+    return `network:${error instanceof Error ? error.name : 'Error'}`;
+  }
+  return 'fetch-error';
+};
+
+/** One fetch with a timeout race. Returns the raw response, or a
+ *  failure reason; never throws. */
+const fetchWithTimeout = async (
+  url: string,
+  fetchFn: FetchFn,
+  timeoutMs: number,
+  init?: { headers?: Record<string, string> },
+): Promise<{ response: unknown } | { failure: string }> => {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : undefined;
@@ -364,17 +420,152 @@ export const fetchSha256Sums = async (
         reject(new Error('sums-timeout'));
       }, timeoutMs);
     });
-    const response = (await Promise.race([
-      fetchFn(url, { signal: controller?.signal }),
+    const response = await Promise.race([
+      fetchFn(url, { ...init, signal: controller?.signal }),
       timeout,
-    ])) as unknown;
-    if (!isTextResponse(response)) return null;
-    if (!response.ok) return null;
-    const text = await response.text();
-    return parseSha256Sums(text);
-  } catch {
-    return null;
+    ]);
+    return { response };
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'sums-timeout') {
+      return { failure: `timeout:${timeoutMs}ms` };
+    }
+    return { failure: classifySumsThrow(error) };
   } finally {
     if (timeoutId !== undefined) clearTimeout(timeoutId);
   }
+};
+
+/** Fetch one sums file body: the response must be a 2xx text response
+ *  carrying at least one valid entry, else the attempt failed with a
+ *  reason. An empty or garbage body is `unparseable`, not a success:
+ *  the old code returned its empty map, which failed closed downstream
+ *  but hid the cause behind `no-sums`. */
+const fetchSumsBody = async (
+  url: string,
+  fetchFn: FetchFn,
+  timeoutMs: number,
+): Promise<{ sums: Map<string, string> } | { failure: string }> => {
+  const fetched = await fetchWithTimeout(url, fetchFn, timeoutMs);
+  if ('failure' in fetched) return { failure: fetched.failure };
+  if (!isTextResponse(fetched.response)) return { failure: 'bad-response' };
+  if (!fetched.response.ok) return { failure: `http-${fetched.response.status}` };
+  let text: string;
+  try {
+    text = await fetched.response.text();
+  } catch (error: unknown) {
+    return { failure: classifySumsThrow(error) };
+  }
+  const sums = parseSha256Sums(text);
+  if (sums.size === 0) return { failure: 'unparseable' };
+  return { sums };
+};
+
+/** Find the SHA256SUMS.txt asset URL in a releases API payload, after
+ *  the same allowlist the APK picker uses. A payload-steered arbitrary
+ *  URL must never be fetched. */
+const sumsAssetUrlFromPayload = (payload: unknown): string | null => {
+  if (!isRecord(payload)) return null;
+  const assets = payload.assets;
+  if (!Array.isArray(assets)) return null;
+  for (const asset of assets) {
+    if (!isRecord(asset)) continue;
+    if (asString(asset.name) !== 'SHA256SUMS.txt') continue;
+    const url = asString(asset.browser_download_url);
+    if (url !== null && isAllowedUpdateUrl(url, { downloadHost: true })) return url;
+  }
+  return null;
+};
+
+export const fetchSha256SumsDetailed = async (
+  tag: string,
+  options: FetchSumsOptions = {},
+): Promise<SumsFetchResult> => {
+  const {
+    timeoutMs = CHECK_TIMEOUT_MS,
+    downloadAttempts = 3,
+    backoffMs = [500, 1500],
+    sleepImpl = defaultSleep,
+  } = options;
+  const attempts: SumsFetchAttempt[] = [];
+  const fail = (lastReason: string): SumsFetchResult => ({ sums: null, attempts, lastReason });
+  const fetchFn =
+    options.fetchImpl ??
+    ((typeof globalThis.fetch === 'function'
+      ? globalThis.fetch
+      : null) as FetchSumsOptions['fetchImpl']);
+  if (typeof fetchFn !== 'function') {
+    attempts.push({ source: 'download', attempt: 1, ok: false, reason: 'no-fetch' });
+    return fail('no-fetch');
+  }
+  const primaryUrl = sumsDownloadUrl(tag);
+  if (!isAllowedUpdateUrl(primaryUrl)) {
+    attempts.push({ source: 'download', attempt: 1, ok: false, reason: 'url-not-allowed' });
+    return fail('url-not-allowed');
+  }
+  for (let attempt = 1; attempt <= downloadAttempts; attempt += 1) {
+    const body = await fetchSumsBody(primaryUrl, fetchFn, timeoutMs);
+    if ('sums' in body) {
+      attempts.push({ source: 'download', attempt, ok: true, reason: 'ok' });
+      return { sums: body.sums, attempts, lastReason: 'ok' };
+    }
+    attempts.push({ source: 'download', attempt, ok: false, reason: body.failure });
+    if (attempt < downloadAttempts) {
+      await sleepImpl(backoffMs[Math.min(attempt - 1, backoffMs.length - 1)] ?? 0);
+    }
+  }
+  // Alternate source, same file, different host path: the public
+  // releases API route for this tag. The tag is encoded, the asset URL
+  // passes the allowlist, and the content is verified exactly like the
+  // primary body, so this changes availability, not trust.
+  const apiUrl = `https://api.github.com/repos/${RELEASES_REPO}/releases/tags/${encodeURIComponent(tag)}`;
+  const meta = await fetchWithTimeout(
+    apiUrl,
+    fetchFn,
+    timeoutMs,
+    { headers: { Accept: 'application/vnd.github+json' } },
+  );
+  if ('failure' in meta) {
+    attempts.push({ source: 'api-meta', attempt: 1, ok: false, reason: meta.failure });
+    return fail(meta.failure);
+  }
+  if (!isFetchResponse(meta.response)) {
+    attempts.push({ source: 'api-meta', attempt: 1, ok: false, reason: 'bad-response' });
+    return fail('bad-response');
+  }
+  if (!meta.response.ok) {
+    attempts.push({ source: 'api-meta', attempt: 1, ok: false, reason: `http-${meta.response.status}` });
+    return fail(`http-${meta.response.status}`);
+  }
+  let payload: unknown;
+  try {
+    payload = await meta.response.json();
+  } catch (error: unknown) {
+    const reason = classifySumsThrow(error);
+    attempts.push({ source: 'api-meta', attempt: 1, ok: false, reason });
+    return fail(reason);
+  }
+  const assetUrl = sumsAssetUrlFromPayload(payload);
+  if (assetUrl === null) {
+    attempts.push({ source: 'api-meta', attempt: 1, ok: false, reason: 'no-sums-asset' });
+    return fail('no-sums-asset');
+  }
+  attempts.push({ source: 'api-meta', attempt: 1, ok: true, reason: 'ok' });
+  const body = await fetchSumsBody(assetUrl, fetchFn, timeoutMs);
+  if ('sums' in body) {
+    attempts.push({ source: 'api-file', attempt: 1, ok: true, reason: 'ok' });
+    return { sums: body.sums, attempts, lastReason: 'ok' };
+  }
+  attempts.push({ source: 'api-file', attempt: 1, ok: false, reason: body.failure });
+  return fail(body.failure);
+};
+
+/** Backwards-compatible wrapper: the parsed sums, or null when every
+ *  source failed. Callers that need the reason use
+ *  fetchSha256SumsDetailed instead. */
+export const fetchSha256Sums = async (
+  tag: string,
+  options: FetchSumsOptions = {},
+): Promise<Map<string, string> | null> => {
+  const detailed = await fetchSha256SumsDetailed(tag, options);
+  return detailed.sums;
 };
