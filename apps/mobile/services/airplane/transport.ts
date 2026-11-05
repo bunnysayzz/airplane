@@ -798,6 +798,13 @@ export async function startTransport(): Promise<void> {
       onAuthChallenge: (relayUrl, challenge) => {
         addBreadcrumb(`relay AUTH challenge ${relayUrl}`, { challenge });
       },
+      // Replay window proof for testing: every resubscribe logs the
+      // `since` it used, so the next log shows whether a reconnect
+      // replayed from the last event seen (minus overlap) instead of
+      // from subscribe time. Unix seconds only, never content.
+      onResubscribe: (sinceSec) => {
+        recordServiceEvent(`relay resubscribe since ${sinceSec}`);
+      },
     },
     {
       onDedupDrop: (_source, peerId) => recordDedupDrop(peerId),

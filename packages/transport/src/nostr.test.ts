@@ -489,7 +489,7 @@ describe('NostrTransport reconnect', () => {
     await t.stop();
   });
 
-  test('subscribe filter narrows to cells and reconnect since does not replay 24h', async () => {
+  test('subscribe filter narrows to cells and reconnect without seen events keeps the 24h window', async () => {
     const sockets: FakeSocket[] = [];
     const t = new NostrTransport({
       relays: ['wss://cell.relay'],
@@ -514,7 +514,58 @@ describe('NostrTransport reconnect', () => {
     expect(sockets.length).toBeGreaterThanOrEqual(2);
     const secondReq = sockets[1].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
     expect(secondReq[2]['#g']).toEqual(['abcde', 'fghij']);
-    expect(secondReq[2].since as number).toBeGreaterThan(firstSince + 80000);
+    // No event was ever seen, so the replay window must NOT advance
+    // with subscribe time: the reconnect still replays the last 24h,
+    // otherwise events published while the socket flapped are skipped.
+    expect(secondReq[2].since as number).toBeLessThanOrEqual(firstSince + 120);
+    await t.stop();
+  });
+
+  test('reconnect replays from the last main-subscription event minus overlap, stable across empty resubscribes', async () => {
+    const sockets: FakeSocket[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://anchor.relay'],
+      reconnectMs: 10,
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+    });
+    await t.start();
+    await tick(20);
+    const firstReq = sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    // A main-subscription event arrives with a recent created_at.
+    const keys = generateNostrKeypair();
+    const seenAt = Math.floor(Date.now() / 1000) - 1000;
+    const wrapped = wrapEvent(makePost('seen'), keys, seenAt);
+    sockets[0].receive(['EVENT', firstReq[1], wrapped]);
+    await tick(10);
+    // First reconnect: the replay window anchors on the seen event.
+    sockets[0].close();
+    await tick(50);
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+    const secondReq = sockets[1].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    expect(secondReq[2].since as number).toBe(seenAt - 300);
+    // Second reconnect with no new event: the window must NOT advance
+    // with subscribe time, or events published between the two
+    // reconnects that no replay delivered yet are skipped for good.
+    sockets[1].close();
+    await tick(50);
+    expect(sockets.length).toBeGreaterThanOrEqual(3);
+    const thirdReq = sockets[2].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    expect(thirdReq[2].since as number).toBe(seenAt - 300);
+    // A newer main-subscription event advances the anchor.
+    const newerAt = Math.floor(Date.now() / 1000) - 100;
+    const wrappedNewer = wrapEvent(makePost('newer'), keys, newerAt);
+    sockets[2].receive(['EVENT', thirdReq[1], wrappedNewer]);
+    await tick(10);
+    sockets[2].close();
+    await tick(50);
+    expect(sockets.length).toBeGreaterThanOrEqual(4);
+    const fourthReq = sockets[3].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    expect(fourthReq[2].since as number).toBe(newerAt - 300);
     await t.stop();
   });
 

@@ -521,7 +521,7 @@ export function recordInboxEvent(detail: InboxLogDetail): void {
 
 /** Service lifecycle failures that used to die in a swallowed catch:
  * a launch start that fails must leave a line, not silence. */
-export type ServiceLogDetail = `dm start failed ${string}` | 'sync pass failed' | `dm ${string}`;
+export type ServiceLogDetail = `dm start failed ${string}` | 'sync pass failed' | `dm ${string}` | `relay resubscribe since ${number}`;
 
 export function recordServiceEvent(detail: ServiceLogDetail): void {
   logEvent('service', detail);
