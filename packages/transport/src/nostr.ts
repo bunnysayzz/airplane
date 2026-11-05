@@ -212,6 +212,12 @@ export interface NostrTransportOpts {
   /** Relay NOTICE/CLOSED frames (relay URL, frame type, relay message). */
   onRelayNotice?: (relayUrl: string, frame: 'NOTICE' | 'CLOSED', message: string) => void;
   /**
+   * Fired on every main resubscribe with the replay `since` it used, so
+   * the app can log the replay window for testing. The value is a unix
+   * second, never content, never an identifier.
+   */
+  onResubscribe?: (sinceSec: number) => void;
+  /**
    * Relay AUTH challenges (NIP-42). The client does not authenticate
    * yet; the challenge is surfaced so an auth-required failure is
    * diagnosable instead of a generic publish timeout.
@@ -279,9 +285,20 @@ export class NostrTransport {
   private readonly silenceTimeoutMs: number;
   private readonly onRelayNotice: NostrTransportOpts['onRelayNotice'];
   private readonly onAuthChallenge: NostrTransportOpts['onAuthChallenge'];
+  private readonly onResubscribe: NostrTransportOpts['onResubscribe'];
   private subscribeCells: string[];
-  /** Time of the last main subscribe, for reconnect `since` bounds. */
-  private lastSubscribeAtSec: number | null = null;
+  /**
+   * Created_at of the newest event received on a main subscription.
+   * Reconnect replay `since` anchors here (minus overlap), never on
+   * subscribe time: a subscribe-time watermark advances on every socket
+   * open before any replay event arrives, so an event that no replay
+   * delivered yet falls out of every later window and is lost unless
+   * the sender re-pushes it while the receiver is live. Anchoring on
+   * the last event actually seen mirrors the DM backfill rule, which
+   * recovered 10/10 in the same offline window where the old rule
+   * dropped 6 posts.
+   */
+  private lastMainEventCreatedAtSec: number | null = null;
   /** Main subscription id per socket, for CLOSED-triggered resubscribe. */
   private mainSubIds = new Map<WebSocketLike, string>();
   /** Last inbound frame time per relay (liveness proof for silence detection). */
@@ -333,6 +350,7 @@ export class NostrTransport {
     this.silenceTimeoutMs = opts.silenceTimeoutMs ?? 90000;
     this.onRelayNotice = opts.onRelayNotice;
     this.onAuthChallenge = opts.onAuthChallenge;
+    this.onResubscribe = opts.onResubscribe;
     this.subscribeCells = [...(opts.cells ?? [])].filter((c) => c.length > 0);
   }
 
@@ -720,13 +738,18 @@ export class NostrTransport {
     const subId = `sub${++this.subIdCounter}`;
     this.mainSubIds.set(ws, subId);
     const nowSec = Math.floor(Date.now() / 1000);
-    // First subscribe replays the last 24h. A reconnect replays only
-    // since the previous subscribe (capped at 24h back), never the
-    // whole window again: reconnects must not replay-everything.
-    const since = this.lastSubscribeAtSec === null
+    // First subscribe replays the last 24h. A reconnect replays from
+    // the last main-subscription event actually seen, minus a 300 s
+    // overlap (capped at 24h back, never past now): events never
+    // received stay inside the window no matter how many sockets
+    // opened since, and the overlap absorbs relay propagation delay
+    // and small clock skew. The previous rule anchored on subscribe
+    // time and advanced on every socket open before any replay event
+    // arrived, which is how offline posts were skipped for good.
+    const since = this.lastMainEventCreatedAtSec === null
       ? nowSec - 86400
-      : Math.max(this.lastSubscribeAtSec, nowSec - 86400);
-    this.lastSubscribeAtSec = nowSec;
+      : Math.min(Math.max(this.lastMainEventCreatedAtSec - 300, nowSec - 86400), nowSec);
+    this.onResubscribe?.(since);
     const filter: Record<string, unknown> = { kinds: [AIRPLANE_NOSTR_KIND], since, limit: 500 };
     if (this.subscribeCells.length > 0) filter['#g'] = [...this.subscribeCells];
     const msg: ClientMsg = ['REQ', subId, filter];
@@ -810,6 +833,22 @@ export class NostrTransport {
       return;
     }
     if (!event) return;
+    // Anchor the reconnect replay window on main-subscription events
+    // only: one-shot query hits are addressed by id, not a stream, so
+    // they must not advance the window past events no replay delivered.
+    // The anchor is the WRAPPER created_at: relays filter replays on
+    // the outer envelope, never on the inner post, so the inner
+    // created_at would anchor the window on a clock the relay ignores.
+    if (typeof msg[1] === 'string' && typeof nostr.created_at === 'number') {
+      for (const mainSubId of this.mainSubIds.values()) {
+        if (mainSubId === msg[1]) {
+          if (this.lastMainEventCreatedAtSec === null || nostr.created_at > this.lastMainEventCreatedAtSec) {
+            this.lastMainEventCreatedAtSec = nostr.created_at;
+          }
+          break;
+        }
+      }
+    }
     for (const h of this.receiveHandlers) {
       try {
         h(event, relayUrl);

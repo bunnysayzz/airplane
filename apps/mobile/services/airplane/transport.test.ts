@@ -325,6 +325,29 @@ describe('transport manager', () => {
     __setBlePortForTests(null);
   });
 
+  test('drainPostOutbox keeps a radio-handoff row queued for later triggers', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const event = { ...makeSignedEvent(), id: new Uint8Array(32).fill(41), created_at: Math.floor(Date.now() / 1000) - 600, tags: [['seq', '7']] };
+    await store.saveEvent(event);
+    await store.enqueuePostOutbox(toHex(event.id), event.created_at);
+    // A BLE drain send is a radio handoff with no receipt signal: it
+    // must NOT remove the row, or a send lost to a notify race has no
+    // later trigger and no WorldSync re-push. The row stays until a
+    // relay observation confirms it.
+    jest.spyOn(hybrid!, 'sendOverMesh').mockResolvedValue(1);
+    __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
+    expect(await drainPostOutbox()).toBe(1);
+    const rows = await store.listPostOutbox();
+    expect(rows.map((r) => r.eventId)).toContain(toHex(event.id));
+    expect(rows.find((r) => r.eventId === toHex(event.id))!.status).toBe('ble-sent');
+    // A later trigger re-attempts the same row.
+    expect(await drainPostOutbox()).toBe(1);
+    __setBlePortForTests(null);
+  });
+
   test('inbound stars log a message line instead of returning silently', async () => {
     resetDiagnosticsForTests();
     await startTransport();
