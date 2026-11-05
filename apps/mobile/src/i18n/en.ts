@@ -460,7 +460,11 @@ export const en = {
     diagnosticsSendToInbox: 'Send to test inbox',
     diagnosticsSendToInboxConfirm:
       'This sends {{size}} of redacted diagnostics log to the test inbox. TESTING ONLY. Nothing else leaves this phone.',
+    diagnosticsSendToInboxConfirmDelta:
+      'This sends {{count}} new lines since the last send of redacted diagnostics log to the test inbox. TESTING ONLY. Nothing else leaves this phone.',
     diagnosticsSendToInboxSent: 'Sent',
+    diagnosticsSendToInboxSummary: '{{count}} new lines sent ({{kind}}).',
+    diagnosticsSendToInboxNothingNew: 'Nothing new since last send.',
     diagnosticsSendToInboxId: 'Test inbox id: {{id}}',
     diagnosticsSendToInboxFailed: 'Test inbox upload failed. Use Share log instead.',
     diagnosticsLogFile: 'Log file: {{count}} lines',

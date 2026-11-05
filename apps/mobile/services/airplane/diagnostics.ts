@@ -517,6 +517,7 @@ export function recordUpdateEvent(detail: UpdateLogDetail): void {
 export type InboxLogDetail =
   | 'upload started'
   | 'upload sent'
+  | 'upload skipped nothing-new'
   | `upload failed ${string}`
   | `upload truncated original=${number}`
   | `read failed ${string}`;

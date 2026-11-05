@@ -29,8 +29,13 @@ import {
 import {
   formatLogInboxSize,
   logTextByteLength,
+  planLogInboxUpload,
+  readLogInboxWatermark,
   sendDiagnosticsLogToInbox,
+  writeLogInboxWatermark,
+  type LogInboxKind,
 } from '../../services/airplane/logInbox';
+import { getKv } from '../../services/airplane/kv';
 import { retryBleRadio } from '../../services/airplane/transport';
 
 interface DiagnosticsProps {
@@ -57,6 +62,11 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
   const [inboxSentId, setInboxSentId] = useState<string | null>(null);
   const [inboxFailed, setInboxFailed] = useState<boolean>(false);
   const [inboxError, setInboxError] = useState<string | null>(null);
+  const [inboxNothingNew, setInboxNothingNew] = useState<boolean>(false);
+  const [inboxLastUpload, setInboxLastUpload] = useState<{
+    kind: LogInboxKind;
+    lines: number;
+  } | null>(null);
 
   const refreshPermissions = () => {
     checkBlePermissionStates()
@@ -251,9 +261,13 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
             <Text style={[type.name, styles.buttonText]}>{t('settings.diagnosticsShareLog')}</Text>
           </Pressable>
           {/* TESTING ONLY, REMOVE AFTER TESTING: one-tap upload of the
-          same redacted log file the Share button shares, to the test
-          inbox endpoint. Confirm dialog shows the size and the
-          redacted-only note; failure falls back to Share log. */}
+          redacted log file the Share button shares, to the test inbox
+          endpoint. Delta uploads: only lines appended since the last
+          successful send go up; the watermark advances only on
+          success, and a send with nothing new reports that instead
+          of uploading an empty body. Confirm dialog shows the new
+          line count for a delta, the full size for a full upload;
+          failure falls back to Share log. */}
           <Pressable
             style={styles.button}
             onPress={() => {
@@ -262,6 +276,8 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
               setInboxFailed(false);
               setInboxError(null);
               setInboxSentId(null);
+              setInboxNothingNew(false);
+              setInboxLastUpload(null);
               void (async () => {
                 let logText: string;
                 try {
@@ -282,52 +298,73 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
                   );
                   return;
                 }
-                const size = formatLogInboxSize(logTextByteLength(logText));
-                Alert.alert(
-                  t('settings.diagnosticsSendToInbox'),
-                  t('settings.diagnosticsSendToInboxConfirm', { size }),
-                  [
-                    { text: t('common.cancel'), style: 'cancel' },
-                    {
-                      text: t('settings.diagnosticsSendToInbox'),
-                      onPress: () => {
-                        setInboxSending(true);
-                        recordInboxEvent('upload started');
-                        void sendDiagnosticsLogToInbox({
-                          logText,
-                          version: Constants.expoConfig?.version ?? 'unknown',
-                          uploadedAt: new Date().toISOString(),
-                        })
-                          .then((result) => {
-                            if (result.truncated) {
-                              recordInboxEvent(
-                                `upload truncated original=${result.originalBytes}`,
-                              );
-                            }
-                            recordInboxEvent('upload sent');
-                            setInboxSentId(result.id);
-                            setLogStatus(getDiagnosticsLogStatus());
-                          })
-                          .catch((error: unknown) => {
+                const plan = planLogInboxUpload(logText, await readLogInboxWatermark(getKv()));
+                if (plan.plan === 'none') {
+                  recordInboxEvent('upload skipped nothing-new');
+                  setInboxNothingNew(true);
+                  return;
+                }
+                const confirmMessage =
+                  plan.kind === 'delta'
+                    ? t('settings.diagnosticsSendToInboxConfirmDelta', { count: plan.lines })
+                    : t('settings.diagnosticsSendToInboxConfirm', {
+                        size: formatLogInboxSize(logTextByteLength(logText)),
+                      });
+                Alert.alert(t('settings.diagnosticsSendToInbox'), confirmMessage, [
+                  { text: t('common.cancel'), style: 'cancel' },
+                  {
+                    text: t('settings.diagnosticsSendToInbox'),
+                    onPress: () => {
+                      setInboxSending(true);
+                      recordInboxEvent('upload started');
+                      void sendDiagnosticsLogToInbox({
+                        logText: plan.text,
+                        version: Constants.expoConfig?.version ?? 'unknown',
+                        uploadedAt: new Date().toISOString(),
+                        kind: plan.kind,
+                        lines: plan.lines,
+                      })
+                        .then(async (result) => {
+                          if (result.truncated) {
                             recordInboxEvent(
-                              `upload failed ${String(error instanceof Error ? error.message : error)
-                                .replace(/[\r\n]+/g, ' ')
-                                .trim()
-                                .slice(0, 60)}`,
+                              `upload truncated original=${result.originalBytes}`,
                             );
-                            setInboxFailed(true);
-                            setInboxError(
-                              String(error instanceof Error ? error.message : error)
-                                .replace(/[\r\n]+/g, ' ')
-                                .trim()
-                                .slice(0, 120),
-                            );
-                          })
-                          .finally(() => setInboxSending(false));
-                      },
+                          }
+                          // Advance the watermark only on success: a
+                          // failure leaves it untouched, so the next
+                          // Send retries this same delta instead of
+                          // losing it. A watermark write failure after
+                          // a successful upload is safe the same way.
+                          try {
+                            await writeLogInboxWatermark(getKv(), plan.newWatermark);
+                          } catch {
+                            // Upload already succeeded; the next Send
+                            // re-sends this delta. Nothing to show.
+                          }
+                          recordInboxEvent('upload sent');
+                          setInboxSentId(result.id);
+                          setInboxLastUpload({ kind: result.kind, lines: result.lines });
+                          setLogStatus(getDiagnosticsLogStatus());
+                        })
+                        .catch((error: unknown) => {
+                          recordInboxEvent(
+                            `upload failed ${String(error instanceof Error ? error.message : error)
+                              .replace(/[\r\n]+/g, ' ')
+                              .trim()
+                              .slice(0, 60)}`,
+                          );
+                          setInboxFailed(true);
+                          setInboxError(
+                            String(error instanceof Error ? error.message : error)
+                              .replace(/[\r\n]+/g, ' ')
+                              .trim()
+                              .slice(0, 120),
+                          );
+                        })
+                        .finally(() => setInboxSending(false));
                     },
-                  ],
-                );
+                  },
+                ]);
               })();
             }}
             accessibilityRole="button"
@@ -420,10 +457,23 @@ const Diagnostics: React.FC<DiagnosticsProps> = ({ onBack }) => {
             <Text style={[type.meta, styles.note]}>
               {t('settings.diagnosticsSendToInboxSent')}
             </Text>
+            {inboxLastUpload !== null && (
+              <Text style={[type.meta, styles.note]}>
+                {t('settings.diagnosticsSendToInboxSummary', {
+                  count: inboxLastUpload.lines,
+                  kind: inboxLastUpload.kind,
+                })}
+              </Text>
+            )}
             <Text style={[type.meta, styles.note]}>
               {t('settings.diagnosticsSendToInboxId', { id: inboxSentId })}
             </Text>
           </>
+        )}
+        {inboxNothingNew && (
+          <Text style={[type.meta, styles.note]}>
+            {t('settings.diagnosticsSendToInboxNothingNew')}
+          </Text>
         )}
         {inboxFailed && (
           <Text style={[type.meta, styles.note]}>

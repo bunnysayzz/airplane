@@ -18,6 +18,8 @@ import {
   formatDiagnosticsLogLine,
   type DiagnosticsLogFilePort,
 } from './diagnosticsLog';
+import { getKv } from './kv';
+import { initializeLogInboxWatermarkIfNeeded } from './logInbox';
 
 export const DIAGNOSTICS_LOG_FILE_NAME = 'airplane-diagnostics.log';
 /** Status marker when no document directory exists: never a bare filename. */
@@ -77,6 +79,20 @@ export async function startDiagnosticsLogFile(): Promise<void> {
   try {
     writer = new DiagnosticsLogWriter(createExpoDiagnosticsLogPort());
     await writer.load();
+    // First launch after the delta-upload version ships: anchor the
+    // upload watermark at the current end of file, so the first Send
+    // after upgrade uploads only lines appended after the upgrade
+    // and never re-dumps the history the tester already sent. Best
+    // effort only: a KV failure must never break logging startup,
+    // and the send flow falls back to one full upload instead.
+    try {
+      const head = getDiagnosticsLogWatermarkHead();
+      if (head !== null) {
+        await initializeLogInboxWatermarkIfNeeded(getKv(), head.byteCount, head.headLine);
+      }
+    } catch {
+      // Ignore: the watermark stays absent and Send falls back to full.
+    }
     attachDiagnosticsLogWriter(writer);
     writer.append(formatDiagnosticsLogLine(Date.now(), 'app', 'started'));
     // A disabled Sentry client is otherwise invisible: one log line per
@@ -137,6 +153,23 @@ export interface DiagnosticsLogFileStatus {
   sentryEnabled: boolean;
   fileName: string;
   fileUri: string;
+}
+
+/**
+ * Head of the current log for the upload watermark: the byte length
+ * of the loaded file plus its first line, the generation fingerprint.
+ * Null when the writer never started or the load failed: the
+ * watermark must not anchor on a file that could not be read, or a
+ * later Send would delta against the wrong head. TESTING ONLY with
+ * the test inbox upload.
+ */
+export function getDiagnosticsLogWatermarkHead(): {
+  byteCount: number;
+  headLine: string;
+} | null {
+  if (writer === null || writer.getLoadOk() !== true) return null;
+  const lines = writer.getLines();
+  return { byteCount: writer.getByteCount(), headLine: lines.length > 0 ? lines[0] : '' };
 }
 
 export function getDiagnosticsLogStatus(): DiagnosticsLogFileStatus {
