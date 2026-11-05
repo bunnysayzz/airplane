@@ -55,6 +55,8 @@ class FakeCentral implements CentralAdapter {
   writesWithoutResponse: { id: string; char: string; chunk: Uint8Array }[] = [];
   mtu = 512;
   failConnect = new Set<string>();
+  /** Error thrown by connect() for ids in failConnect (default: 'connect refused'). */
+  failConnectError: Error | null = null;
   failStart = false;
   failWrite = false;
   stateCb: ((state: string) => void) | null = null;
@@ -81,7 +83,7 @@ class FakeCentral implements CentralAdapter {
   }
   async connect(id: string): Promise<void> {
     this.connectAttempts.push(id);
-    if (this.failConnect.has(id)) throw new Error('connect refused');
+    if (this.failConnect.has(id)) throw this.failConnectError ?? new Error('connect refused');
     this.connects.push(id);
   }
   async disconnect(id: string): Promise<void> {
@@ -961,6 +963,113 @@ describe('auto-connect bounded retry (audit P1-19)', () => {
     expect(failures[1]).toContain('ident retry failed');
     expect(lines.some((l) => l.includes('ident retry tag:'))).toBe(false);
     resetDiagnosticsForTests();
+    await port.close();
+  });
+});
+
+describe('connect-timeout cooldown (2026-11-05 field evidence)', () => {
+  test('repeated sightings during a connect-timeout outage stay quiet after the first failure and one retry', async () => {
+    const { deps, central } = makeDeps();
+    central.failConnect.add('ble-1');
+    central.failConnectError = new Error('ble: central connect timed out after 10000ms');
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    // Storm cadence: the same peer sighted five times in quick
+    // succession while every connect hangs until the 10 s deadline.
+    for (let i = 0; i < 5; i++) {
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    }
+    // Past the 2 s scheduled retry: first attempt + one retry, then
+    // the cooldown gates every later sighting.
+    await new Promise((r) => setTimeout(r, 3200));
+    expect(central.connectAttempts.length).toBe(2);
+    const failures = lines.filter((l) => l.includes('peer connect failed'));
+    expect(failures).toHaveLength(2);
+    expect(failures[0]).toContain('auto-connect');
+    expect(failures[0]).toContain('central connect timed out after 10000ms');
+    expect(failures[1]).toContain('auto-connect retry failed');
+    // Further sightings inside the cooldown start no new attempt.
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connectAttempts.length).toBe(2);
+    resetDiagnosticsForTests();
+    await port.close();
+  });
+
+  test('a device-disconnected failure arms the cooldown the same way', async () => {
+    const { deps, central } = makeDeps();
+    central.failConnect.add('ble-1');
+    central.failConnectError = new Error('ble: connect failed: Device disconnected');
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    for (let i = 0; i < 3; i++) {
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    }
+    await new Promise((r) => setTimeout(r, 3200));
+    expect(central.connectAttempts.length).toBe(2);
+    const failures = lines.filter((l) => l.includes('peer connect failed'));
+    expect(failures).toHaveLength(2);
+    expect(failures[0]).toContain('Device disconnected');
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connectAttempts.length).toBe(2);
+    resetDiagnosticsForTests();
+    await port.close();
+  });
+
+  test('a connectGatt-null failure arms the cooldown the same way', async () => {
+    const { deps, central } = makeDeps();
+    central.failConnect.add('ble-1');
+    central.failConnectError = new Error('Connection failed to start: connectGatt returned null');
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    for (let i = 0; i < 3; i++) {
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    }
+    await new Promise((r) => setTimeout(r, 3200));
+    expect(central.connectAttempts.length).toBe(2);
+    const failures = lines.filter((l) => l.includes('peer connect failed'));
+    expect(failures).toHaveLength(2);
+    expect(failures[0]).toContain('connectGatt returned null');
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connectAttempts.length).toBe(2);
+    resetDiagnosticsForTests();
+    await port.close();
+  });
+
+  test('a tag-mismatch failure does not arm the cooldown', async () => {
+    const { deps, central } = makeDeps();
+    // The peer answers IDENT with a key whose tag differs from the
+    // advertised tag: a deterministic mismatch, not an outage.
+    central.identHex = toHex(SMALLER_PUB);
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connectAttempts.length).toBe(1);
+    expect(port.peerCount).toBe(0);
+    // The single retry fires after about 2s and fails the same way.
+    await new Promise((r) => setTimeout(r, 2200));
+    expect(central.connectAttempts.length).toBe(2);
+    // No cooldown was armed, so a fresh sighting starts a new attempt.
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connectAttempts.length).toBe(3);
     await port.close();
   });
 });

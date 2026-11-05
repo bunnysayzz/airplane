@@ -230,23 +230,47 @@ function isProvisionalKey(key: string): boolean {
 /** Single auto-connect retry delay (ms). One retry only, never a loop. */
 export const AUTO_CONNECT_RETRY_MS = 2000;
 /**
- * Sightings-driven connect cooldown after a failed IDENT read:
- * first IDENT failure cools the peer for 10 seconds, doubling per
- * further IDENT failure up to 60 seconds. A sighting during
- * cooldown starts no connect and logs nothing: the v0.1.23 storm
- * was sightings at sub-second cadence each starting a connect
- * against a peer whose GATT server was transiently gone, 35 ident
- * retry lines in about a minute, every one an IDENT not-found.
- * The gate arms ONLY on IDENT failures (the observed storm shape):
- * other auto-connect failures (hello-write, tag mismatch, connect
- * refused) keep immediate sighting retries, preserving the
- * established bleId-reuse contract that a fixed peer reconnects
- * on its next sighting. The single scheduled 2 second retry stays
- * exempt as the one prompt retry; after it is spent, sightings
- * stay quiet until the cooldown expires or a fresh episode starts.
+ * Sightings-driven connect cooldown after a transient connect failure:
+ * first failure cools the peer for 10 seconds, doubling per further
+ * failure up to 60 seconds. A sighting during cooldown starts no
+ * connect and logs nothing: the v0.1.23 storm was sightings at
+ * sub-second cadence each starting a connect against a peer whose
+ * GATT server was transiently gone, 35 ident retry lines in about a
+ * minute, every one an IDENT not-found. The v0.1.24 gate armed only
+ * on IDENT failures, and the same storm shape returned on 2026-11-05
+ * for the connect-timeout class (19 timeouts, one every 10 s for
+ * over 3 minutes, peer sighted 1338 times in 4 minutes), so the gate
+ * now arms on every transient-unavailability class (see
+ * TRANSIENT_CONNECT_FAILURES). Deterministic failures (tag mismatch,
+ * malformed IDENT, peer limit, connect refused) keep immediate
+ * sighting retries, preserving the established bleId-reuse contract
+ * that a fixed peer reconnects on its next sighting. The single
+ * scheduled 2 second retry stays exempt as the one prompt retry;
+ * after it is spent, sightings stay quiet until the cooldown expires
+ * or a fresh episode starts.
  */
 export const AUTO_CONNECT_COOLDOWN_BASE_MS = 10_000;
 export const AUTO_CONNECT_COOLDOWN_MAX_MS = 60_000;
+/**
+ * Connect-stage failure messages that mean the peer's GATT endpoint
+ * is transiently unavailable, so the sighting cooldown arms on them
+ * (see noteConnectFailure). Field evidence 2026-11-05, v0.1.24
+ * two-phone session: 19 consecutive "central connect timed out
+ * after 10000ms" failures, one every 10 s for over 3 minutes, while
+ * the peer was sighted 1338 times in 4 minutes, then "connectGatt
+ * returned null" twice as the wedged native connects poisoned the
+ * stack. Any stage timeout matches, not only the connect stage: a
+ * retrieveServices, IDENT read, hello-write, or notification
+ * timeout means the same unusable link. Deterministic failures stay
+ * outside the gate (see the cooldown comment above).
+ */
+const TRANSIENT_CONNECT_FAILURES: RegExp[] = [
+  /ident retry failed/i,
+  /timed out after \d+ms/i,
+  /device disconnected/i,
+  /disconnected by BleManager/i,
+  /connectGatt returned null/i,
+];
 /** Settle delay before the IDENT re-read after fresh discovery. */
 export const IDENT_RETRY_SETTLE_MS = 300;
 
@@ -662,22 +686,23 @@ export class GattBlePort implements TransportPort {
       recordConnectFailure(
         `auto-connect tag:${toHex(tag)}: ${err instanceof Error ? err.message : String(err)}`,
       );
-      this.noteIdentFailure(id, err);
+      this.noteConnectFailure(id, err);
       this.scheduleAutoConnectRetry(id, tag);
     });
   }
 
   /**
-   * Record one IDENT failure for a bleId and start (or extend) its
-   * sighting cooldown: base delay doubling per consecutive IDENT
-   * failure, capped. Non-IDENT failures do not arm the gate (see the
-   * constant comment above). A successful connect or a disconnect
-   * clears the counters (see registerConn and dropConn), so the
-   * backoff spans one disconnect episode, not the whole session.
+   * Record one transient connect failure for a bleId and start (or
+   * extend) its sighting cooldown: base delay doubling per consecutive
+   * failure, capped. Only the transient-unavailability classes arm
+   * the gate (see TRANSIENT_CONNECT_FAILURES); deterministic failures
+   * do not. A successful connect or a disconnect clears the counters
+   * (see registerConn and dropConn), so the backoff spans one
+   * disconnect episode, not the whole session.
    */
-  private noteIdentFailure(bleId: string, err: unknown): void {
+  private noteConnectFailure(bleId: string, err: unknown): void {
     const message = err instanceof Error ? err.message : String(err);
-    if (!/ident retry failed/i.test(message)) return;
+    if (!TRANSIENT_CONNECT_FAILURES.some((re) => re.test(message))) return;
     const failures = (this.connectCooldownFailures.get(bleId) ?? 0) + 1;
     this.connectCooldownFailures.set(bleId, failures);
     const delay = Math.min(
@@ -716,7 +741,7 @@ export class GattBlePort implements TransportPort {
         recordConnectFailure(
           `auto-connect retry failed tag:${toHex(tag)}: ${err instanceof Error ? err.message : String(err)}`,
         );
-        this.noteIdentFailure(bleId, err);
+        this.noteConnectFailure(bleId, err);
       });
     }, AUTO_CONNECT_RETRY_MS);
     this.autoConnectRetries.set(bleId, timer);
