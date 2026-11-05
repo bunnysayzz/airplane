@@ -408,6 +408,7 @@ describe('HybridTransport', () => {
     h.nostr.publishWithAck = async () => ({
       ok: ['wss://relay.test'],
       rejected: [],
+      rejectionReasons: [],
       timedOut: false,
       cancelled: false,
     });
@@ -443,6 +444,7 @@ describe('HybridTransport', () => {
     h.nostr.publishWithAck = async () => ({
       ok: [],
       rejected: [],
+      rejectionReasons: [],
       timedOut: true,
       cancelled: false,
     });

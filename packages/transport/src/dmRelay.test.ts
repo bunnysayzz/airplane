@@ -201,7 +201,31 @@ describe('WsDmRelay.publish socket paths (P1-11)', () => {
     const event = sent[1] as { id: string };
     // The old code ignored OK=false and burned the full timeout here.
     sockets[0].receive(['OK', event.id, false, 'restricted: kind not allowed']);
-    await expect(result).resolves.toEqual({ accepted: false, rejected: true });
+    // The relay's own reason is kept now, so the rejection is
+    // diagnosable instead of generic.
+    await expect(result).resolves.toEqual({
+      accepted: false,
+      rejected: true,
+      reason: 'restricted: kind not allowed',
+    });
+  });
+
+  test('a duplicate rejection is accepted as stored, not as a failure', async () => {
+    const sockets: FakeSocket[] = [];
+    const relay = makeRelay(sockets, { publishTimeoutMs: 60000 });
+    const envelope = sealDm('already there', 'd'.repeat(64), 'e'.repeat(64));
+    const result = relay.publish(envelope);
+    sockets[0].open();
+    await tick();
+    const sent = JSON.parse(sockets[0].sent[0]) as unknown[];
+    const event = sent[1] as { id: string };
+    sockets[0].receive(['OK', event.id, false, 'duplicate: already stored']);
+    await expect(result).resolves.toEqual({
+      accepted: true,
+      rejected: false,
+      reason: 'duplicate: already stored',
+      duplicate: true,
+    });
   });
 
   test('a send throw resolves failed; the pooled socket stays open', async () => {

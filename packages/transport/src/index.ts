@@ -27,6 +27,22 @@ export type { HybridTransportOpts, HybridDiagnosticsOpts, IngressSource, RouterO
 export { WorldSync } from './sync';
 export type { SyncReport, WorldConfirmStore } from './sync';
 
+export {
+  BALANCER_BACKOFF_BASE_MS,
+  BALANCER_BACKOFF_MAX_MS,
+  applyPeerConnected,
+  applyPeerFailure,
+  applyRelayOk,
+  applyRelayRejection,
+  healthSummary,
+  isDuplicateRejection,
+  isPeerHealthy,
+  isRelayViable,
+  nextBackoffMs,
+  planSend,
+} from './balancer';
+export type { BalancerPath, PeerHealth, RelayHealth, RoutePlan, TransportHealth } from './balancer';
+
 export { normalizeRelayUrl, sanitizeRelayList } from './relayUrls';
 export type { RelayUrlOpts } from './relayUrls';
 

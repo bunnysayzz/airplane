@@ -189,7 +189,7 @@ describe('WorldSync', () => {
     expect(await store.isWorldConfirmed(id)).toBe(true);
   });
 
-  test('sync is idempotent across runs (second run pushes nothing new)', async () => {
+  test('sync is idempotent across runs (grace push once, then nothing new)', async () => {
     const store = new FakeConfirmStore();
     const nostr = new FakeNostr();
     const sync = new WorldSync(nostr as never, store);
@@ -199,9 +199,15 @@ describe('WorldSync', () => {
     // Simulate the relay echo confirming it.
     await store.markWorldConfirmed(id);
 
+    // The grace re-push (v0.1.27) fires exactly once after
+    // confirmation, so a receiver that never fetched the event gets a
+    // second chance; after that the confirmed event stays quiet.
     const report2 = await sync.sync();
-    expect(report2.pushed).toEqual([]);
-    expect(nostr.published).toHaveLength(1); // only the first run published
+    expect(report2.pushed).toEqual([id]);
+    expect(nostr.published).toHaveLength(2);
+    const report3 = await sync.sync();
+    expect(report3.pushed).toEqual([]);
+    expect(nostr.published).toHaveLength(2);
   });
 
   test('concurrent sync calls share one in-flight pass, not two pushes', async () => {
@@ -296,5 +302,52 @@ describe('WorldSync', () => {
     const report = await restarted.sync();
     expect(report.pushed).toEqual([]);
     expect(nostr.published).toHaveLength(0);
+  });
+});
+
+describe('WorldSync grace re-push (v0.1.27)', () => {
+  test('a pushed event gets exactly one extra push after confirmation, then stops', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    const sync = new WorldSync(nostr as never, store);
+
+    const event = makePost('grace me');
+    const id = store.add(event);
+
+    // Pass 1: pushed from the unconfirmed list.
+    const r1 = await sync.sync();
+    expect(r1.pushed).toContain(id);
+    expect(nostr.published).toHaveLength(1);
+
+    // The receiver never fetched it, but a query hit confirmed it on
+    // this phone, so the unconfirmed list is now empty.
+    await store.markWorldConfirmed(id);
+    expect(await store.getUnconfirmed()).toEqual([]);
+
+    // Pass 2: the grace re-push fires once, so the receiver gets a
+    // second chance to fetch the event from a relay.
+    const r2 = await sync.sync();
+    expect(r2.pushed).toContain(id);
+    expect(nostr.published).toHaveLength(2);
+
+    // Pass 3: grace is spent. No more pushes for a confirmed event.
+    const r3 = await sync.sync();
+    expect(r3.pushed).not.toContain(id);
+    expect(nostr.published).toHaveLength(2);
+  });
+
+  test('an unconfirmed event keeps pushing from the backlog, not from grace alone', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    nostr.ackOk = false; // relays silently drop: never OK, never confirmed
+    const sync = new WorldSync(nostr as never, store);
+
+    const event = makePost('still unconfirmed');
+    const id = store.add(event);
+    await sync.sync();
+    await sync.sync();
+    // Still unconfirmed, so both passes attempted the push from the
+    // backlog; the grace set never double-counts it.
+    expect(nostr.published.filter((e) => toHex(e.id) === id)).toHaveLength(2);
   });
 });

@@ -174,7 +174,33 @@ describe('Ordered router publish', () => {
     expect(res.transport).toBe('mesh');
     expect(res.status).toBe('sent');
     expect(res.relayTried).toBe(true);
-    expect(res.relayDetail).toBe('relays rejected the event');
+    // The relay's own reason rides the detail line now, so a rejection
+    // is diagnosable instead of generic.
+    expect(res.relayDetail).toBe('relays rejected the event: wss://mock.relay rejected');
+    expect(res.relayRejections).toEqual([{ url: 'wss://mock.relay', reason: 'rejected' }]);
+    expect(port.sent.length).toBeGreaterThan(0);
+    await h.stop();
+  });
+
+  test('duplicate relay rejection counts as a relay win, not a failure', async () => {
+    const { h, port, sockets } = makeRouter();
+    await h.start();
+    sockets[0].open();
+    await tick();
+
+    const event = makePost('relay already has it');
+    const pending = h.publish(event, ['p1']);
+    await tick();
+    sockets[0].inject(['OK', sentEnvelopeId(sockets[0]), false, 'duplicate: already stored']);
+    const res = await pending;
+
+    expect(res.transport).toBe('relay');
+    expect(res.status).toBe('relayed');
+    expect(res.relayDuplicate).toBe(true);
+    expect(res.relayRejections).toEqual([
+      { url: 'wss://mock.relay', reason: 'duplicate: already stored' },
+    ]);
+    // Relay win still seeds the radio, best effort.
     expect(port.sent.length).toBeGreaterThan(0);
     await h.stop();
   });

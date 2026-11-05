@@ -67,7 +67,7 @@ describe('WorldSync over MemoryEventStore', () => {
     expect(nostr.queried[0]).toEqual(expect.arrayContaining([toHex(e1.id), toHex(e2.id)]));
   });
 
-  test('full loop: push -> relay echo via confirmListener -> excluded from next sync', async () => {
+  test('full loop: push -> relay echo via confirmListener -> grace push once, then excluded', async () => {
     const store = new MemoryEventStore();
     const event = freshPost('round trip');
     await store.saveEvent(event);
@@ -83,9 +83,15 @@ describe('WorldSync over MemoryEventStore', () => {
     expect(await store.isWorldConfirmed(idHex)).toBe(true);
     expect(await store.getUnconfirmed()).toEqual([]);
 
+    // Grace re-push (v0.1.27): one extra push after confirmation,
+    // so a receiver that never fetched it gets a second chance.
     const report2 = await sync.sync();
-    expect(report2.pushed).toEqual([]);
-    expect(nostr.published).toHaveLength(1); // nothing re-pushed
+    expect(report2.pushed).toEqual([idHex]);
+    expect(nostr.published).toHaveLength(2);
+    // After the grace, the confirmed event stays quiet.
+    const report3 = await sync.sync();
+    expect(report3.pushed).toEqual([]);
+    expect(nostr.published).toHaveLength(2);
   });
 
   test('empty store: sync returns an empty report and queries nothing', async () => {

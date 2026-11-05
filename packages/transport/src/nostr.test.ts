@@ -902,3 +902,133 @@ describe('NostrTransport reconnect backoff', () => {
     }
   });
 });
+
+describe('NostrTransport v0.1.27 load balancer', () => {
+  test('rejection reason is carried in the ack, per relay', async () => {
+    const { t, sockets } = makeTransport(['wss://a.relay', 'wss://b.relay']);
+    await t.start();
+    await tick(20);
+    const event = makePost('rejected');
+    const ackPromise = t.publishWithAck(event, 5000);
+    await tick(10);
+    const sentA = JSON.parse(sockets[0].sent.find((s) => s.includes('"EVENT"'))!);
+    const sentB = JSON.parse(sockets[1].sent.find((s) => s.includes('"EVENT"'))!);
+    sockets[0].receive(['OK', sentA[1].id, false, 'rate-limited: slow down']);
+    sockets[1].receive(['OK', sentB[1].id, false, 'blocked: policy']);
+    const ack = await ackPromise;
+    expect(ack.ok).toEqual([]);
+    expect(ack.rejected).toEqual(['wss://a.relay', 'wss://b.relay']);
+    expect(ack.rejectionReasons).toEqual([
+      { url: 'wss://a.relay', reason: 'rate-limited: slow down' },
+      { url: 'wss://b.relay', reason: 'blocked: policy' },
+    ]);
+    await t.stop();
+  });
+
+  test('duplicate rejection reason is kept, not lost', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    const ackPromise = t.publishWithAck(makePost('dup'), 5000);
+    await tick(10);
+    const sent = JSON.parse(sockets[0].sent.find((s) => s.includes('"EVENT"'))!);
+    sockets[0].receive(['OK', sent[1].id, false, 'duplicate: already stored']);
+    const ack = await ackPromise;
+    expect(ack.rejected).toEqual(['wss://test.relay']);
+    expect(ack.rejectionReasons).toEqual([
+      { url: 'wss://test.relay', reason: 'duplicate: already stored' },
+    ]);
+    await t.stop();
+  });
+
+  test('per-socket replay anchors: a late relay replays from its own window, not the global one', async () => {
+    const sockets: FakeSocket[] = [];
+    const resubscribes: Array<{ since: number; relay: string; source: string }> = [];
+    const t = new NostrTransport({
+      relays: ['wss://a.relay', 'wss://b.relay'],
+      reconnectMs: 10,
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+      onResubscribe: (since, relayUrl, source) => {
+        resubscribes.push({ since, relay: relayUrl, source });
+      },
+    });
+    await t.start();
+    await tick(20);
+    // Relay A delivers an event with a recent created_at; relay B
+    // delivers nothing. A reconnect of B must NOT use A's anchor:
+    // events only B could have delivered would fall out of the window.
+    const keys = generateNostrKeypair();
+    const seenAt = Math.floor(Date.now() / 1000) - 1000;
+    const reqA = sockets[0].sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    sockets[0].receive(['EVENT', reqA[1], wrapEvent(makePost('on A'), keys, seenAt)]);
+    await tick(10);
+    sockets[1].close(); // B reconnects; A stays up.
+    await tick(50);
+    const bSocket = sockets.find((s) => s.url === 'wss://b.relay' && s !== sockets[1]);
+    expect(bSocket).toBeDefined();
+    const reqB = bSocket!.sent.map((s) => JSON.parse(s)).find((m) => m[0] === 'REQ');
+    expect(reqB[2].since as number).toBeLessThan(Math.floor(Date.now() / 1000) - 80000);
+    const bResub = resubscribes.find((r) => r.relay === 'wss://b.relay');
+    expect(bResub?.source).toBe('cap');
+    // A reconnects: its window anchors on the event A actually saw.
+    sockets[0].close();
+    await tick(50);
+    const aResub = resubscribes.filter((r) => r.relay === 'wss://a.relay').pop();
+    expect(aResub?.source).toBe('anchor');
+    expect(aResub?.since).toBe(seenAt - 300);
+    await t.stop();
+  });
+
+  test('catchUpAuthors sends an authors REQ with no cell filter', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    const author = 'cc'.repeat(32);
+    const sent = await t.catchUpAuthors([author, 'not-hex', author], Math.floor(Date.now() / 1000) - 3600);
+    expect(sent).toBe(true);
+    const req = sockets[0].sent
+      .map((s) => JSON.parse(s))
+      .find((m) => m[0] === 'REQ' && m[2] && 'authors' in m[2]);
+    expect(req).toBeDefined();
+    expect(req[2].authors).toEqual([author]);
+    expect(req[2]['#g']).toBeUndefined();
+    await t.stop();
+  });
+
+  test('catchUpAuthors with no valid authors sends nothing', async () => {
+    const { t, sockets } = makeTransport();
+    await t.start();
+    await tick(20);
+    const sent = await t.catchUpAuthors(['nope'], 0);
+    expect(sent).toBe(false);
+    const req = sockets[0].sent
+      .map((s) => JSON.parse(s))
+      .find((m) => m[0] === 'REQ' && m[2] && 'authors' in m[2]);
+    expect(req).toBeUndefined();
+    await t.stop();
+  });
+
+  test('backed-off relay is skipped by publishes and online, but still receives', async () => {
+    const { t } = makeTransport(['wss://a.relay', 'wss://b.relay']);
+    await t.start();
+    await tick(20);
+    expect(t.online).toBe(true);
+    t.setRelayBackoff('wss://a.relay', Date.now() + 60_000);
+    const urls = await t.publish(makePost('backed off'));
+    expect(urls).toEqual(['wss://b.relay']);
+    // Both backed off: no live relay for a publish.
+    t.setRelayBackoff('wss://b.relay', Date.now() + 60_000);
+    expect(t.online).toBe(false);
+    expect(await t.publish(makePost('nowhere'))).toEqual([]);
+    // Expiry re-probes: online again without any reconnect.
+    t.setRelayBackoff('wss://a.relay', Date.now() - 1);
+    t.setRelayBackoff('wss://b.relay', Date.now() - 1);
+    expect(t.online).toBe(true);
+    await t.stop();
+  });
+});

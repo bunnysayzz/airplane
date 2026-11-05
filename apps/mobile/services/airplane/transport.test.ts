@@ -30,7 +30,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, __resetNetInfoForTests, __resetPulledPostsForTests, __resetFailedInboundForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
+import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, buildTransportHealth, runAuthorCatchUp, __resetBalancerForTests, __resetNetInfoForTests, __resetPulledPostsForTests, __resetFailedInboundForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
@@ -42,7 +42,7 @@ import {
 } from './reshares';
 import { NobleCrypto, createReshare, fromHex, toHex } from '@airplane/protocol';
 import type { PostCardModel } from './types';
-import { getDiagnosticsSnapshot, resetDiagnosticsForTests } from './diagnostics';
+import { getDiagnosticsSnapshot, resetDiagnosticsForTests, setDiagnosticsLogSink } from './diagnostics';
 import { DEFAULT_RELAYS, RELAYS_KEY } from '../../src/lib/relays';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -58,10 +58,13 @@ class FakeSocket {
   onerror: ((ev: unknown) => void) | null = null;
   onclose: ((ev: unknown) => void) | null = null;
   readyState = 0;
+  sent: string[] = [];
   constructor(public url: string) {
     FakeSocket.instances.push(this);
   }
-  send(): void {}
+  send(data: string): void {
+    this.sent.push(data);
+  }
   close(): void {
     this.readyState = 3;
   }
@@ -1042,4 +1045,168 @@ describe('mesh-scan fix: scan failure keeps advertising', () => {
       __setBlePortForTests(null);
     }
   });
+
+describe('transport load balancer (v0.1.27)', () => {
+  const serviceLines: string[] = [];
+
+  beforeEach(() => {
+    serviceLines.length = 0;
+    setDiagnosticsLogSink((kind, detail) => {
+      if (kind === 'service') serviceLines.push(detail);
+    });
+    __resetBalancerForTests();
+  });
+
+  afterEach(() => {
+    setDiagnosticsLogSink(null);
+    __resetBalancerForTests();
+  });
+
+  test('a relay win keeps the outbox row as ble-sent, so a late peer still gets the post over BLE', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const event = { ...makeSignedEvent(), id: new Uint8Array(32).fill(51), created_at: Math.floor(Date.now() / 1000) - 600, tags: [['seq', '12']] };
+    await store.saveEvent(event);
+    await store.enqueuePostOutbox(toHex(event.id), event.created_at);
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'relay',
+      status: 'relayed',
+      blePeers: 0,
+      relays: ['wss://test.relay'],
+      relayTried: true,
+      relayDetail: null,
+    });
+    await publishViaTransport(event);
+    // The row must NOT be removed on relay win: a peer arriving after
+    // publish still needs a Bluetooth copy from the drain.
+    const rows = await store.listPostOutbox();
+    expect(rows.map((r) => r.eventId)).toContain(toHex(event.id));
+    expect(rows.find((r) => r.eventId === toHex(event.id))!.status).toBe('ble-sent');
+    // The late peer arrives: the drain hands it the same post.
+    jest.spyOn(hybrid!, 'sendOverMesh').mockResolvedValue(1);
+    __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
+    expect(await drainPostOutbox()).toBe(1);
+    __setBlePortForTests(null);
+  });
+
+  test('every publish logs the balancer route with its reason and health snapshot', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'none',
+      status: 'queued',
+      blePeers: 0,
+      relays: [],
+      relayTried: false,
+      relayDetail: 'no open relay socket',
+    });
+    await publishViaTransport(makeSignedEvent());
+    const route = serviceLines.find((l) => l.startsWith('balancer route '));
+    expect(route).toBeDefined();
+    expect(route!).toContain('queue');
+    expect(route!).toContain('no live path');
+    expect(route!).toContain('relays 0 open');
+  });
+
+  test('a real relay rejection backs the relay off and the backoff expiry re-probes it', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const relayUrl = DEFAULT_RELAYS[0];
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'none',
+      status: 'queued',
+      blePeers: 0,
+      relays: [],
+      relayTried: true,
+      relayDetail: `relays rejected the event: ${relayUrl} rate-limited: slow down`,
+      relayRejections: [{ url: relayUrl, reason: 'rate-limited: slow down' }],
+    });
+    await publishViaTransport(makeSignedEvent());
+    // The rejecting relay is backed off for 10 s on the first failure.
+    const health = buildTransportHealth();
+    const relay = health.relays.find((r) => r.url === relayUrl);
+    expect(relay).toBeDefined();
+    expect(relay!.backoffUntilMs).toBeGreaterThan(health.nowMs);
+    expect(relay!.backoffUntilMs - health.nowMs).toBe(10_000);
+    // Advancing past the window re-probes: the backoff has expired.
+    await jest.advanceTimersByTimeAsync(11_000);
+    const after = buildTransportHealth();
+    const relayAfter = after.relays.find((r) => r.url === relayUrl);
+    expect(relayAfter!.backoffUntilMs).toBeLessThanOrEqual(after.nowMs);
+  });
+
+  test('a duplicate relay rejection backs nothing off', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const relayUrl = DEFAULT_RELAYS[0];
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'relay',
+      status: 'relayed',
+      blePeers: 0,
+      relays: [],
+      relayTried: true,
+      relayDetail: null,
+      relayRejections: [{ url: relayUrl, reason: 'duplicate: already stored' }],
+      relayDuplicate: true,
+    });
+    const event = { ...makeSignedEvent(), tags: [['seq', '13']] };
+    await publishViaTransport(event);
+    const health = buildTransportHealth();
+    const relay = health.relays.find((r) => r.url === relayUrl);
+    expect(relay?.backoffUntilMs ?? 0).toBe(0);
+    // The diagnostics line says duplicate, not a generic relay OK.
+    const lines = getDiagnosticsSnapshot().messages;
+    const line = lines.find((m) => m.direction === 'outbound' && m.kind === 'post');
+    expect(line).toBeDefined();
+    expect(line!.attempts[0]?.detail).toContain('duplicate');
+  });
+
+
+
+  test('author catch-up queries open relays for a recently seen author with no cell filter', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    // Bring the transport online via the NetInfo listener (the offline
+    // initial fetch stops Nostr right after start): the listener
+    // restart re-creates the relay sockets, and opening one gives the
+    // query somewhere to go. The listener must come from the live
+    // require-time NetInfo module, not the file-level netInfoMock: the
+    // 'survives NetInfo load failure' test above calls jest.resetModules,
+    // so the module transport.ts re-requires afterwards is a fresh
+    // instance and the file-level mock no longer receives registrations.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const liveNetInfo = require('@react-native-community/netinfo').default as {
+      addEventListener: jest.Mock;
+    };
+    const listener = liveNetInfo.addEventListener.mock.calls[0][0] as (s: {
+      isConnected: boolean;
+      isInternetReachable: boolean;
+    }) => void;
+    listener({ isConnected: true, isInternetReachable: true });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    // Bring one relay socket up so the query has somewhere to go.
+    const socket = FakeSocket.instances[FakeSocket.instances.length - 3];
+    expect(socket).toBeDefined();
+    socket.onopen?.({});
+    // A post arrives from a peer: that author is now recently seen.
+    const event = { ...makeSignedEvent(), pubkey: new Uint8Array(32).fill(9) };
+    hybrid!.ingress(event as never, 'nostr');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const sent = await runAuthorCatchUp();
+    expect(sent).toBe(true);
+    const req = socket.sent
+      .map((s: string) => JSON.parse(s))
+      .find((m: unknown[]) => m[0] === 'REQ' && m[2] && 'authors' in (m[2] as Record<string, unknown>));
+    expect(req).toBeDefined();
+    expect((req[2] as Record<string, unknown>).authors).toEqual([toHex(event.pubkey)]);
+    expect((req[2] as Record<string, unknown>)['#g']).toBeUndefined();
+    expect(serviceLines.some((l) => l.startsWith('relay author catch-up '))).toBe(true);
+  });
+});
 });
