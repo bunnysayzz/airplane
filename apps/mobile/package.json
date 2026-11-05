@@ -1,6 +1,6 @@
 {
   "name": "airplane",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "private": true,
   "main": "./index.js",
   "scripts": {
