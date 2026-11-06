@@ -94,6 +94,7 @@ import {
   recordScanSightings,
   recordScanStarted,
   recordScanStopped,
+  recordServiceEvent,
 } from '../diagnostics';
 import { Buffer } from 'buffer';
 import {
@@ -127,6 +128,13 @@ export interface CentralAdapter {
   retrieveServices(id: string): Promise<void>;
   requestMtu(id: string, mtu: number): Promise<number>;
   read(id: string, serviceUuid: string, charUuid: string): Promise<Uint8Array>;
+  /**
+   * Clear the native GATT service cache for a peer (ble-manager 12.6.0
+   * refreshCache, Android BluetoothGatt.refresh). Absent on older
+   * shapes; the IDENT retry treats it as unavailable and proceeds
+   * with re-discovery alone.
+   */
+  refreshCache?(id: string): Promise<boolean>;
   write(id: string, serviceUuid: string, charUuid: string, chunk: Uint8Array): Promise<void>;
   /**
    * Without-response write (ble-manager 12.6.0 writeWithoutResponse,
@@ -354,6 +362,16 @@ export class GattBlePort implements TransportPort {
   private advertisePromise: Promise<void> | null = null;
   /** bleIds with a handshake in flight: reserved before the first await, freed in finally. */
   private readonly pendingConnects = new Set<string>();
+  /**
+   * Tags (8 hex) with a central handshake in flight. The per-bleId set
+   * above cannot dedup a peer seen under a second BLE address (RPA
+   * rotation): two central connects then race for one peer, and the
+   * second discovery can return an incomplete service table, which is
+   * the intermittent IDENT not-found in the field (v0.1.31: two
+   * attempts 9 s apart for one tag, one succeeding, one failing).
+   * A registered central conn for the tag counts the same way.
+   */
+  private readonly pendingCentralTags = new Set<string>();
   /** One scheduled auto-connect retry per bleId (single retry, about 2s). */
   private readonly autoConnectRetries = new Map<string, ReturnType<typeof setTimeout>>();
   /** Sighting-connect cooldown per bleId (epoch ms until quiet ends). */
@@ -817,15 +835,27 @@ export class GattBlePort implements TransportPort {
     if (this.bleIndex.has(bleId)) return;
     if (this.pendingConnects.has(bleId)) return;
     if (!this.ownPeerId) throw new Error('ble: advertise() must run before connect');
+    // Per-tag dedup (see pendingCentralTags): a second BLE address for
+    // the same peer must not start a second central handshake while
+    // one is in flight or a central conn already covers the tag. A
+    // peripheral conn does not suppress it: the central link carries
+    // our TX subscription, which the peripheral link cannot.
+    const tagHex = toHex(tag);
+    if (this.pendingCentralTags.has(tagHex)) return;
+    for (const conn of this.conns.values()) {
+      if (conn.role === 'central' && conn.tag && toHex(conn.tag) === tagHex) return;
+    }
     // The peer-limit check counts reservations, not just registered conns:
     // two handshakes that both passed a conns-only check could together
     // exceed the limit. The reservation is made before the first await.
     if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) throw new Error('ble: peer limit reached');
     this.pendingConnects.add(bleId);
+    this.pendingCentralTags.add(tagHex);
     try {
       await this.connectCentralInner(central, bleId, tag);
     } finally {
       this.pendingConnects.delete(bleId);
+      this.pendingCentralTags.delete(tagHex);
     }
   }
 
@@ -847,55 +877,90 @@ export class GattBlePort implements TransportPort {
       } catch {
         // keep default 23
       }
-      // IDENT read race: right after service discovery, some Android
-      // stacks report the characteristic as not found even though the
-      // service is there, and the peer then connects fine moments
-      // later. On a not-found error only, re-run discovery, wait a
-      // brief settle so the peer GATT table is actually ready, and
-      // read once more before giving up. No line is logged here: the
-      // caller logs one auto-connect failure line per attempt, and a
-      // retry that then succeeds must leave only the later peer
-      // connected line, not a stale failed line (the v0.1.23 code
-      // logged the retry as failed before the second read ran).
-      // When the second read also fails, the thrown message carries
-      // an ident retry failed marker, so the caller's single failure
-      // line still shows the retry happened and lost.
-      let identRaw: Uint8Array;
+      // IDENT read: the peer identity for the central link. The read
+      // is flaky on Android: right after service discovery, some stacks
+      // report the characteristic as not found even though the service
+      // is there, and the retry then fails identically because Android
+      // caches the service table per device and a second
+      // discoverServices returns the cached table. On a not-found error
+      // only, clear the native GATT cache (refreshCache), re-run
+      // discovery, wait a brief settle so the peer GATT table is
+      // actually ready, and read once more. One line per retry episode
+      // records the stage outcome with timings, so the next device run
+      // can tell a stale cache apart from a genuinely missing
+      // characteristic. When the second read also fails, the link is
+      // NOT torn down: it is kept as a provisional tag-keyed conn and
+      // the inbound hello resolves the identity (the hello carries the
+      // full pubkey), so a flaky IDENT read no longer leaves the peer
+      // unready. The old code threw "ident retry failed" here, which
+      // the caller logged as a connect failure, armed the cooldown,
+      // and disconnected the native link (v0.1.31: three such failures
+      // in 4.5 minutes, BLE carrying nothing all window).
+      const identStartMs = Date.now();
+      let identRaw: Uint8Array | null = null;
       try {
         identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         if (!/not found/i.test(message)) throw error;
+        const refresh = await this.refreshGattCache(central, bleId);
         await withBleTimeout(central.retrieveServices(bleId), BLE_TIMEOUT_MS.retrieveServices, 'retrieveServices');
         await new Promise((resolve) => setTimeout(resolve, IDENT_RETRY_SETTLE_MS));
         try {
           identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
-        } catch (retryError: unknown) {
-          const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
-          throw new Error(`ble: ident retry failed: ${retryMessage}`);
+          recordServiceEvent(
+            `ble ident retry tag ${toHex(tag).slice(0, 8)} refreshCache ${refresh} read2 ok ${Date.now() - identStartMs}ms`,
+          );
+        } catch {
+          recordServiceEvent(
+            `ble ident retry tag ${toHex(tag).slice(0, 8)} refreshCache ${refresh} read2 not-found ${Date.now() - identStartMs}ms link provisional`,
+          );
+          // Fall through with identRaw null: provisional path below.
         }
       }
-      const peerId = new TextDecoder().decode(identRaw);
-      if (!HEX64_RE.test(peerId)) throw new Error('ble: peer IDENT malformed');
-      // Bind the claimed identity to the discovery hint: the IDENT pubkey
-      // must carry the advertised tag, or this is a different peer (or a
-      // spoofed IDENT) and the connect must fail, not register.
-      if (toHex(peerTagOf(fromHex(peerId))) !== toHex(tag)) {
-        throw new Error('ble: peer IDENT does not match advertised tag');
+      let peerId: string | null = null;
+      if (identRaw !== null) {
+        const decoded = new TextDecoder().decode(identRaw);
+        if (!HEX64_RE.test(decoded)) throw new Error('ble: peer IDENT malformed');
+        // Bind the claimed identity to the discovery hint: the IDENT pubkey
+        // must carry the advertised tag, or this is a different peer (or a
+        // spoofed IDENT) and the connect must fail, not register.
+        if (toHex(peerTagOf(fromHex(decoded))) !== toHex(tag)) {
+          throw new Error('ble: peer IDENT does not match advertised tag');
+        }
+        peerId = decoded;
       }
       // Register before the hello so any inbound traffic is attributed.
-      // Keyed by the full peerId (known from IDENT) - not the provisional
-      // tag key - so send()/disconnect() resolve by peerId.
-      this.registerConn(peerId, {
-        role: 'central',
-        bleId,
-        tag,
-        peerId,
-        mtu,
-        inbound: new DatagramReassembler(),
-        partialOpen: false,
-      });
-      registeredKey = peerId;
+      // Keyed by the full peerId when IDENT resolved it; otherwise by
+      // the provisional tag key, so send()/disconnect() resolve by
+      // peerId once the hello rekeys it (see promoteProvisionalCentral).
+      // A provisional peer counts in peerCount but not in
+      // connectedPeerIds, and send() still refuses it until the hello
+      // resolves the identity.
+      if (peerId !== null) {
+        this.registerConn(peerId, {
+          role: 'central',
+          bleId,
+          tag,
+          peerId,
+          mtu,
+          inbound: new DatagramReassembler(),
+          partialOpen: false,
+        });
+        registeredKey = peerId;
+      } else {
+        const provisionalKey = provisionalTagKey(tag);
+        this.registerConn(provisionalKey, {
+          role: 'central',
+          bleId,
+          tag,
+          peerId: null,
+          mtu,
+          inbound: new DatagramReassembler(),
+          partialOpen: false,
+        });
+        registeredKey = provisionalKey;
+      }
       // Announce ourselves: the peripheral side learns our identity + MTU.
       const hello = encodeHello(fromHex(ownPeerId), mtu);
       for (const chunk of chunkBytes(hello, mtu - ATT_OVERHEAD)) {
@@ -903,28 +968,84 @@ export class GattBlePort implements TransportPort {
       }
       await withBleTimeout(central.startNotification(bleId, MESH_SERVICE_UUID, MESH_TX_CHAR_UUID), BLE_TIMEOUT_MS.startNotification, 'startNotification');
       // Subscribed to the peer TX characteristic: CCCD is on for this link.
-      recordPeerConnected(peerId, mtu, true);
-      this.markPeerCentralReady(peerId);
-      // Surface the resolved identity through the scan channel, matching
-      // the peripheral-side hello path: subscribers see the full peerId,
-      // not just the provisional tag key. (Previously the central side
-      // never re-fired, so the scan channel only ever resolved identities
-      // learned via inbound hellos.)
-      for (const cb of this.scanSubs) {
-        try {
-          cb({ peerId });
-        } catch {
-          // subscriber errors must not break connect
+      // Identified peers only: a provisional peer is announced when its
+      // hello rekeys it (see dispatchDatagram), not here.
+      if (peerId !== null) {
+        recordPeerConnected(peerId, mtu, true);
+        this.markPeerCentralReady(peerId);
+        // Surface the resolved identity through the scan channel, matching
+        // the peripheral-side hello path: subscribers see the full peerId,
+        // not just the provisional tag key. (Previously the central side
+        // never re-fired, so the scan channel only ever resolved identities
+        // learned via inbound hellos.)
+        for (const cb of this.scanSubs) {
+          try {
+            cb({ peerId });
+          } catch {
+            // subscriber errors must not break connect
+          }
         }
       }
     } catch (err) {
-      await central.disconnect(bleId).catch(() => {});
+      // Never tear down another attempt's live link: two central
+      // connects for one peer can share a bleId, and the failed
+      // attempt's unconditional disconnect used to kill the good link
+      // (v0.1.31: disconnects following IDENT failures by seconds).
+      // Disconnect only when no registered conn uses this bleId, or
+      // the registered conn is this attempt's own.
+      const liveKey = this.bleIndex.get(bleId);
+      if (liveKey === undefined || liveKey === registeredKey) {
+        await central.disconnect(bleId).catch(() => {});
+      }
       // Previously the native disconnect ran but the registration stayed:
       // a dead peer kept counting as connected and publish fan-out kept
       // targeting it, with no disconnected event. Drop it when this call
       // registered it; the native disconnect above is kept.
       if (registeredKey !== null) this.dropConn(registeredKey);
       throw err instanceof Error ? err : new Error(`ble: connect failed: ${String(err)}`);
+    }
+  }
+
+  /**
+   * Clear the native GATT service cache for a peer (Android stale-table
+   * fix). Best-effort: 'unavailable' when the adapter has no
+   * refreshCache, 'failed' when the call throws or reports false.
+   */
+  private async refreshGattCache(
+    central: NonNullable<BleNativeDeps['central']>,
+    bleId: string,
+  ): Promise<'ok' | 'unavailable' | 'failed'> {
+    if (typeof central.refreshCache !== 'function') return 'unavailable';
+    try {
+      const cleared = await withBleTimeout(central.refreshCache(bleId), BLE_TIMEOUT_MS.retrieveServices, 'refreshCache');
+      return cleared ? 'ok' : 'failed';
+    } catch {
+      return 'failed';
+    }
+  }
+
+  /**
+   * Promote a provisional central conn to the full peerId when the
+   * peer's hello identifies it. Called from the hello path before the
+   * peripheral conn is rekeyed, so the clash check there drops the
+   * peripheral duplicate instead of the central link that carries our
+   * TX subscription. Marks the central handshake complete: the
+   * subscription to the peer TX was made during connect.
+   */
+  private promoteProvisionalCentral(peerId: string): void {
+    let tag: Uint8Array;
+    try {
+      tag = peerTagOf(fromHex(peerId));
+    } catch {
+      return;
+    }
+    const tagHex = toHex(tag);
+    for (const conn of this.conns.values()) {
+      if (conn.role === 'central' && conn.peerId === null && conn.tag && toHex(conn.tag) === tagHex) {
+        this.rekeyConn(conn, peerId);
+        this.markPeerCentralReady(peerId);
+        return;
+      }
     }
   }
 
@@ -1064,6 +1185,12 @@ export class GattBlePort implements TransportPort {
       // central-clash drop below (which drops this peripheral entry
       // when a central conn already covers the peer) cannot lose it.
       this.markPeerPeripheralHello(peerId);
+      // A provisional central link for this peer (IDENT read failed,
+      // link kept tag-keyed) is promoted to the full peerId first, so
+      // the clash check in rekeyConn below drops the peripheral
+      // duplicate instead of the central link that carries our TX
+      // subscription.
+      this.promoteProvisionalCentral(peerId);
       conn.mtu = Math.min(Math.max(hello.centralMtu, ATT_DEFAULT_MTU), 517);
       this.rekeyConn(conn, peerId);
       // The peripheral side learns the central identity and MTU here.
@@ -1188,6 +1315,7 @@ export class GattBlePort implements TransportPort {
     }
     for (const timer of this.autoConnectRetries.values()) clearTimeout(timer);
     this.autoConnectRetries.clear();
+    this.pendingCentralTags.clear();
     this.discovered.clear();
     await this.stopAdvertise();
   }
@@ -1549,6 +1677,12 @@ function loadCentralAdapter(): CentralAdapter | null {
       connect: (id) => mgr.connect(id),
       disconnect: (id) => mgr.disconnect(id),
       retrieveServices: (id) => mgr.retrieveServices(id),
+      // ble-manager 12.6.0 refreshCache clears the Android GATT cache;
+      // absent on older shapes, so the IDENT retry treats it as
+      // unavailable and proceeds with re-discovery alone.
+      ...(typeof mgr.refreshCache === 'function'
+        ? { refreshCache: (id: string) => mgr.refreshCache(id) }
+        : {}),
       requestMtu: async (id, mtu) => {
         const v: unknown = await mgr.requestMTU(id, mtu);
         return typeof v === 'number' && Number.isInteger(v) && v >= ATT_DEFAULT_MTU ? v : ATT_DEFAULT_MTU;

@@ -273,6 +273,44 @@ describe('NostrTransport reconnect', () => {
     await t.stop();
   });
 
+  test('reconnectNow connects immediately instead of waiting out the backoff ladder', async () => {
+    const sockets: FakeSocket[] = [];
+    const scheduled: { url: string; delayMs: number; attempt: number }[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://a.relay', 'wss://b.relay'],
+      reconnectMs: 60_000,
+      onReconnectScheduled: (url, delayMs, attempt) => scheduled.push({ url, delayMs, attempt }),
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+    });
+    await t.start();
+    await tick(20);
+    expect(t.openRelayCount()).toBe(2);
+    // Both sockets drop: the ladder schedules the next attempt 60 s
+    // out (the v0.1.31 lag: validation returned, but the pool only
+    // reopened on the ladder's schedule, 17 s later).
+    sockets[0].close();
+    sockets[1].close();
+    expect(t.openRelayCount()).toBe(0);
+    await tick(50);
+    expect(sockets).toHaveLength(2); // ladder is 60 s out: nothing yet
+    // reconnectNow clears the pending timers and connects now.
+    t.reconnectNow();
+    expect(sockets).toHaveLength(4);
+    expect(scheduled.filter((s) => s.delayMs === 0 && s.attempt === 0)).toHaveLength(2);
+    await tick(20);
+    expect(t.openRelayCount()).toBe(2);
+    expect(t.online).toBe(true);
+    // A second reconnectNow with the pool open is a no-op.
+    t.reconnectNow();
+    expect(sockets).toHaveLength(4);
+    await t.stop();
+  });
+
   test('wsFactory throw on connect is survived; the reconnect heals', async () => {
     const sockets: FakeSocket[] = [];
     let failFirst = true;

@@ -491,6 +491,37 @@ export class NostrTransport {
     }
   }
 
+  /**
+   * Immediate reconnect for relays that are dead: clear any pending
+   * reconnect timer, reset the backoff, and connect now. Used when the
+   * network is validated (or the DM pool opens) so a pool that died
+   * during a blackout recovers in ~1 s instead of waiting out its
+   * backoff ladder (up to 60 s). The v0.1.31 window proved the gap:
+   * validation at 08:31:53, DM pool open at 08:31:54, post pool open
+   * only at 08:32:10, because startIfNeeded skips relays with a
+   * pending timer. Never double-arms: a relay already open or
+   * connecting is left alone. Each forced attempt is logged through
+   * onReconnectScheduled with delay 0, like every other schedule.
+   */
+  reconnectNow(): void {
+    if (!this.started) {
+      void this.start();
+      return;
+    }
+    for (const url of this.relays) {
+      if (this.states.get(url) === 'open' || this.states.get(url) === 'connecting') continue;
+      const timer = this.reconnectTimers.get(url);
+      if (timer) {
+        clearTimeout(timer);
+        this.reconnectTimers.delete(url);
+        this.timers.delete(timer);
+      }
+      this.reconnectAttempts.delete(url);
+      this.onReconnectScheduled?.(url, 0, 0);
+      this.connectOne(url);
+    }
+  }
+
   /** Connect to all relays. Idempotent. */
   async start(): Promise<void> {
     if (this.started) return;

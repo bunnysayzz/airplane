@@ -50,6 +50,9 @@ class FakeCentral implements CentralAdapter {
   connects: string[] = [];
   connectAttempts: string[] = [];
   disconnects: string[] = [];
+  refreshCacheCalls: string[] = [];
+  /** Fail the native GATT cache refresh (throws). */
+  failRefreshCache = false;
   notificationsStarted: string[] = [];
   writes: { id: string; char: string; chunk: Uint8Array }[] = [];
   writesWithoutResponse: { id: string; char: string; chunk: Uint8Array }[] = [];
@@ -90,6 +93,11 @@ class FakeCentral implements CentralAdapter {
     this.disconnects.push(id);
   }
   async retrieveServices(): Promise<void> {}
+  async refreshCache(id: string): Promise<boolean> {
+    this.refreshCacheCalls.push(id);
+    if (this.failRefreshCache) throw new Error('refresh refused');
+    return true;
+  }
   async requestMtu(): Promise<number> {
     return this.mtu;
   }
@@ -940,17 +948,20 @@ describe('auto-connect bounded retry (audit P1-19)', () => {
     central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
     // The retry now waits a 300 ms settle before the second read, so
     // a 50 ms tick is too short; and a retry that succeeds must leave
-    // no failed line behind, only the later peer connected line.
+    // no failed line behind, only the later peer connected line. The
+    // retry first clears the native GATT cache, and logs its outcome.
     await new Promise((r) => setTimeout(r, 600));
     expect(port.peerCount).toBe(1);
+    expect(central.refreshCacheCalls).toEqual(['ble-1']);
+    expect(lines.some((l) => l.includes('ble ident retry tag') && l.includes('read2 ok'))).toBe(true);
     expect(lines.some((l) => l.includes('peer connect failed'))).toBe(false);
     expect(lines.some((l) => l.includes('ble-1'))).toBe(false);
     resetDiagnosticsForTests();
     await port.close();
   });
 
-  test('repeated sightings during an IDENT outage stay quiet after the first failure and one retry', async () => {
-    const { deps, central } = makeDeps();
+  test('repeated sightings during an IDENT outage keep a provisional link, and the inbound hello promotes it to ready', async () => {
+    const { deps, central, peripheral } = makeDeps();
     central.failReadAlways = true;
     const port = new GattBlePort(deps);
     await port.advertise(OWN_HEX);
@@ -963,19 +974,81 @@ describe('auto-connect bounded retry (audit P1-19)', () => {
     for (let i = 0; i < 5; i++) {
       central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
     }
-    // Past the 2 s scheduled retry: first attempt + one retry, then
-    // the cooldown gates every later sighting. The retry itself
-    // takes ~300 ms past its 2 s timer (the IDENT settle delay),
-    // so 2.6 s would race its second read; wait past that.
-    await new Promise((r) => setTimeout(r, 3200));
-    expect(central.connectAttempts.length).toBe(2);
-    const failures = lines.filter((l) => l.includes('peer connect failed'));
-    expect(failures).toHaveLength(2);
-    expect(failures[0]).toContain('auto-connect');
-    expect(failures[1]).toContain('auto-connect retry failed');
-    expect(failures[1]).toContain('ident retry failed');
+    // The retry waits a 300 ms settle before the second read; past
+    // that, exactly one attempt has run and the link is provisional,
+    // not a failure. No second attempt, no failure line, no cooldown
+    // retry: the old code threw "ident retry failed" here, armed the
+    // cooldown, and disconnected the link (v0.1.31: three such
+    // failures in 4.5 minutes, BLE carrying nothing all window).
+    await new Promise((r) => setTimeout(r, 600));
+    expect(central.connectAttempts).toEqual(['ble-1']);
+    expect(central.refreshCacheCalls).toEqual(['ble-1']);
+    expect(port.peerCount).toBe(1);
+    expect(port.connectedPeerIds()).toEqual([]);
+    expect(port.readyPeerIds()).toEqual([]);
+    expect(lines.filter((l) => l.includes('peer connect failed'))).toHaveLength(0);
+    expect(lines.some((l) => l.includes('ble ident retry tag') && l.includes('read2 not-found') && l.includes('link provisional'))).toBe(true);
     expect(lines.some((l) => l.includes('ident retry tag:'))).toBe(false);
+    // The peer's inbound hello resolves the identity: the provisional
+    // central conn is promoted to the full peerId, the peripheral
+    // duplicate is dropped, and the peer becomes ready to receive.
+    for (const chunk of chunkBytes(encodeHello(PEER_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:01', value: chunk });
+    }
+    expect(port.peerCount).toBe(1);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    expect(port.readyPeerIds()).toEqual([PEER_HEX]);
     resetDiagnosticsForTests();
+    await port.close();
+  });
+});
+
+describe('v0.1.32 IDENT provisional link: per-tag dedup + disconnect guard', () => {
+  test('two BLE addresses for one tag start one central connect', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    // RPA rotation: the same peer sighted under a second BLE address
+    // while the first handshake is in flight. The per-bleId set
+    // cannot dedup this; the per-tag set must, or the second
+    // discovery returns an incomplete service table and the IDENT
+    // read fails (v0.1.31: two attempts 9 s apart for one tag).
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    central.discoverCb!({ id: 'ble-2', rssi: -61, tag: PEER_TAG });
+    expect(central.connectAttempts).toEqual(['ble-1']);
+    await tick(50);
+    expect(port.peerCount).toBe(1);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    await port.close();
+  });
+
+  test('a failed central connect does not disconnect a live peripheral link for the same address', async () => {
+    const { deps, central, peripheral } = makeDeps();
+    // First IDENT read fails (not found), so the retry waits out its
+    // 300 ms settle; the retry read then returns a malformed IDENT,
+    // which throws before any registration. While the retry is
+    // settling, the peer connects to our peripheral side under the
+    // same address: the failed central attempt must not tear that
+    // live link down (v0.1.31: disconnects following IDENT failures
+    // by seconds).
+    central.failReadOnce = true;
+    central.identHex = 'zzzz';
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    for (const chunk of chunkBytes(encodeDatagram(DATAGRAM_FRAME, new Uint8Array([5])), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      peripheral.writeCb!({ device: 'ble-1', value: chunk });
+    }
+    expect(port.peerCount).toBe(1);
+    // Past the 300 ms settle: the retry read returned the malformed
+    // IDENT and the central attempt failed, but the peripheral link
+    // for the same address is untouched.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(central.disconnects).not.toContain('ble-1');
+    expect(port.peerCount).toBe(1);
     await port.close();
   });
 });

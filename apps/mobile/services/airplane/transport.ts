@@ -1651,9 +1651,15 @@ export function subscribeMeshStatus(cb: () => void): () => void {
     // pool recovered at 03:26:41 while the post pool stayed dead, and
     // no balancer line covered it. A rise in the DM open count
     // re-attempts queued posts the same way a BLE peer arrival does.
+    // The DM pool is also the faster recovery signal: its resubscribe
+    // clears its backoff on validation, so it can open while NetInfo
+    // still says offline. When it opens while the post pool is still
+    // dead, re-attempt the post pool at once instead of waiting out
+    // its backoff ladder (v0.1.32).
     const dmOpen = getDmRelayPoolHealth()?.openUrls.length ?? 0;
     if (dmOpen > prevDmOpenRelays) {
       void notifyTransportHealthChanged('dm relay socket opened').catch(() => {});
+      if ((hybrid?.nostr.openRelayCount() ?? 0) === 0) hybrid?.nostr.reconnectNow();
     }
     prevDmOpenRelays = dmOpen;
   }, 2000);
@@ -1782,11 +1788,13 @@ function applyConnectivity(online: boolean): void {
   if (online) {
     addBreadcrumb('transport: connectivity online');
     recordServiceEvent(`network validated (${lastNetInfoSummary ?? 'no NetInfo state yet'}) | ${healthSummary(buildTransportHealth())}`);
-    // Immediate re-attempt for relays that are dead with no reconnect
-    // pending; the ladder already covers the rest. start() alone would
-    // be a no-op here: the pool is never stopped on offline anymore,
-    // so it is already started.
-    hybrid?.nostr.startIfNeeded();
+    // Immediate re-attempt for dead relays: reconnectNow clears any
+    // pending backoff timer and connects now, instead of waiting out
+    // the ladder (up to 60 s). startIfNeeded alone would skip every
+    // relay with a timer pending, which is exactly the v0.1.31 lag:
+    // validation 08:31:53, pool open only 08:32:10. The pool is never
+    // stopped on offline anymore, so it is already started.
+    hybrid?.nostr.reconnectNow();
     // Periodic sync while online.
     startSyncTimer();
     // A transport returning drains the DM queue and replays missed DMs

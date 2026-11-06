@@ -683,10 +683,12 @@ describe('transport manager', () => {
     await startTransport();
     const hybrid = __getHybridForTests();
     expect(hybrid).not.toBeNull();
-    // Since v0.1.31 the online transition re-attempts dead relays via
-    // startIfNeeded (never stops the pool on offline), not a bare
-    // start(): the pool is already started, so start() would no-op.
-    const nostrStartIfNeededSpy = jest.spyOn(hybrid!.nostr, 'startIfNeeded');
+    // Since v0.1.32 the online transition re-attempts dead relays via
+    // reconnectNow (clears any pending backoff timer and connects now),
+    // not startIfNeeded (which skipped every relay with a timer
+    // pending: the v0.1.31 lag, validation 08:31:53, pool open only
+    // 08:32:10). The pool is already started, so start() would no-op.
+    const nostrReconnectNowSpy = jest.spyOn(hybrid!.nostr, 'reconnectNow');
     const listener = netInfoMock.addEventListener.mock.calls[0][0] as (s: NetState) => void;
     // Listener fires offline first (reachability still unknown).
     listener({ isConnected: true, isInternetReachable: false });
@@ -694,7 +696,7 @@ describe('transport manager', () => {
     resolveFetch!({ isConnected: true, isInternetReachable: true });
     await Promise.resolve();
     await Promise.resolve();
-    expect(nostrStartIfNeededSpy).toHaveBeenCalledTimes(1);
+    expect(nostrReconnectNowSpy).toHaveBeenCalledTimes(1);
     expect(setIntervalSpy).toHaveBeenCalled();
     setIntervalSpy.mockRestore();
   });
@@ -703,16 +705,16 @@ describe('transport manager', () => {
     await startTransport();
     const hybrid = __getHybridForTests();
     expect(hybrid).not.toBeNull();
-    // Since v0.1.31 the online transition re-attempts dead relays via
-    // startIfNeeded, not a bare start().
-    const nostrStartIfNeededSpy = jest.spyOn(hybrid!.nostr, 'startIfNeeded');
+    // Since v0.1.32 the online transition re-attempts dead relays via
+    // reconnectNow, not startIfNeeded or a bare start().
+    const nostrReconnectNowSpy = jest.spyOn(hybrid!.nostr, 'reconnectNow');
     const listener = netInfoMock.addEventListener.mock.calls[0][0] as (s: {
       isConnected: boolean;
       isInternetReachable: boolean;
     }) => void;
     listener({ isConnected: true, isInternetReachable: true });
     listener({ isConnected: true, isInternetReachable: true }); // duplicate
-    expect(nostrStartIfNeededSpy).toHaveBeenCalledTimes(1);
+    expect(nostrReconnectNowSpy).toHaveBeenCalledTimes(1);
   });
 
 

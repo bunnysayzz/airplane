@@ -3,7 +3,7 @@
 
 import { toHex, type Hex64, type SignedEvent } from '@airplane/protocol';
 import { makePost } from '../../protocol/src/test-helpers';
-import { WorldSync, type WorldConfirmStore } from './sync';
+import { WorldSync, SYNC_PUSH_MIN_INTERVAL_MS, type WorldConfirmStore } from './sync';
 
 /** In-memory WorldConfirmStore for tests. */
 class FakeConfirmStore implements WorldConfirmStore {
@@ -208,6 +208,68 @@ describe('WorldSync', () => {
     const report3 = await sync.sync();
     expect(report3.pushed).toEqual([]);
     expect(nostr.published).toHaveLength(2);
+  });
+
+  test('an unconfirmed event is pushed at most once per minute while unconfirmed', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    const sync = new WorldSync(nostr as never, store);
+    const id = store.add(makePost('throttled'));
+
+    // Control the clock: the throttle window is 60 s of real time.
+    const nowSpy = jest.spyOn(Date, 'now');
+    let nowMs = 1_700_000_000_000;
+    nowSpy.mockImplementation(() => nowMs);
+    try {
+      // First pass pushes immediately (never pushed before).
+      const r1 = await sync.sync();
+      expect(r1.pushed).toEqual([id]);
+      expect(nostr.published).toHaveLength(1);
+      // The v0.1.31 shape: a relay-win pass, a health pass 1 s later,
+      // and another pass 0.3 s after that pushed the same event three
+      // times in 1.3 s. With the throttle, later passes push nothing
+      // new while the event stays unconfirmed.
+      nowMs += 1_000;
+      expect((await sync.sync()).pushed).toEqual([]);
+      nowMs += 300;
+      expect((await sync.sync()).pushed).toEqual([]);
+      expect(nostr.published).toHaveLength(1);
+      // Past the window the event is pushed again.
+      nowMs += SYNC_PUSH_MIN_INTERVAL_MS;
+      expect((await sync.sync()).pushed).toEqual([id]);
+      expect(nostr.published).toHaveLength(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test('a throttled unconfirmed event keeps its grace push after confirming', async () => {
+    const store = new FakeConfirmStore();
+    const nostr = new FakeNostr();
+    const sync = new WorldSync(nostr as never, store);
+    const id = store.add(makePost('throttled grace'));
+
+    const nowSpy = jest.spyOn(Date, 'now');
+    let nowMs = 1_700_000_000_000;
+    nowSpy.mockImplementation(() => nowMs);
+    try {
+      expect((await sync.sync()).pushed).toEqual([id]);
+      // A second pass inside the window is throttled.
+      nowMs += 1_000;
+      expect((await sync.sync()).pushed).toEqual([]);
+      expect(nostr.published).toHaveLength(1);
+      // The relay echo confirms it while it is still throttled: the
+      // one designed extra push after confirmation must still fire,
+      // or the receiver that never fetched it gets no second chance.
+      await store.markWorldConfirmed(id);
+      expect((await sync.sync()).pushed).toEqual([id]);
+      expect(nostr.published).toHaveLength(2);
+      // After the grace push, the confirmed event stays quiet.
+      expect((await sync.sync()).pushed).toEqual([]);
+      expect(nostr.published).toHaveLength(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   test('concurrent sync calls share one in-flight pass, not two pushes', async () => {
