@@ -46,13 +46,16 @@ interface TimelineProps {
     onComposePress?: () => void;
     // DM P1: open a DM with a post author.
     onMessage?: (authorPubkeyHex: string) => void;
+    // This device's own pubkey hex, passed to cards so your own post
+    // carries a Saved action instead of a Message action.
+    ownPubkeyHex?: string | null;
 }
 
 const PAGE_LIMIT = 50;
 
 // Single-feed timeline: no feed pills, just the unified hybrid feed
 // (BLE mesh + Nostr relays, deduplicated).
-const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress, onMessage }) => {
+const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress, onMessage, ownPubkeyHex }) => {
     const { colors, type } = useTheme();
     const styles = useThemedStyles(makeStyles);
     const { t, tn } = useI18n();
@@ -323,13 +326,13 @@ const Timeline: React.FC<TimelineProps> = ({ cells, onPostPress, onComposePress,
     // (pendingCount, refreshing) re-renders every card.
     const renderItem = useCallback(
         ({ item }: { item: PostCardModel }) => (
-            <PostCard post={item} onPress={onPostPress} onStar={handleStar} onMessage={onMessage} onReshare={() => {
+            <PostCard post={item} onPress={onPostPress} onStar={handleStar} onMessage={onMessage} ownPubkeyHex={ownPubkeyHex} onReshare={() => {
                 // The service notifies feed listeners itself; the caller used
                 // to notify a second time, doubling the refresh per tap.
                 void toggleReshare(item);
             }} />
         ),
-        [onPostPress, handleStar, onMessage]
+        [onPostPress, handleStar, onMessage, ownPubkeyHex]
     );
 
     return (

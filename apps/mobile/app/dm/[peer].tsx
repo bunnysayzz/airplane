@@ -13,6 +13,8 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow, DmThreadRow } from '@airplane/transport';
 import { getDmService, dmPeerLabel, dmUserErrorMessage, sendDm } from '../../services/airplane/dm';
+import { resolveOwnPubkeyHex } from '../../services/airplane/stars';
+import { isOwnHex } from '../../src/lib/selfDm';
 import { authorLabelFor } from '../../services/airplane/names';
 import { fromHex } from '@airplane/protocol';
 import { Avatar } from '../../components/ui';
@@ -36,6 +38,23 @@ export default function DmThreadScreen() {
     // A rapid double-tap used to send the same text twice as two distinct
     // envelopes; the Send button is disabled while a send is in flight.
     const [sending, setSending] = useState(false);
+    // Messaging yourself IS Saved: opening this screen with your own hex
+    // (deep link, stale route) redirects to /dm/self instead of rendering
+    // a thread with Mute/Block and a send box that can never send.
+    const [ownHex, setOwnHex] = useState<string | null>(null);
+    useEffect(() => {
+        let live = true;
+        void resolveOwnPubkeyHex().then(hex => {
+            if (live) setOwnHex(hex);
+        });
+        return () => {
+            live = false;
+        };
+    }, []);
+    const isSelf = isOwnHex(peerHex, ownHex);
+    useEffect(() => {
+        if (isSelf) router.replace('/dm/self');
+    }, [isSelf]);
     // Details affordance: the header shows only the clean name, so the
     // full identity (full memorable label plus full key) lives behind
     // this toggle instead of in the header itself.
@@ -97,7 +116,7 @@ export default function DmThreadScreen() {
     }, [peerHex, peerValid]);
 
     useEffect(() => {
-        if (!peerValid) {
+        if (!peerValid || isSelf) {
             setThread([]);
             setConv(null);
             return;
@@ -125,7 +144,7 @@ export default function DmThreadScreen() {
                 setRefreshError(true);
             });
         return () => unsub?.();
-    }, [refresh, peerHex, peerValid]);
+    }, [refresh, peerHex, peerValid, isSelf]);
 
     const send = () => {
         const text = draft.trim();
@@ -201,6 +220,9 @@ export default function DmThreadScreen() {
 
     const isRequest = conv?.state === 'request';
     const isBlocked = conv?.state === 'blocked';
+
+    // Redirecting to Saved: render nothing while the replace lands.
+    if (isSelf) return null;
 
     if (!peerValid) {
         return (

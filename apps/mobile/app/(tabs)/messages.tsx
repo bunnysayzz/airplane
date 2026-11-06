@@ -11,6 +11,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DmConversationRow } from '@airplane/transport';
 import { DM_UNDECRYPTABLE_PLACEHOLDER } from '@airplane/transport';
 import { getDmService, dmPeerLabel, dmUserErrorMessage } from '../../services/airplane/dm';
+import { resolveOwnPubkeyHex } from '../../services/airplane/stars';
+import { dmRouteForPeer, isOwnHex } from '../../src/lib/selfDm';
 import {
     hydratePeerDisplayNames,
     knownPeerHexes,
@@ -34,6 +36,9 @@ export default function MessagesTab() {
     const [previews, setPreviews] = useState<Record<string, string | null>>({});
     const [query, setQuery] = useState('');
     const [savedCount, setSavedCount] = useState(0);
+    // This device's own key: yourself is never a DM peer. Your name in
+    // search, your pasted key, and any self row all open Saved instead.
+    const [ownHex, setOwnHex] = useState<string | null>(null);
     // A failed refresh used to leave stale lists with no error shown. Now
     // refresh is all-or-nothing (lists + previews set only on success) and
     // a failure shows a retry affordance instead of silent staleness.
@@ -47,9 +52,18 @@ export default function MessagesTab() {
             await hydratePeerDisplayNames();
             try {
                 const svc = await getDmService();
-                const nextInbox = await svc.listInbox();
-                const nextRequests = await svc.listRequests();
-                const nextBlocked = await svc.listBlocked();
+                const own = await resolveOwnPubkeyHex();
+                setOwnHex(own);
+                // A self conversation cannot be created (the transport
+                // guard throws) and cannot arrive inbound (a DM from
+                // yourself cannot unseal as inbound), but if one ever
+                // shows up it must never render as a regular thread:
+                // drop it here, Saved is the only self entry point.
+                const withoutSelf = (rows: DmConversationRow[]) =>
+                    own ? rows.filter(c => c.peerHex.toLowerCase() !== own.toLowerCase()) : rows;
+                const nextInbox = withoutSelf(await svc.listInbox());
+                const nextRequests = withoutSelf(await svc.listRequests());
+                const nextBlocked = withoutSelf(await svc.listBlocked());
                 const convs = [...nextInbox, ...nextRequests];
                 // Previews used to load one conversation at a time (each a
                 // potential decrypt); one parallel batch instead.
@@ -86,7 +100,7 @@ export default function MessagesTab() {
         return () => unsub?.();
     }, [refresh]);
 
-    const open = (peerHex: string) => router.push(`/dm/${peerHex}`);
+    const open = (peerHex: string) => router.push(dmRouteForPeer(peerHex, ownHex));
 
     // Candidate peers for username search: conversation contacts plus
     // every peer whose signed display name this device recorded from a
@@ -114,6 +128,14 @@ export default function MessagesTab() {
             Alert.alert('Not a key', 'Paste a 64-character hex pubkey, or tap a matching username below.');
             return;
         }
+        // Pasting your own key opens Saved: messaging yourself IS Saved,
+        // and startConversation would only throw for self.
+        if (isOwnHex(key, ownHex)) {
+            recordUiEvent('self:open');
+            setQuery('');
+            router.push('/dm/self');
+            return;
+        }
         void getDmService()
             .then(svc => svc.startConversation(key))
             .then(() => {
@@ -124,6 +146,14 @@ export default function MessagesTab() {
     };
 
     const startFromMatch = (peerHex: string) => {
+        // Tapping your own name opens Saved: the registry records your
+        // own display name from your own posts, so you match yourself.
+        if (isOwnHex(peerHex, ownHex)) {
+            recordUiEvent('self:open');
+            setQuery('');
+            router.push('/dm/self');
+            return;
+        }
         recordUiEvent('dm:start-username');
         void getDmService()
             .then(svc => svc.startConversation(peerHex))
@@ -211,7 +241,9 @@ export default function MessagesTab() {
                                 <Avatar name={m.name} pubkeyHex={m.pubkeyHex} size={36} />
                                 <View style={{ flex: 1, gap: 2 }}>
                                     <Text style={[type.name, { color: colors.textPrimary }]}>{m.name}</Text>
-                                    <Text style={[type.meta, { color: colors.textMuted }]}>Tap to message</Text>
+                                    <Text style={[type.meta, { color: colors.textMuted }]}>
+                                        {isOwnHex(m.pubkeyHex, ownHex) ? 'Saved notes on this device' : 'Tap to message'}
+                                    </Text>
                                 </View>
                             </Pressable>
                         ))}

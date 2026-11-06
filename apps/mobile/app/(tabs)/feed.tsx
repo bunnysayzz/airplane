@@ -9,6 +9,8 @@ import { useTheme } from '../../src/theme/themeContext';
 import { resolveFeedCells } from '../../services/airplane/feedCells';
 import { setRelaySubscribeCells } from '../../services/airplane/transport';
 import { subscribeFeed } from '../../services/airplane/feed';
+import { resolveOwnPubkeyHex } from '../../services/airplane/stars';
+import { dmRouteForPeer } from '../../src/lib/selfDm';
 import { isDoublePush } from '../../src/lib/navGuard';
 import { RouteTracker } from '../../components/RouteTracker/routeTracker';
 
@@ -24,6 +26,19 @@ export default function FeedTab() {
     // feed never flashes empty mid-resolve.
     const [cells, setCells] = useState<string[]>([]);
     const cellsKeyRef = useRef('');
+
+    // This device's own key: your own post carries a Saved action, and
+    // its Message tap routes to Saved, never to a DM thread with yourself.
+    const [ownHex, setOwnHex] = useState<string | null>(null);
+    useEffect(() => {
+        let live = true;
+        void resolveOwnPubkeyHex().then(hex => {
+            if (live) setOwnHex(hex);
+        });
+        return () => {
+            live = false;
+        };
+    }, []);
 
     // Double-push guard: rapid taps on a feed card pushed the same post
     // route twice, stacking duplicate thread screens. A repeat push of the
@@ -94,7 +109,8 @@ export default function FeedTab() {
                 cells={cells}
                 onPostPress={handlePostPress}
                 onComposePress={openCompose}
-                onMessage={authorPubkeyHex => router.push(`/dm/${authorPubkeyHex}`)}
+                ownPubkeyHex={ownHex}
+                onMessage={authorPubkeyHex => router.push(dmRouteForPeer(authorPubkeyHex, ownHex))}
             />
         </View>
     );

@@ -17,6 +17,7 @@ import { isWithinWindow } from '../src/lib/navGuard';
 import { recordUiEvent } from '../services/airplane/diagnostics';
 import { nameWithoutSuffix } from '../services/airplane/names';
 import { avatarGradientFor } from '../services/airplane/displayNames';
+import { isOwnHex } from '../src/lib/selfDm';
 
 export interface PostCardModel {
   /** hex event hash (stable key) */
@@ -69,6 +70,12 @@ export interface PostCardProps {
   onStar?: (eventId: string) => void;
   /** DM P1: open a DM with the post author. Only rendered when the author key is known. */
   onMessage?: (authorPubkeyHex: string) => void;
+  /**
+   * This device's own pubkey hex. When it matches the author, the action
+   * opens Saved instead of a DM thread: messaging yourself IS Saved, and
+   * a regular thread with yourself can never send.
+   */
+  ownPubkeyHex?: string | null;
   /** RESHARE: called with the ORIGINAL post id when the reshare stat is tapped */
   onReshare?: (eventId: string) => void;
 }
@@ -99,8 +106,11 @@ export function ReshareIcon({ size = 17, color }: { size?: number; color?: strin
   return <Ionicons name="repeat" size={size} color={color} />;
 }
 
-export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: PostCardProps) {
+export function PostCardInner({ post, onPress, onStar, onMessage, onReshare, ownPubkeyHex }: PostCardProps) {
   const { type, colors } = useTheme();
+  // Messaging yourself IS Saved: your own post carries a Saved action,
+  // never a Message action that would open a thread that cannot send.
+  const isOwnAuthor = isOwnHex(post.authorPubkeyHex, ownPubkeyHex);
 
   // Inner-action guard: the card is a Pressable wrapping inner Pressables
   // (Message, star, reshare). React Native gives the inner responder the
@@ -175,13 +185,14 @@ export function PostCardInner({ post, onPress, onStar, onMessage, onReshare }: P
           <Pressable
             onPress={() => {
               markAction();
-              recordUiEvent('dm:open', post.authorPubkeyHex as string);
+              if (isOwnAuthor) recordUiEvent('self:open');
+              else recordUiEvent('dm:open', post.authorPubkeyHex as string);
               onMessage(post.authorPubkeyHex as string);
             }}
             accessibilityRole="button"
-            accessibilityLabel={`Message ${displayedName}`}
+            accessibilityLabel={isOwnAuthor ? 'Saved notes' : `Message ${displayedName}`}
           >
-            <Text style={[type.meta, { color: colors.accentText }]}>Message</Text>
+            <Text style={[type.meta, { color: colors.accentText }]}>{isOwnAuthor ? 'Saved' : 'Message'}</Text>
           </Pressable>
         ) : null}
         {/* --- RESHARE (delimited): collapsed cluster on the ORIGINAL card.

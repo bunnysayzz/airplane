@@ -2,7 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { router, useLocalSearchParams } from 'expo-router';
 import Thread from '../../screens/Thread/thread';
 import { getPostCardById } from '../../services/airplane/feed';
-import { toggleStar } from '../../services/airplane/stars';
+import { resolveOwnPubkeyHex, toggleStar } from '../../services/airplane/stars';
+import { dmRouteForPeer } from '../../src/lib/selfDm';
 import type { PostCardModel } from '../../services/airplane/types';
 import { RouteTracker } from '../../components/RouteTracker/routeTracker';
 
@@ -10,6 +11,19 @@ export default function PostScreen() {
     const { id } = useLocalSearchParams<{ id: string }>();
     const [posts, setPosts] = useState<PostCardModel[]>([]);
     const [loading, setLoading] = useState(true);
+
+    // This device's own key: your own post carries a Saved action, and
+    // its Message tap routes to Saved, never to a DM thread with yourself.
+    const [ownHex, setOwnHex] = useState<string | null>(null);
+    useEffect(() => {
+        let alive = true;
+        void resolveOwnPubkeyHex().then(hex => {
+            if (alive) setOwnHex(hex);
+        });
+        return () => {
+            alive = false;
+        };
+    }, []);
 
     useEffect(() => {
         let alive = true;
@@ -60,7 +74,8 @@ export default function PostScreen() {
                 loading={loading}
                 onBack={goBack}
                 onStar={handleStar}
-                onMessage={authorPubkeyHex => router.push(`/dm/${authorPubkeyHex}`)}
+                ownPubkeyHex={ownHex}
+                onMessage={authorPubkeyHex => router.push(dmRouteForPeer(authorPubkeyHex, ownHex))}
             />
         </>
     );

@@ -26,9 +26,12 @@ interface ThreadProps {
     /** STAR MVP: fired when a card's star button is tapped. */
     onStar?: (eventId: string) => void;
     onMessage?: (authorPubkeyHex: string) => void;
+    // This device's own pubkey hex, passed to cards so your own post
+    // carries a Saved action instead of a Message action.
+    ownPubkeyHex?: string | null;
 }
 
-export default function Thread({ postId, posts, loading = false, refreshing = false, onRefresh, onBack, onPostPress, onStar, onMessage }: ThreadProps) {
+export default function Thread({ postId, posts, loading = false, refreshing = false, onRefresh, onBack, onPostPress, onStar, onMessage, ownPubkeyHex }: ThreadProps) {
     const { colors, type } = useTheme();
     const insets = useSafeAreaInsets();
     const { t } = useI18n();
@@ -98,7 +101,7 @@ export default function Thread({ postId, posts, loading = false, refreshing = fa
                                     },
                                 ]}
                             >
-                                <PostCard post={item} onPress={onPostPress} onStar={onStar} onMessage={onMessage} onReshare={() => {
+                                <PostCard post={item} onPress={onPostPress} onStar={onStar} onMessage={onMessage} ownPubkeyHex={ownPubkeyHex} onReshare={() => {
                                     void toggleReshare(item).then(() => onRefresh?.());
                                 }} />
                             </View>
