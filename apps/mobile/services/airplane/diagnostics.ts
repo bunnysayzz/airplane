@@ -535,7 +535,17 @@ export type ServiceLogDetail =
   | `relay resubscribe since ${number} ${string} ${'anchor' | 'cap'}`
   | `balancer route ${string} | ${string}`
   | `balancer health changed: ${string}`
-  | `relay author catch-up ${number} authors`;
+  | `relay author catch-up ${number} authors`
+  | `relay pool watchdog: ${string}`
+  | `relay connect failed ${string}`
+  | `relay socket closed ${string}`
+  | `relay reconnect in ${number}ms ${string} attempt ${number}`
+  | 'advertise recovered after retry'
+  | `advertise retry failed: ${string}`
+  | `advertise failed, retry scheduled: ${string}`
+  | `network validated (${string}) | ${string}`
+  | `network not validated (${string}): ${string} | ${string}`
+  | `drain skipped ${number} rows handed to same peers within ${number}s | ${string}`;
 
 export function recordServiceEvent(detail: ServiceLogDetail): void {
   logEvent('service', detail);
