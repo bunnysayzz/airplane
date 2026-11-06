@@ -546,7 +546,12 @@ export type ServiceLogDetail =
   | `network validated (${string}) | ${string}`
   | `network not validated (${string}): ${string} | ${string}`
   | `drain skipped ${number} rows handed to same peers within ${number}s | ${string}`
-  | `ble ident ${string}`;
+  | `ble ident ${string}`
+  | `ble hello notify ${string}`
+  | `ble hello notify failed ${string}`
+  | `ble hello received ${string}`
+  | `ble peer ready ${string}`
+  | `ble peer waiting hello ${string}`;
 
 export function recordServiceEvent(detail: ServiceLogDetail): void {
   logEvent('service', detail);

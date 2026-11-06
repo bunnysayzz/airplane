@@ -524,14 +524,17 @@ describe('send over notify, receive over central notifications', () => {
     // the peer RX is never delivered to the peer app layer on new-arch
     // builds, so a "sent" write was a silent loss (proven 2026-11-03).
     await port.send(PEER_HEX, frame);
-    // datagram = 2 (len) + 1 (kind) + 1200; chunk size 509 -> 3 chunks
-    expect(peripheral.notified).toHaveLength(3);
+    // datagram = 2 (len) + 1 (kind) + 1200; chunk size 509 -> 3 chunks.
+    // v0.1.33: the central handshake notifies our hello on the TX first
+    // (37 bytes at the 20-byte broadcast size -> 2 chunks), then the frame.
+    expect(peripheral.notified).toHaveLength(5);
     expect(peripheral.notified.every((c) => c.length <= 512 - ATT_OVERHEAD)).toBe(true);
-    // Reassemble: exactly one FRAME datagram with the original bytes.
+    // Reassemble: the hello datagram first, then exactly one FRAME datagram with the original bytes.
     const dgs = peripheral.notifiedDatagrams();
-    expect(dgs).toHaveLength(1);
-    expect(dgs[0][0]).toBe(DATAGRAM_FRAME);
-    expect(dgs[0].slice(1)).toEqual(frame);
+    expect(dgs).toHaveLength(2);
+    expect(dgs[0][0]).toBe(DATAGRAM_HELLO);
+    expect(dgs[1][0]).toBe(DATAGRAM_FRAME);
+    expect(dgs[1].slice(1)).toEqual(frame);
     // No frame chunk went out as a central write: writes hold the hello only.
     expect(central.writesWithoutResponse).toHaveLength(0);
     const frameWrites = central.writtenDatagrams(MESH_RX).filter((dg) => dg[0] === DATAGRAM_FRAME);
@@ -1320,7 +1323,12 @@ describe('notify send for frame chunks (supersedes audit F-P2-9)', () => {
     // longer used for frames at all.
     expect(central.writes.length).toBe(helloWrites);
     expect(central.writesWithoutResponse).toHaveLength(0);
-    expect(peripheral.notifiedDatagrams()).toHaveLength(1);
+    // v0.1.33: the central handshake notifies our hello on the TX first,
+    // then the frame.
+    const dgs = peripheral.notifiedDatagrams();
+    expect(dgs).toHaveLength(2);
+    expect(dgs[0][0]).toBe(DATAGRAM_HELLO);
+    expect(dgs[1][0]).toBe(DATAGRAM_FRAME);
     await port.close();
   });
 });
@@ -1651,7 +1659,13 @@ describe('v0.1.31 ready peers: drain-before-connect must not send', () => {
     expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
     expect(port.readyPeerIds()).toEqual([]);
     await expect(port.send(PEER_HEX, new Uint8Array([1]))).rejects.toThrow(/peer not ready/);
-    expect(peripheral.notified).toHaveLength(0);
+    // v0.1.33: the central handshake notifies our hello on the TX (the
+    // peer is still not ready: no hello arrived back yet, and the
+    // settle has not elapsed). The notify is a hello, not a send.
+    const helloDgs = peripheral.notifiedDatagrams();
+    expect(helloDgs).toHaveLength(1);
+    expect(helloDgs[0][0]).toBe(DATAGRAM_HELLO);
+    expect(toHex(parseHello(helloDgs[0].slice(1))!.publicKey)).toBe(OWN_HEX);
     await port.close();
   });
 
@@ -1668,7 +1682,11 @@ describe('v0.1.31 ready peers: drain-before-connect must not send', () => {
     }
     expect(port.readyPeerIds()).toEqual([PEER_HEX]);
     await port.send(PEER_HEX, new Uint8Array([1, 2, 3]));
-    expect(peripheral.notifiedDatagrams()).toHaveLength(1);
+    // v0.1.33: the TX carries our hello (from the central handshake) plus the frame.
+    const dgs = peripheral.notifiedDatagrams();
+    expect(dgs).toHaveLength(2);
+    expect(dgs[0][0]).toBe(DATAGRAM_HELLO);
+    expect(dgs[1][0]).toBe(DATAGRAM_FRAME);
     await port.close();
   });
 
@@ -1687,6 +1705,187 @@ describe('v0.1.31 ready peers: drain-before-connect must not send', () => {
     expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
     expect(port.readyPeerIds()).toEqual([]);
     await expect(port.send(PEER_HEX, new Uint8Array([1]))).rejects.toThrow(/peripheral role unavailable/);
+    await port.close();
+  });
+});
+
+describe('v0.1.33 BLE handshake: hello over notify + settle fallback', () => {
+  // The v0.1.32 field run: links formed, zero hellos, zero BLE traffic.
+  // The ready gate required a peripheral hello that arrives only via
+  // the multi-ble-peripheral legacy emitter, which does not deliver on
+  // new-arch builds. The hello now also travels as a TX notify (the
+  // working channel), with a settle fallback for old-version peers.
+
+  test('central handshake notifies our hello on the TX', async () => {
+    const { deps, central, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    const dgs = peripheral.notifiedDatagrams();
+    expect(dgs).toHaveLength(1);
+    expect(dgs[0][0]).toBe(DATAGRAM_HELLO);
+    const hello = parseHello(dgs[0].slice(1));
+    expect(hello).not.toBeNull();
+    expect(toHex(hello!.publicKey)).toBe(OWN_HEX);
+    await port.close();
+  });
+
+  test('IDENT success logs the stage (no silent handshake)', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    try {
+      const { deps, central } = makeDeps();
+      const port = new GattBlePort(deps);
+      await port.advertise(OWN_HEX);
+      await port.scan(() => {});
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+      await tick(50);
+      expect(lines.some((l) => l.includes('ble ident ok tag 0b0b0b0b'))).toBe(true);
+      await port.close();
+    } finally {
+      resetDiagnosticsForTests();
+    }
+  });
+
+  test('hello received over central notify completes readiness with no peripheral write event (regression)', async () => {
+    // Two ports, crossed links, NO peripheral write event at all: the
+    // only hello channel is the TX notify. On v0.1.32 code this test
+    // fails: neither port ever notifies a hello, so neither becomes ready.
+    const depsA = makeDeps();
+    const depsB = makeDeps();
+    depsA.central.identHex = PEER_HEX;
+    depsB.central.identHex = OWN_HEX;
+    const portA = new GattBlePort(depsA.deps);
+    const portB = new GattBlePort(depsB.deps);
+    await portA.advertise(OWN_HEX);
+    await portB.advertise(PEER_HEX);
+    await portA.scan(() => {});
+    await portB.scan(() => {});
+    depsA.central.discoverCb!({ id: 'ble-b', rssi: -50, tag: PEER_TAG });
+    depsB.central.discoverCb!({ id: 'ble-a', rssi: -50, tag: peerTagOf(OWN_PUB) });
+    await tick(50);
+    expect(portA.connectedPeerIds()).toEqual([PEER_HEX]);
+    expect(portB.connectedPeerIds()).toEqual([OWN_HEX]);
+    // Not ready yet: the hellos have been notified but not exchanged.
+    expect(portA.readyPeerIds()).toEqual([]);
+    expect(portB.readyPeerIds()).toEqual([]);
+    // Radio hop: each port's TX notifies land as the other's central notifications.
+    const helloChunksA = [...depsA.peripheral.notified];
+    const helloChunksB = [...depsB.peripheral.notified];
+    for (const chunk of helloChunksA) depsB.central.notifyCb!({ id: 'ble-a', value: chunk });
+    for (const chunk of helloChunksB) depsA.central.notifyCb!({ id: 'ble-b', value: chunk });
+    expect(portA.readyPeerIds()).toEqual([PEER_HEX]);
+    expect(portB.readyPeerIds()).toEqual([OWN_HEX]);
+    // Frames flow both ways over the same links.
+    const receivedB: { peerId: string; bytes: Uint8Array }[] = [];
+    portB.onReceive((peerId, bytes) => receivedB.push({ peerId, bytes }));
+    const frameAB = new Uint8Array([1, 2, 3, 4]);
+    await portA.send(PEER_HEX, frameAB);
+    for (const chunk of depsA.peripheral.notified.slice(helloChunksA.length)) {
+      depsB.central.notifyCb!({ id: 'ble-a', value: chunk });
+    }
+    expect(receivedB).toEqual([{ peerId: OWN_HEX, bytes: frameAB }]);
+    await portA.close();
+    await portB.close();
+  });
+
+  test('hello-notify retry ladder fires while the peer is not ready and stops once it is ready', async () => {
+    const { deps, central, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    // Attempt 1 fired at connect.
+    expect(peripheral.notifiedDatagrams()).toHaveLength(1);
+    expect(peripheral.notifiedDatagrams()[0][0]).toBe(DATAGRAM_HELLO);
+    // Attempt 2 fires at 500 ms while the peer is still not ready.
+    await tick(700);
+    expect(peripheral.notifiedDatagrams()).toHaveLength(2);
+    // The peer hello arrives over central notify: ready at once, and the ladder stops.
+    for (const chunk of chunkBytes(encodeHello(PEER_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      central.notifyCb!({ id: 'ble-1', value: chunk });
+    }
+    expect(port.readyPeerIds()).toEqual([PEER_HEX]);
+    // Past the attempt-3 time (2 s cumulative): no third hello.
+    await tick(2000);
+    expect(peripheral.notifiedDatagrams()).toHaveLength(2);
+    await port.close();
+  });
+
+  test('settle fallback: central-ready peer with no hello becomes ready after 5 s', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    try {
+      const { deps, central } = makeDeps();
+      const port = new GattBlePort(deps);
+      await port.advertise(OWN_HEX);
+      await port.scan(() => {});
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+      await tick(50);
+      // No hello arrives (old-version peer): not ready yet, and send refuses.
+      expect(port.readyPeerIds()).toEqual([]);
+      await expect(port.send(PEER_HEX, new Uint8Array([1]))).rejects.toThrow(/peer not ready/);
+      // Past the 5 s settle the peer is ready via settle, and the log names the path.
+      await new Promise((r) => setTimeout(r, 5200));
+      expect(port.readyPeerIds()).toEqual([PEER_HEX]);
+      expect(lines.some((l) => l.includes('ble peer ready') && l.includes('via settle, no hello'))).toBe(true);
+      await port.send(PEER_HEX, new Uint8Array([1, 2, 3]));
+      await port.close();
+    } finally {
+      resetDiagnosticsForTests();
+    }
+  }, 15000);
+
+  test('disconnect is observed: peer drops from ready and logs', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => lines.push(`${kind} ${detail}`));
+    try {
+      const { deps, central } = makeDeps();
+      const port = new GattBlePort(deps);
+      await port.advertise(OWN_HEX);
+      await port.scan(() => {});
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+      await tick(50);
+      for (const chunk of chunkBytes(encodeHello(PEER_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+        central.notifyCb!({ id: 'ble-1', value: chunk });
+      }
+      expect(port.readyPeerIds()).toEqual([PEER_HEX]);
+      central.disconnectCb!('ble-1');
+      expect(port.readyPeerIds()).toEqual([]);
+      expect(port.connectedPeerIds()).toEqual([]);
+      expect(lines.some((l) => l.includes('disconnected'))).toBe(true);
+      await port.close();
+    } finally {
+      resetDiagnosticsForTests();
+    }
+  });
+
+  test('provisional peer becomes ready when its hello arrives over central notify', async () => {
+    const { deps, central } = makeDeps();
+    central.failReadAlways = true;
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    // The IDENT read fails twice (300 ms settle between): past that,
+    // the link is provisional, not a failure.
+    await new Promise((r) => setTimeout(r, 600));
+    expect(port.peerCount).toBe(1);
+    expect(port.connectedPeerIds()).toEqual([]);
+    expect(port.readyPeerIds()).toEqual([]);
+    // The peer hello arrives over central notify (the working channel):
+    // the provisional link promotes and the peer becomes ready.
+    for (const chunk of chunkBytes(encodeHello(PEER_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      central.notifyCb!({ id: 'ble-1', value: chunk });
+    }
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    expect(port.readyPeerIds()).toEqual([PEER_HEX]);
     await port.close();
   });
 });
