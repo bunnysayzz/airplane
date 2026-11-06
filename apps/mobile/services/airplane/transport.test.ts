@@ -30,7 +30,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, buildTransportHealth, runAuthorCatchUp, __resetBalancerForTests, __resetNetInfoForTests, __resetPulledPostsForTests, __resetFailedInboundForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio } from './transport';
+import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, buildTransportHealth, runAuthorCatchUp, __resetBalancerForTests, __setDrainRowDelayMsForTests, __resetNetInfoForTests, __resetPulledPostsForTests, __resetFailedInboundForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio, revalidateBleRadio } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
@@ -104,6 +104,7 @@ describe('transport manager', () => {
     __resetResharesForTests();
     __resetPulledPostsForTests();
     __resetDeviceKeypairForTests();
+    __setDrainRowDelayMsForTests(0);
     AsyncStorageMock.__clear();
     jest.useFakeTimers();
   });
@@ -185,8 +186,11 @@ describe('transport manager', () => {
   test('offline initial state does not start the sync timer', async () => {
     const setIntervalSpy = jest.spyOn(globalThis, 'setInterval');
     await startTransport();
-    // NetInfo mock reports offline; no periodic sync should be scheduled.
-    expect(setIntervalSpy).not.toHaveBeenCalled();
+    // The relay pool watchdog (15 s, v0.1.31) is the only interval at
+    // startup: the periodic sync timer (60 s) must not start offline.
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+    expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 15_000);
+    expect(setIntervalSpy).not.toHaveBeenCalledWith(expect.any(Function), 60_000);
     setIntervalSpy.mockRestore();
   });
 
@@ -346,7 +350,12 @@ describe('transport manager', () => {
     const rows = await store.listPostOutbox();
     expect(rows.map((r) => r.eventId)).toContain(toHex(event.id));
     expect(rows.find((r) => r.eventId === toHex(event.id))!.status).toBe('ble-sent');
-    // A later trigger re-attempts the same row.
+    // A later trigger to the SAME peer does not re-send the row: the
+    // v0.1.30 drain handed the same rows to the radio 3-4 times
+    // (v0.1.31 handoff memory, 120 s window). The row stays queued
+    // for a NEW peer or for the window to lapse.
+    expect(await drainPostOutbox()).toBe(0);
+    __setBlePortForTests({ connectedPeerIds: () => ['peerY'] } as never);
     expect(await drainPostOutbox()).toBe(1);
     __setBlePortForTests(null);
   });
@@ -405,6 +414,100 @@ describe('transport manager', () => {
     expect(sendSpy).not.toHaveBeenCalled();
     expect(await store.listPostOutbox()).toHaveLength(0);
     __setBlePortForTests(null);
+  });
+
+  test('drainPostOutbox paces rows: the second row waits for the inter-row gap', async () => {
+    __setDrainRowDelayMsForTests(50);
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const older = { ...makeSignedEvent(), id: new Uint8Array(32).fill(61), created_at: Math.floor(Date.now() / 1000) - 600 };
+    const newer = { ...makeSignedEvent(), id: new Uint8Array(32).fill(62), created_at: Math.floor(Date.now() / 1000) };
+    for (const e of [older, newer]) {
+      await store.saveEvent(e);
+      await store.enqueuePostOutbox(toHex(e.id), e.created_at);
+    }
+    const sentIds: string[] = [];
+    jest.spyOn(hybrid!, 'sendOverMesh').mockImplementation(async (event) => {
+      sentIds.push(toHex(event.id));
+      return 1;
+    });
+    __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
+    const draining = drainPostOutbox();
+    // 49 ms in, the first row has sent and the second is still parked
+    // on the pacing timer: the v0.1.30 burst sent 7 rows in 130 ms and
+    // lost every frame on the wire. At 50 ms the second row goes out.
+    await jest.advanceTimersByTimeAsync(49);
+    expect(sentIds).toEqual([toHex(older.id)]);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(await draining).toBe(2);
+    expect(sentIds).toEqual([toHex(older.id), toHex(newer.id)]);
+    __setBlePortForTests(null);
+  });
+
+  test('relay pool watchdog forces a reconnect when the pool is dead with no ladder running', async () => {
+    const serviceLines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => {
+      if (kind === 'service') serviceLines.push(detail);
+    });
+    try {
+      await startTransport();
+      const hybrid = __getHybridForTests();
+      expect(hybrid).not.toBeNull();
+      const before = FakeSocket.instances.length;
+      expect(before).toBeGreaterThan(0);
+      // Kill the pool with no trigger: stop() clears the ladder and
+      // closes the sockets, the state the v0.1.30 window sat in for
+      // 3 minutes with no log line and no recovery.
+      await hybrid!.nostr.stop();
+      expect(hybrid!.nostr.openRelayCount()).toBe(0);
+      expect(hybrid!.nostr.pendingReconnectCount()).toBe(0);
+      // The watchdog ticks every 15 s but only forces an attempt when
+      // no connect was attempted for 60 s (the reconnect cap), so the
+      // first three ticks stay quiet and the fourth fires.
+      await jest.advanceTimersByTimeAsync(45_000);
+      expect(FakeSocket.instances.length).toBe(before);
+      await jest.advanceTimersByTimeAsync(15_000);
+      expect(FakeSocket.instances.length).toBeGreaterThan(before);
+      expect(serviceLines.some((l) => l.startsWith('relay pool watchdog:'))).toBe(true);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
+  test('going offline does not stop the relay pool: the reconnect ladder stays armed', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const listener = netInfoMock.addEventListener.mock.calls[0][0] as (s: {
+      isConnected: boolean;
+      isInternetReachable: boolean;
+    }) => void;
+    listener({ isConnected: true, isInternetReachable: true });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const before = FakeSocket.instances.length;
+    expect(before).toBeGreaterThan(0);
+    // Offline now: the old code called nostr.stop() here, which
+    // cancelled the reconnect ladder and left the pool dead until the
+    // next online event (v0.1.30: 3 minutes of silence). The pool must
+    // stay up: a dead network fails the socket attempt itself, and the
+    // ladder backs off to its cap.
+    listener({ isConnected: false, isInternetReachable: false });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(FakeSocket.instances.length).toBe(before);
+    expect(FakeSocket.instances.every((s) => s.readyState !== 3)).toBe(true);
+  });
+
+  test('revalidateBleRadio picks up a grant made while the app runs', async () => {
+    RN.PermissionsAndroid.check.mockReset();
+    RN.PermissionsAndroid.check.mockResolvedValue(false);
+    await startTransport();
+    expect(getBleRadioState()).toBe('permission-blocked');
+    RN.PermissionsAndroid.check.mockResolvedValue(true);
+    await revalidateBleRadio();
+    expect(getBleRadioState()).toBe('on');
+    RN.PermissionsAndroid.check.mockResolvedValue(true);
   });
 
   test('publishViaTransport marks a queued post unsent in the outbox', async () => {
@@ -527,7 +630,10 @@ describe('transport manager', () => {
 
     listener({ isConnected: true, isInternetReachable: true });
     listener({ isConnected: true, isInternetReachable: true }); // duplicate
-    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+    // Two intervals total: the relay pool watchdog (15 s, started at
+    // launch) and the periodic sync timer (60 s, started once here).
+    expect(setIntervalSpy).toHaveBeenCalledTimes(2);
+    expect(setIntervalSpy.mock.calls.filter((c) => c[1] === 60_000)).toHaveLength(1);
     expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 60_000);
     setIntervalSpy.mockRestore();
   });
@@ -577,7 +683,10 @@ describe('transport manager', () => {
     await startTransport();
     const hybrid = __getHybridForTests();
     expect(hybrid).not.toBeNull();
-    const nostrStartSpy = jest.spyOn(hybrid!.nostr, 'start');
+    // Since v0.1.31 the online transition re-attempts dead relays via
+    // startIfNeeded (never stops the pool on offline), not a bare
+    // start(): the pool is already started, so start() would no-op.
+    const nostrStartIfNeededSpy = jest.spyOn(hybrid!.nostr, 'startIfNeeded');
     const listener = netInfoMock.addEventListener.mock.calls[0][0] as (s: NetState) => void;
     // Listener fires offline first (reachability still unknown).
     listener({ isConnected: true, isInternetReachable: false });
@@ -585,7 +694,7 @@ describe('transport manager', () => {
     resolveFetch!({ isConnected: true, isInternetReachable: true });
     await Promise.resolve();
     await Promise.resolve();
-    expect(nostrStartSpy).toHaveBeenCalledTimes(1);
+    expect(nostrStartIfNeededSpy).toHaveBeenCalledTimes(1);
     expect(setIntervalSpy).toHaveBeenCalled();
     setIntervalSpy.mockRestore();
   });
@@ -594,14 +703,16 @@ describe('transport manager', () => {
     await startTransport();
     const hybrid = __getHybridForTests();
     expect(hybrid).not.toBeNull();
-    const nostrStartSpy = jest.spyOn(hybrid!.nostr, 'start');
+    // Since v0.1.31 the online transition re-attempts dead relays via
+    // startIfNeeded, not a bare start().
+    const nostrStartIfNeededSpy = jest.spyOn(hybrid!.nostr, 'startIfNeeded');
     const listener = netInfoMock.addEventListener.mock.calls[0][0] as (s: {
       isConnected: boolean;
       isInternetReachable: boolean;
     }) => void;
     listener({ isConnected: true, isInternetReachable: true });
     listener({ isConnected: true, isInternetReachable: true }); // duplicate
-    expect(nostrStartSpy).toHaveBeenCalledTimes(1);
+    expect(nostrStartIfNeededSpy).toHaveBeenCalledTimes(1);
   });
 
 
@@ -915,9 +1026,14 @@ describe('transport manager', () => {
     RN.PermissionsAndroid.check.mockReset();
     RN.PermissionsAndroid.check.mockResolvedValue(true);
     await startTransport();
-    // No native BLE stack in jest: advertise fails closed to 'unavailable'.
-    // The point is the check-first path ran without wedging the transport.
-    expect(getBleRadioState()).toBe('unavailable');
+    // No native BLE stack in jest: advertise fails, and the scan fails
+    // too. Since v0.1.31 that no longer tears the radio down to
+    // 'unavailable': bring-up resolves 'on' (scanning, advertising up
+    // or retrying), the advertise retry and the scan retry are armed,
+    // and the live advertise/scan truth is in diagnostics, not the
+    // state. The point is the check-first path ran without wedging
+    // the transport.
+    expect(getBleRadioState()).toBe('on');
     expect(__getHybridForTests()).not.toBeNull();
   });
 });
@@ -929,6 +1045,12 @@ describe('BLE publish targets + mesh status', () => {
     expect(blePeerIdsForPublish({} as never)).toEqual([]);
     expect(blePeerIdsForPublish({ connectedPeerIds: () => ['a', 'b'] } as never)).toEqual(['a', 'b']);
     expect(blePeerIdsForPublish({ connectedPeerIds: () => { throw new Error('boom'); } } as never)).toEqual([]);
+  });
+
+  test('blePeerIdsForPublish prefers ready peers, and a throwing readiness probe falls back to connected', () => {
+    expect(blePeerIdsForPublish({ readyPeerIds: () => ['r1'], connectedPeerIds: () => ['c1', 'c2'] } as never)).toEqual(['r1']);
+    expect(blePeerIdsForPublish({ readyPeerIds: () => [], connectedPeerIds: () => ['c1'] } as never)).toEqual([]);
+    expect(blePeerIdsForPublish({ readyPeerIds: () => { throw new Error('boom'); }, connectedPeerIds: () => ['c1'] } as never)).toEqual(['c1']);
   });
 
   test('resolveRelayState truth table', () => {
@@ -970,6 +1092,7 @@ describe('mesh-scan fix: scan failure keeps advertising', () => {
     __resetResharesForTests();
     __resetPulledPostsForTests();
     __resetDeviceKeypairForTests();
+    __setDrainRowDelayMsForTests(0);
     AsyncStorageMock.__clear();
     jest.useFakeTimers();
   });
@@ -1041,6 +1164,40 @@ describe('mesh-scan fix: scan failure keeps advertising', () => {
       await expect(p1).resolves.toBe(true);
       await expect(p2).resolves.toBe(true);
       expect(port.advertise).toHaveBeenCalledTimes(1);
+    } finally {
+      __setBlePortForTests(null);
+    }
+  });
+
+  test('advertise failure schedules a bounded retry instead of tearing the radio down', async () => {
+    grantPermissions();
+    await startTransport();
+    let advertiseAttempts = 0;
+    const port = {
+      advertise: jest.fn(async () => {
+        advertiseAttempts++;
+        if (advertiseAttempts === 1) {
+          throw new Error('ble: advertise failed: ble: peripheral ready failed: Not support bluetoothLeAdvertiser');
+        }
+      }),
+      stopAdvertise: jest.fn(async () => {}),
+      scan: jest.fn(async () => () => {}),
+    };
+    __setBlePortForTests(port as never);
+    try {
+      // The first advertise fails at startup (the v0.1.30 failure on
+      // both phones), but bring-up still resolves: the phone can scan
+      // and central-connect, and the retry re-attempts advertise.
+      expect(await retryBleRadio()).toBe(true);
+      expect(getBleRadioState()).toBe('on');
+      expect(port.advertise).toHaveBeenCalledTimes(1);
+      // The retry fires after 2 s with the same peer id and succeeds.
+      await jest.advanceTimersByTimeAsync(2000);
+      expect(port.advertise).toHaveBeenCalledTimes(2);
+      expect(getBleRadioState()).toBe('on');
+      // No further retries are pending once advertise recovered.
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(port.advertise).toHaveBeenCalledTimes(2);
     } finally {
       __setBlePortForTests(null);
     }
@@ -1167,6 +1324,50 @@ describe('transport load balancer (v0.1.27)', () => {
   });
 
 
+
+  test('a publish serves the healthy ready peer and holds out the backed-off peer', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const peerA = 'aa'.repeat(32);
+    const peerB = 'bb'.repeat(32);
+    const captured: string[][] = [];
+    jest.spyOn(hybrid!, 'publish').mockImplementation(async (_event, blePeers) => {
+      captured.push([...(blePeers ?? [])]);
+      return {
+        transport: 'none',
+        status: 'queued',
+        blePeers: 0,
+        relays: [],
+        relayTried: false,
+        relayDetail: 'no open relay socket',
+      };
+    });
+    try {
+      // First publish reaches only A and the radio reaches nobody: A
+      // backs off for 10 s, B was never attempted and stays healthy.
+      __setBlePortForTests({ readyPeerIds: () => [peerA], connectedPeerIds: () => [peerA] } as never);
+      const eventA = { ...makeSignedEvent(), id: new Uint8Array(32).fill(71) };
+      await publishViaTransport(eventA);
+      expect(captured).toEqual([[peerA]]);
+      const health = buildTransportHealth();
+      const peerAHealth = health.peers.find((p) => p.tag === peerA.slice(0, 8));
+      expect(peerAHealth).toBeDefined();
+      expect(peerAHealth!.unhealthyUntilMs).toBeGreaterThan(health.nowMs);
+      // Second publish, both peers ready: the plan still includes BLE
+      // (B is healthy), but the router only gets B. A is held out of
+      // this send alone, not dropped: it recovers on its own window.
+      __setBlePortForTests({ readyPeerIds: () => [peerA, peerB], connectedPeerIds: () => [peerA, peerB] } as never);
+      const eventB = { ...makeSignedEvent(), id: new Uint8Array(32).fill(72) };
+      await publishViaTransport(eventB);
+      expect(captured[1]).toEqual([peerB]);
+      const route = serviceLines.find((l) => l.startsWith('balancer route '));
+      expect(route).toBeDefined();
+      expect(route!).toContain('ble');
+    } finally {
+      __setBlePortForTests(null);
+    }
+  });
 
   test('author catch-up queries open relays for a recently seen author with no cell filter', async () => {
     await startTransport();

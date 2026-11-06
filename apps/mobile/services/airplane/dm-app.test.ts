@@ -22,6 +22,19 @@ jest.mock('@airplane/transport', () => {
   return {
     ...actual,
     WsDmRelay: class {
+      private readonly relayUrls: string[];
+      constructor(opts: { relays: string[] }) {
+        this.relayUrls = [...opts.relays];
+      }
+      getRelayUrls(): string[] {
+        return [...this.relayUrls];
+      }
+      getRelayState(): 'closed' {
+        return 'closed';
+      }
+      openRelayCount(): number {
+        return 0;
+      }
       async publish(): Promise<{ accepted: boolean; rejected: boolean }> {
         return { accepted: false, rejected: false };
       }
@@ -35,7 +48,7 @@ jest.mock('@airplane/transport', () => {
   };
 });
 
-import { dmPeerLabel, dmUserErrorMessage, getDmService, __resetDmServiceForTests } from './dm';
+import { dmPeerLabel, dmUserErrorMessage, getDmRelayPoolHealth, getDmService, __resetDmServiceForTests } from './dm';
 import { __resetDeviceKeypairForTests, setKeyStore } from './identity';
 import { memorableNameFor } from './names';
 import { __resetDisplayNamesForTests, recordPeerDisplayName } from './displayNames';
@@ -105,5 +118,21 @@ describe('getDmService rejection recovery (D10)', () => {
     const svc = await getDmService();
     expect(svc).toBeDefined();
     await expect(getDmService()).resolves.toBe(svc);
+  });
+});
+
+describe('getDmRelayPoolHealth (v0.1.31)', () => {
+  test('null before the service starts, then the pool URLs with no open sockets', async () => {
+    expect(getDmRelayPoolHealth()).toBeNull();
+    const svc = await getDmService();
+    expect(svc).toBeDefined();
+    // The relay is stubbed, so no real socket ever opens: the pool
+    // reports its URLs and zero open, which is what the balancer
+    // renders as its DM leg.
+    const health = getDmRelayPoolHealth();
+    expect(health).not.toBeNull();
+    expect(health!.urls.length).toBeGreaterThan(0);
+    expect(health!.urls.every((u) => u.startsWith('wss://'))).toBe(true);
+    expect(health!.openUrls).toEqual([]);
   });
 });

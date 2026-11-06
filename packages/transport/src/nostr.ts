@@ -227,6 +227,26 @@ export interface NostrTransportOpts {
    */
   onAuthChallenge?: (relayUrl: string, challenge: string) => void;
   /**
+   * A connect attempt failed before any socket existed (the factory
+   * threw). Relay URL and reason only, never content. Without this a
+   * pool that tries and fails is indistinguishable in the log from a
+   * pool that never tried (the v0.1.30 window: 4 minutes of silence,
+   * no failure line anywhere).
+   */
+  onConnectFailure?: (relayUrl: string, reason: string) => void;
+  /**
+   * A socket closed, with the reason ('error', 'closed', or
+   * 'silence timeout'). Fires once per drop: the error path runs the
+   * close path directly and onclose may fire after, so a second close
+   * for the same socket must not re-log or re-schedule.
+   */
+  onSocketClosed?: (relayUrl: string, reason: string) => void;
+  /**
+   * A reconnect was scheduled, with the delay and the attempt number
+   * (1-based). The delay is the backoff actually armed, after jitter.
+   */
+  onReconnectScheduled?: (relayUrl: string, delayMs: number, attempt: number) => void;
+  /**
    * Viewer geohash-5 cells in scope (own cell plus neighbours). When
    * known, the subscribe filter narrows to `#g` for these cells; when
    * absent, the filter stays global so coverage is never lost on a
@@ -298,6 +318,9 @@ export class NostrTransport {
   private readonly onRelayNotice: NostrTransportOpts['onRelayNotice'];
   private readonly onAuthChallenge: NostrTransportOpts['onAuthChallenge'];
   private readonly onResubscribe: NostrTransportOpts['onResubscribe'];
+  private readonly onConnectFailure: NostrTransportOpts['onConnectFailure'];
+  private readonly onSocketClosed: NostrTransportOpts['onSocketClosed'];
+  private readonly onReconnectScheduled: NostrTransportOpts['onReconnectScheduled'];
   private subscribeCells: string[];
   /**
    * Created_at of the newest event received on a main subscription,
@@ -335,6 +358,10 @@ export class NostrTransport {
   private timers = new Set<ReturnType<typeof setTimeout>>();
   /** Consecutive failed connect attempts per relay; reset on open. */
   private reconnectAttempts = new Map<string, number>();
+  /** One pending reconnect timer per relay (the ladder is never double-armed). */
+  private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Last connect attempt time per relay (epoch ms), for the pool watchdog. */
+  private lastConnectAttemptAtMs = new Map<string, number>();
   /** In-flight relay OK waiters, indexed by Nostr envelope id. */
   private okWaiters = new Map<string, Set<OkWaiter>>();
   private allOkWaiters = new Set<OkWaiter>();
@@ -371,6 +398,9 @@ export class NostrTransport {
     this.onRelayNotice = opts.onRelayNotice;
     this.onAuthChallenge = opts.onAuthChallenge;
     this.onResubscribe = opts.onResubscribe;
+    this.onConnectFailure = opts.onConnectFailure;
+    this.onSocketClosed = opts.onSocketClosed;
+    this.onReconnectScheduled = opts.onReconnectScheduled;
     this.subscribeCells = [...(opts.cells ?? [])].filter((c) => c.length > 0);
   }
 
@@ -420,6 +450,47 @@ export class NostrTransport {
     return false;
   }
 
+  /** Count of relays with an open socket right now. */
+  openRelayCount(): number {
+    let open = 0;
+    for (const s of this.states.values()) if (s === 'open') open += 1;
+    return open;
+  }
+
+  /** Count of relays with a reconnect timer pending. */
+  pendingReconnectCount(): number {
+    return this.reconnectTimers.size;
+  }
+
+  /** Newest connect attempt time across relays (epoch ms), 0 when never attempted. */
+  getLastConnectAttemptMs(): number {
+    let latest = 0;
+    for (const atMs of this.lastConnectAttemptAtMs.values()) {
+      if (atMs > latest) latest = atMs;
+    }
+    return latest;
+  }
+
+  /**
+   * Attempt a connect for relays that are dead with no reconnect
+   * pending. Never double-arms the ladder: a relay with a pending
+   * timer is left to it. Starts the transport when it was never
+   * started (or was stopped): a pool that died with no trigger
+   * (the v0.1.30 window: 0 open, 0 pending, no log line) needs an
+   * outside push, and this is the push the pool watchdog uses.
+   */
+  startIfNeeded(): void {
+    if (!this.started) {
+      void this.start();
+      return;
+    }
+    for (const url of this.relays) {
+      if (this.states.get(url) === 'closed' && !this.reconnectTimers.has(url)) {
+        this.connectOne(url);
+      }
+    }
+  }
+
   /** Connect to all relays. Idempotent. */
   async start(): Promise<void> {
     if (this.started) return;
@@ -432,6 +503,7 @@ export class NostrTransport {
     this.started = false;
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
+    this.reconnectTimers.clear();
     this.silenceTimers.clear();
     this.lastFrameAtMs.clear();
     this.silencePinged.clear();
@@ -468,10 +540,12 @@ export class NostrTransport {
   private connectOne(url: string): void {
     if (!this.started) return;
     this.states.set(url, 'connecting');
+    this.lastConnectAttemptAtMs.set(url, Date.now());
     let ws: WebSocketLike;
     try {
       ws = this.wsFactory(url);
-    } catch {
+    } catch (err) {
+      this.onConnectFailure?.(url, err instanceof Error ? err.message : String(err));
       this.scheduleReconnect(url);
       return;
     }
@@ -517,9 +591,9 @@ export class NostrTransport {
       } catch {
         // fall through to the direct close path below
       }
-      if (this.sockets.get(url) === ws) this.handleClose(url);
+      if (this.sockets.get(url) === ws) this.handleClose(url, 'error');
     };
-    ws.onclose = () => this.handleClose(url);
+    ws.onclose = () => this.handleClose(url, 'closed');
   }
 
   /** Arm (or re-arm) the silence timer for one relay. */
@@ -564,11 +638,18 @@ export class NostrTransport {
     } catch {
       // fall through to the direct close path below
     }
-    if (this.sockets.get(url) === ws) this.handleClose(url);
+    if (this.sockets.get(url) === ws) this.handleClose(url, 'silence timeout');
   }
 
-  /** Shared close path for onclose and for errors without a close. */
-  private handleClose(url: string): void {
+  /**
+   * Shared close path for onclose and for errors without a close.
+   * Runs once per socket: the error path runs it directly and onclose
+   * may fire after, and a second run would re-log the close and
+   * double-arm the reconnect ladder. A clean stop() leaves the socket
+   * map empty and the state closed, so a late close after stop is
+   * also a no-op here.
+   */
+  private handleClose(url: string, reason: string): void {
     const timer = this.silenceTimers.get(url);
     if (timer) {
       clearTimeout(timer);
@@ -576,23 +657,30 @@ export class NostrTransport {
       this.silenceTimers.delete(url);
     }
     this.silencePinged.delete(url);
+    if (!this.sockets.has(url) && this.states.get(url) === 'closed') return;
     this.sockets.delete(url);
     this.states.set(url, 'closed');
+    this.onSocketClosed?.(url, reason);
     this.noteRelayGone(url);
     this.scheduleReconnect(url);
   }
 
   private scheduleReconnect(url: string): void {
     if (!this.started) return;
+    if (this.reconnectTimers.has(url)) return;
     const attempts = this.reconnectAttempts.get(url) ?? 0;
     this.reconnectAttempts.set(url, attempts + 1);
+    const delay = this.backoffDelayMs(attempts);
+    this.onReconnectScheduled?.(url, delay, attempts + 1);
     const timer = setTimeout(
       () => {
+        this.reconnectTimers.delete(url);
         this.timers.delete(timer);
         this.connectOne(url);
       },
-      this.backoffDelayMs(attempts),
+      delay,
     );
+    this.reconnectTimers.set(url, timer);
     this.timers.add(timer);
   }
 

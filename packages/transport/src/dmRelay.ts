@@ -83,6 +83,14 @@ export interface WsDmRelayOpts {
   silenceTimeoutMs?: number;
   /** Allow private-network relay targets (explicit user-added list). */
   allowPrivateRelays?: boolean;
+  /** A pooled socket opened (relay URL). The app uses it to re-attempt queued work. */
+  onSocketOpen?: (relayUrl: string) => void;
+  /** A pooled socket closed, with the reason ('error', 'closed', 'silence timeout'). */
+  onSocketClosed?: (relayUrl: string, reason: string) => void;
+  /** A connect attempt failed before any socket existed (relay URL, reason). */
+  onConnectFailure?: (relayUrl: string, reason: string) => void;
+  /** A reconnect was scheduled, with the delay and the attempt number (1-based). */
+  onReconnectScheduled?: (relayUrl: string, delayMs: number, attempt: number) => void;
 }
 
 interface NostrDmEvent {
@@ -196,6 +204,10 @@ export class WsDmRelay implements DmRelayPort {
   private readonly reconnectMs: number;
   private readonly reconnectMaxMs: number;
   private readonly silenceTimeoutMs: number;
+  private readonly onSocketOpen: WsDmRelayOpts['onSocketOpen'];
+  private readonly onSocketClosed: WsDmRelayOpts['onSocketClosed'];
+  private readonly onConnectFailure: WsDmRelayOpts['onConnectFailure'];
+  private readonly onReconnectScheduled: WsDmRelayOpts['onReconnectScheduled'];
   /** Last inbound frame time per relay (liveness proof for silence detection). */
   private readonly lastFrameAtMs = new Map<string, number>();
   /** Armed silence timer per relay. */
@@ -235,6 +247,27 @@ export class WsDmRelay implements DmRelayPort {
     this.reconnectMs = opts.reconnectMs ?? 1000;
     this.reconnectMaxMs = opts.reconnectMaxMs ?? 30000;
     this.silenceTimeoutMs = opts.silenceTimeoutMs ?? DM_SILENCE_TIMEOUT_MS;
+    this.onSocketOpen = opts.onSocketOpen;
+    this.onSocketClosed = opts.onSocketClosed;
+    this.onConnectFailure = opts.onConnectFailure;
+    this.onReconnectScheduled = opts.onReconnectScheduled;
+  }
+
+  /** Relay URLs this pool manages. */
+  getRelayUrls(): string[] {
+    return [...this.relays];
+  }
+
+  /** Current per-relay connection state. */
+  getRelayState(url: string): 'open' | 'connecting' | 'closed' {
+    return this.pool.get(url)?.state ?? 'closed';
+  }
+
+  /** Count of relays with an open socket right now. */
+  openRelayCount(): number {
+    let open = 0;
+    for (const entry of this.pool.values()) if (entry.state === 'open') open += 1;
+    return open;
   }
 
   /** Arm (or re-arm) the silence timer for one relay. */
@@ -297,6 +330,7 @@ export class WsDmRelay implements DmRelayPort {
       this.clearSilenceTimer(url);
       for (const w of [...entry.openWaiters]) w();
       entry.openWaiters.clear();
+      this.onSocketClosed?.(url, 'silence timeout');
       for (const waiter of [...this.publishWaiters]) {
         if (waiter.done || waiter.settled.has(url)) continue;
         waiter.settled.set(url, 'failed');
@@ -461,8 +495,9 @@ export class WsDmRelay implements DmRelayPort {
     let ws: WebSocketLike;
     try {
       ws = this.wsFactory(url);
-    } catch {
+    } catch (err) {
       entry.state = 'closed';
+      this.onConnectFailure?.(url, err instanceof Error ? err.message : String(err));
       this.scheduleReconnect(url);
       return entry;
     }
@@ -476,6 +511,7 @@ export class WsDmRelay implements DmRelayPort {
       this.armSilenceTimer(url);
       for (const w of [...entry.openWaiters]) w();
       entry.openWaiters.clear();
+      this.onSocketOpen?.(url);
       if (this.subActive) this.sendSubscription(url);
     };
     ws.onmessage = ev => {
@@ -546,7 +582,7 @@ export class WsDmRelay implements DmRelayPort {
         // Malformed relay frame: ignore, never crash.
       }
     };
-    const drop = (): void => {
+    const drop = (reason: string): void => {
       if (entry.ws !== ws) return;
       entry.state = 'closed';
       entry.ws = null;
@@ -560,6 +596,7 @@ export class WsDmRelay implements DmRelayPort {
       } catch {
         // ignore
       }
+      this.onSocketClosed?.(url, reason);
       // In-flight publishes on this socket settle as failed (never as
       // rejected: a drop is not a relay judgement).
       for (const waiter of [...this.publishWaiters]) {
@@ -572,10 +609,10 @@ export class WsDmRelay implements DmRelayPort {
       if (this.subActive) this.scheduleReconnect(url);
     };
     ws.onerror = () => {
-      drop();
+      drop('error');
     };
     ws.onclose = () => {
-      drop();
+      drop('closed');
     };
     return entry;
   }
@@ -585,6 +622,7 @@ export class WsDmRelay implements DmRelayPort {
     if (entry.reconnectTimer) return;
     const delay = Math.min(this.reconnectMs * 2 ** entry.reconnectAttempts, this.reconnectMaxMs);
     entry.reconnectAttempts += 1;
+    this.onReconnectScheduled?.(url, delay, entry.reconnectAttempts);
     entry.reconnectTimer = setTimeout(() => {
       entry.reconnectTimer = null;
       if (!this.subActive) return;

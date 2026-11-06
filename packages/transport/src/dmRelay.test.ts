@@ -428,3 +428,93 @@ describe('nostrEventToDmEnvelope event id carry (P1-06)', () => {
     expect(parsed?.relayEventId).toBe(event.id);
   });
 });
+
+describe('WsDmRelay v0.1.31 pool state + lifecycle hooks', () => {
+  test('getRelayUrls, getRelayState, and openRelayCount report the live pool', () => {
+    const sockets: FakeSocket[] = [];
+    const relay = new WsDmRelay({
+      relays: ['wss://a.relay', 'wss://b.relay'],
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        return s;
+      },
+    });
+    expect(relay.getRelayUrls()).toEqual(['wss://a.relay', 'wss://b.relay']);
+    const unsub = relay.subscribe('aa'.repeat(32), () => {});
+    expect(relay.getRelayState('wss://a.relay')).toBe('connecting');
+    expect(relay.openRelayCount()).toBe(0);
+    sockets[0].open();
+    expect(relay.getRelayState('wss://a.relay')).toBe('open');
+    expect(relay.openRelayCount()).toBe(1);
+    // The second relay got a socket from subscribe but never opened:
+    // it is connecting, not closed.
+    expect(relay.getRelayState('wss://b.relay')).toBe('connecting');
+    expect(relay.getRelayState('wss://never.configured')).toBe('closed');
+    unsub();
+  });
+
+  test('a socket close fires onSocketClosed with reason closed and schedules a reconnect', async () => {
+    jest.useFakeTimers();
+    try {
+      const sockets: FakeSocket[] = [];
+      const closed: Array<{ url: string; reason: string }> = [];
+      const scheduled: Array<{ url: string; delayMs: number; attempt: number }> = [];
+      const opened: string[] = [];
+      const relay = new WsDmRelay({
+        relays: ['wss://test.relay'],
+        wsFactory: (url: string) => {
+          const s = new FakeSocket(url);
+          sockets.push(s);
+          return s;
+        },
+        onSocketOpen: (url) => {
+          opened.push(url);
+        },
+        onSocketClosed: (url, reason) => {
+          closed.push({ url, reason });
+        },
+        onReconnectScheduled: (url, delayMs, attempt) => {
+          scheduled.push({ url, delayMs, attempt });
+        },
+      });
+      const unsub = relay.subscribe('aa'.repeat(32), () => {});
+      sockets[0].open();
+      expect(opened).toEqual(['wss://test.relay']);
+      sockets[0].close();
+      // The DM pool recovered at 03:26:41 while the post pool stayed
+      // dead in the v0.1.30 window, and no balancer line covered it:
+      // the close reason and the scheduled reconnect must be visible
+      // to the app, so the balancer can log and re-attempt on them.
+      expect(closed).toEqual([{ url: 'wss://test.relay', reason: 'closed' }]);
+      expect(scheduled).toHaveLength(1);
+      expect(scheduled[0].url).toBe('wss://test.relay');
+      expect(scheduled[0].attempt).toBe(1);
+      expect(relay.openRelayCount()).toBe(0);
+      await jest.advanceTimersByTimeAsync(2000);
+      expect(sockets).toHaveLength(2);
+      unsub();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a connect failure fires onConnectFailure with the relay and reason', () => {
+    const failures: Array<{ url: string; reason: string }> = [];
+    const relay = new WsDmRelay({
+      relays: ['wss://fail.relay'],
+      wsFactory: () => {
+        throw new Error('dial failed');
+      },
+      onConnectFailure: (url, reason) => {
+        failures.push({ url, reason });
+      },
+    });
+    const unsub = relay.subscribe('aa'.repeat(32), () => {});
+    expect(failures).toHaveLength(1);
+    expect(failures[0].url).toBe('wss://fail.relay');
+    expect(failures[0].reason).toContain('dial failed');
+    expect(relay.getRelayState('wss://fail.relay')).toBe('closed');
+    unsub();
+  });
+});

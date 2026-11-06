@@ -1032,3 +1032,121 @@ describe('NostrTransport v0.1.27 load balancer', () => {
     await t.stop();
   });
 });
+
+describe('NostrTransport v0.1.31 lifecycle hooks + startIfNeeded', () => {
+  test('a connect failure fires onConnectFailure with the relay and reason, and arms exactly one reconnect', async () => {
+    const failures: Array<{ url: string; reason: string }> = [];
+    const scheduled: Array<{ url: string; delayMs: number; attempt: number }> = [];
+    const t = new NostrTransport({
+      relays: ['wss://fail.relay'],
+      reconnectMs: 1000,
+      wsFactory: () => {
+        throw new Error('dial failed');
+      },
+      onConnectFailure: (url, reason) => {
+        failures.push({ url, reason });
+      },
+      onReconnectScheduled: (url, delayMs, attempt) => {
+        scheduled.push({ url, delayMs, attempt });
+      },
+    });
+    await t.start();
+    await tick(20);
+    expect(failures).toHaveLength(1);
+    expect(failures[0].url).toBe('wss://fail.relay');
+    expect(failures[0].reason).toContain('dial failed');
+    // Exactly one reconnect is scheduled, and the pool reports it:
+    // the v0.1.30 window showed zero lines for a dead pool, so the
+    // ladder state must be observable, not just internal.
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0].url).toBe('wss://fail.relay');
+    expect(scheduled[0].attempt).toBe(1);
+    expect(t.openRelayCount()).toBe(0);
+    expect(t.pendingReconnectCount()).toBe(1);
+    expect(t.getLastConnectAttemptMs()).toBeGreaterThan(0);
+    await t.stop();
+    expect(t.pendingReconnectCount()).toBe(0);
+  });
+
+  test('a socket close fires onSocketClosed once with reason closed and arms exactly one reconnect', async () => {
+    const closed: Array<{ url: string; reason: string }> = [];
+    const scheduled: Array<{ url: string; delayMs: number; attempt: number }> = [];
+    const sockets: FakeSocket[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://flaky.relay'],
+      reconnectMs: 1000,
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+      onSocketClosed: (url, reason) => {
+        closed.push({ url, reason });
+      },
+      onReconnectScheduled: (url, delayMs, attempt) => {
+        scheduled.push({ url, delayMs, attempt });
+      },
+    });
+    await t.start();
+    await tick(20);
+    expect(t.getRelayState('wss://flaky.relay')).toBe('open');
+    sockets[0].close();
+    // The error path and the later onclose must not double-log or
+    // double-arm the ladder (pre-existing double schedule, fixed in
+    // the same change that added the hooks).
+    expect(closed).toEqual([{ url: 'wss://flaky.relay', reason: 'closed' }]);
+    expect(scheduled).toHaveLength(1);
+    expect(t.pendingReconnectCount()).toBe(1);
+    await t.stop();
+  });
+
+  test('a silence timeout fires onSocketClosed with reason silence timeout', async () => {
+    const closed: Array<{ url: string; reason: string }> = [];
+    const sockets: FakeSocket[] = [];
+    const t = new NostrTransport({
+      relays: ['wss://silent.relay'],
+      reconnectMs: 10,
+      silenceTimeoutMs: 30,
+      wsFactory: (url: string) => {
+        const s = new FakeSocket(url);
+        sockets.push(s);
+        setTimeout(() => s.open(), 0);
+        return s;
+      },
+      onSocketClosed: (url, reason) => {
+        closed.push({ url, reason });
+      },
+    });
+    await t.start();
+    await tick(20);
+    expect(t.getRelayState('wss://silent.relay')).toBe('open');
+    // Break the close-to-onclose link, as in the error-path test: the
+    // silence force-close then runs the direct close path with the
+    // silence reason. (When close() fires onclose synchronously, the
+    // onclose 'closed' reason wins instead, and the direct path is
+    // skipped: one close, one reason, never both.)
+    sockets[0].close = () => {
+      sockets[0].closed = true;
+    };
+    await tick(120);
+    expect(closed[0]).toEqual({ url: 'wss://silent.relay', reason: 'silence timeout' });
+    await t.stop();
+  });
+
+  test('startIfNeeded restarts a stopped pool and is a no-op while the pool is live', async () => {
+    const { t, sockets } = makeTransport(['wss://a.relay']);
+    await t.start();
+    await tick(20);
+    expect(sockets).toHaveLength(1);
+    t.startIfNeeded();
+    await tick(20);
+    expect(sockets).toHaveLength(1);
+    await t.stop();
+    t.startIfNeeded();
+    await tick(20);
+    expect(sockets).toHaveLength(2);
+    expect(t.getRelayState('wss://a.relay')).toBe('open');
+    await t.stop();
+  });
+});

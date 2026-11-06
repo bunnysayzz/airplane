@@ -150,7 +150,11 @@ export class DmBleTransport implements DmMeshPort {
     const msgTag = ((tagBytes[0] << 24) | (tagBytes[1] << 16) | (tagBytes[2] << 8) | tagBytes[3]) >>> 0;
     let peerIds: string[] = [];
     try {
-      peerIds = this.port.connectedPeerIds?.() ?? [];
+      // Ready peers only: a DM handed to a peer that has not
+      // subscribed to our TX yet resolves while landing nowhere (the
+      // v0.1.30 B DM seq 9 loss at 03:28:05). Ports without readiness
+      // fall back to connected peers; port.send still guards.
+      peerIds = this.port.readyPeerIds?.() ?? this.port.connectedPeerIds?.() ?? [];
     } catch {
       peerIds = [];
     }

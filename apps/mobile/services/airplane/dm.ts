@@ -43,6 +43,28 @@ import { formatPeerName } from './displayNames';
 let service: DmService | null = null;
 let servicePromise: Promise<DmService> | null = null;
 /**
+ * The live DM relay pool, held apart from the service so the transport
+ * manager can read its socket state for the balancer snapshot without
+ * importing the DM singleton lifecycle (v0.1.31: the DM pool recovered
+ * at 03:26:41 while the post pool stayed dead until 03:28:41, and no
+ * balancer line showed it). Null before the service starts. The pool
+ * keeps its own reconnect ladder; this handle is read-only here.
+ */
+let dmRelayInstance: WsDmRelay | null = null;
+
+/**
+ * DM relay pool socket state for the balancer snapshot: the relay URLs
+ * and which of them have an open socket. Null when the DM service has
+ * not started. Synchronous and side-effect free, so the health
+ * snapshot can read it on every routing decision. Relay URLs only,
+ * never content or identifiers.
+ */
+export function getDmRelayPoolHealth(): { urls: string[]; openUrls: string[] } | null {
+  if (!dmRelayInstance) return null;
+  const urls = dmRelayInstance.getRelayUrls();
+  return { urls, openUrls: urls.filter((u) => dmRelayInstance?.getRelayState(u) === 'open') };
+}
+/**
  * BLE port owned by the transport manager, registered here when the radio
  * starts (and re-registered when the port is recreated). Kept apart from
  * the service so the transport manager never imports the DM singleton
@@ -56,6 +78,7 @@ export function resetDmService(): void {
   if (service) service.stop();
   service = null;
   servicePromise = null;
+  dmRelayInstance = null;
 }
 
 // T8 rotation changes the DM address (derived from the mesh secret), so a
@@ -152,11 +175,26 @@ export async function getDmService(): Promise<DmService> {
   servicePromise = (async () => {
     const kp = await getDeviceKeypair();
     const ownHex = dmToHex(kp.publicKey);
+    // Socket lifecycle lines for the DM pool (v0.1.31): the post pool
+    // logs resubscribe on open, but the DM pool was silent, so a DM
+    // recovery with a dead post pool left no line at all. Reasons and
+    // URLs only, never content. The open event also reaches the
+    // balancer through the mesh-status poll, which re-attempts queued
+    // posts when the DM open count rises.
+    const dmRelay = new WsDmRelay({
+      relays: await loadRelayUrls(),
+      allowPrivateRelays: true,
+      onSocketOpen: (url) => recordServiceEvent(`dm relay socket opened ${url}`),
+      onSocketClosed: (url, reason) => recordServiceEvent(`dm relay socket closed ${url} ${reason}`),
+      onConnectFailure: (url, reason) => recordServiceEvent(`dm relay connect failed ${url} ${reason}`),
+      onReconnectScheduled: (url, delayMs, attempt) =>
+        recordServiceEvent(`dm relay reconnect in ${delayMs}ms ${url} attempt ${attempt}`),
+    });
     const svc = new DmService({
       store: new SqliteDmStore(createSqliteDatabasePort()),
       // Same configured list as the post path: DMs must not silently
       // keep using package defaults the user removed in Settings.
-      relay: new WsDmRelay({ relays: await loadRelayUrls(), allowPrivateRelays: true }),
+      relay: dmRelay,
       mesh: pendingBlePort ? new DmBleTransport(pendingBlePort) : undefined,
       ownKeys: () => dmKeypairFromDeviceSecret(kp.secretKey),
       ownMeshHex: () => ownHex,
@@ -164,6 +202,7 @@ export async function getDmService(): Promise<DmService> {
       onDmEvent: logDmEvent,
     });
     svc.start();
+    dmRelayInstance = dmRelay;
     service = svc;
     return svc;
   })();

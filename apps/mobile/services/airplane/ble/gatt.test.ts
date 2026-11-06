@@ -504,6 +504,14 @@ describe('send over notify, receive over central notifications', () => {
   test('send notifies on our TX (no central writes for frames)', async () => {
     const { port, central, peripheral } = await connectedPort();
     const frame = new Uint8Array(1200).map((_, i) => i & 0xff);
+    // The peer's central must have helloed our peripheral too: a
+    // central-only link is not ready to receive (v0.1.31), because our
+    // notify lands only once the peer subscribed to our TX, which
+    // follows its hello. The central handshake already completed, so
+    // the hello makes the peer ready at once (no settle wait).
+    for (const chunk of chunkBytes(encodeHello(PEER_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:01', value: chunk });
+    }
     // Frames go out as TX notifies, never as central writes: a write to
     // the peer RX is never delivered to the peer app layer on new-arch
     // builds, so a "sent" write was a silent loss (proven 2026-11-03).
@@ -609,6 +617,11 @@ describe('peripheral role: inbound writes + notify send', () => {
   test('send over peripheral role notifies (broadcast to subscribed)', async () => {
     const { port, peripheral } = await advertisedPort();
     feedChunks(peripheral, 'AA:BB:CC:DD:EE:01', encodeHello(PEER_PUB, 247));
+    // Peripheral hello alone is not ready at once: our central never
+    // completed, so the hello-to-subscribe settle (v0.1.31) must elapse
+    // before the peer can be sent to.
+    await expect(port.send(PEER_HEX, new Uint8Array([1]))).rejects.toThrow(/peer not ready/);
+    await tick(350);
     const frame = new Uint8Array(100).map((_, i) => i & 0xff);
     await port.send(PEER_HEX, frame);
     // mtu 247 -> chunk size 244; datagram 103 bytes -> 1 chunk
@@ -1221,6 +1234,12 @@ describe('notify send for frame chunks (supersedes audit F-P2-9)', () => {
     await tick(50);
     const helloWrites = central.writes.length;
     const frame = new Uint8Array(100).map((_, i) => i & 0xff);
+    // Complete the handshake first: the peer helloed our peripheral
+    // (v0.1.31 readiness gate), so the central completion plus the
+    // hello make the peer ready at once.
+    for (const chunk of chunkBytes(encodeHello(PEER_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:01', value: chunk });
+    }
     await port.send(PEER_HEX, frame);
     // Hello went out with-response; the frame went out as TX notifies.
     // F-P2-9 assumed central writes are delivered; the 2026-11-03 field
@@ -1258,6 +1277,15 @@ describe('crossed links: both directions over notify', () => {
     await tick(50);
     expect(portA.connectedPeerIds()).toEqual([PEER_HEX]);
     expect(portB.connectedPeerIds()).toEqual([OWN_HEX]);
+    // Both peers hello each other's peripheral, completing the
+    // handshake on both sides (v0.1.31 readiness gate): a central-only
+    // link is not a send target.
+    for (const chunk of chunkBytes(encodeHello(PEER_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      depsA.peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:01', value: chunk });
+    }
+    for (const chunk of chunkBytes(encodeHello(OWN_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      depsB.peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:02', value: chunk });
+    }
     // A -> B: A notifies, B central receives.
     const receivedB: { peerId: string; bytes: Uint8Array }[] = [];
     portB.onReceive((peerId, bytes) => receivedB.push({ peerId, bytes }));
@@ -1532,6 +1560,60 @@ describe('mesh-scan fix: adapter pre-check', () => {
     const port = new GattBlePort(deps);
     await expect(port.scan(() => {})).rejects.toThrow('adapter not on, scan skipped');
     expect(central.scanning).toBe(false);
+    await port.close();
+  });
+});
+
+describe('v0.1.31 ready peers: drain-before-connect must not send', () => {
+  test('a central-only peer is connected but not ready, and send throws peer not ready', async () => {
+    const { deps, central, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    // Connected (mesh pill counts it) but not ready: the v0.1.30 B
+    // drain fired in exactly this state, 114 ms before the connection
+    // line, and all 5 posts were lost on the wire.
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    expect(port.readyPeerIds()).toEqual([]);
+    await expect(port.send(PEER_HEX, new Uint8Array([1]))).rejects.toThrow(/peer not ready/);
+    expect(peripheral.notified).toHaveLength(0);
+    await port.close();
+  });
+
+  test('the peer hello makes a central-complete peer ready at once', async () => {
+    const { deps, central, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.readyPeerIds()).toEqual([]);
+    for (const chunk of chunkBytes(encodeHello(PEER_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:01', value: chunk });
+    }
+    expect(port.readyPeerIds()).toEqual([PEER_HEX]);
+    await port.send(PEER_HEX, new Uint8Array([1, 2, 3]));
+    expect(peripheral.notifiedDatagrams()).toHaveLength(1);
+    await port.close();
+  });
+
+  test('stopAdvertise clears readiness: the peer is connected but no longer sendable', async () => {
+    const { deps, central, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    for (const chunk of chunkBytes(encodeHello(PEER_PUB, 247), ATT_DEFAULT_MTU - ATT_OVERHEAD)) {
+      peripheral.writeCb!({ device: 'AA:BB:CC:DD:EE:01', value: chunk });
+    }
+    expect(port.readyPeerIds()).toEqual([PEER_HEX]);
+    await port.stopAdvertise();
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    expect(port.readyPeerIds()).toEqual([]);
+    await expect(port.send(PEER_HEX, new Uint8Array([1]))).rejects.toThrow(/peripheral role unavailable/);
     await port.close();
   });
 });

@@ -80,6 +80,15 @@ export interface PeerHealth {
 export interface TransportHealth {
   relays: RelayHealth[];
   peers: PeerHealth[];
+  /**
+   * DM relay pool sockets, when the app knows them. Posts route on the
+   * post pool; this is the mutual-visibility half: a DM pool recovery
+   * with a dead post pool must be visible in the same snapshot instead
+   * of hidden (the v0.1.30 window: DMs relayed from 03:26:41 while the
+   * post pool stayed dead until 03:28:41 and no line showed it).
+   * Optional so older callers keep their snapshot shape.
+   */
+  dmRelays?: RelayHealth[];
   /** Null when the network state is unknown (no NetInfo state yet). */
   networkValidated: boolean | null;
   nowMs: number;
@@ -212,5 +221,9 @@ export function healthSummary(health: TransportHealth): string {
       : health.networkValidated
         ? 'validated'
         : 'not validated';
-  return `relays ${open} open ${backedOff} backed off, ble ${peers} healthy, net ${net}`;
+  const dm =
+    health.dmRelays === undefined
+      ? ''
+      : `, dm relays ${health.dmRelays.filter((r) => r.socketOpen).length} open`;
+  return `relays ${open} open ${backedOff} backed off${dm}, ble ${peers} healthy, net ${net}`;
 }

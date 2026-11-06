@@ -158,3 +158,57 @@ describe('planSend situation matrix', () => {
     expect(summary).toContain('net validated');
   });
 });
+
+describe('v0.1.31 DM pool visibility + per-peer heterogeneous routing', () => {
+  test('health summary carries the DM pool open count when present, and is unchanged when absent', () => {
+    const withDm = healthSummary(health({ dmRelays: [relay({ url: 'wss://dm.relay' })] }));
+    expect(withDm).toContain('relays 1 open 0 backed off, dm relays 1 open');
+    expect(withDm).toContain('ble 1 healthy');
+    const withoutDm = healthSummary(health());
+    expect(withoutDm).toBe('relays 1 open 0 backed off, ble 1 healthy, net validated');
+    const dmDown = healthSummary(health({ dmRelays: [relay({ url: 'wss://dm.relay', socketOpen: false })] }));
+    expect(dmDown).toContain('dm relays 0 open');
+  });
+
+  test('one healthy peer keeps the BLE leg viable while its sibling is backed off', () => {
+    const flapping = applyPeerFailure(peer({ tag: 'aaaaaaaa' }), 'timeout', 1000);
+    const steady = peer({ tag: 'bbbbbbbb' });
+    const plan = planSend(
+      health({
+        relays: [relay({ socketOpen: false })],
+        peers: [flapping, steady],
+        nowMs: 5000,
+      }),
+    );
+    expect(plan.paths).toEqual(['ble']);
+    expect(plan.queuedReason).toBeNull();
+  });
+
+  test('all peers backed off queues the post, with the reason naming the flapping peer', () => {
+    const flapping = applyPeerFailure(peer({ tag: 'aaaaaaaa' }), 'timeout', 1000);
+    const alsoFlapping = applyPeerFailure(peer({ tag: 'bbbbbbbb' }), 'timeout', 1000);
+    const plan = planSend(
+      health({
+        relays: [relay({ socketOpen: false })],
+        peers: [flapping, alsoFlapping],
+        nowMs: 5000,
+      }),
+    );
+    expect(plan.paths).toEqual([]);
+    expect(plan.queuedReason).toContain('no live path');
+    expect(plan.queuedReason).toContain('no healthy BLE peers');
+  });
+
+  test('a backed-off peer recovers on its own window while the healthy peer never stops routing', () => {
+    const flapping = applyPeerFailure(peer({ tag: 'aaaaaaaa' }), 'timeout', 1000);
+    const steady = peer({ tag: 'bbbbbbbb' });
+    const during = planSend(
+      health({ relays: [relay({ socketOpen: false })], peers: [flapping, steady], nowMs: 5000 }),
+    );
+    expect(during.paths).toEqual(['ble']);
+    const after = planSend(
+      health({ relays: [relay({ socketOpen: false })], peers: [flapping, steady], nowMs: 11_001 }),
+    );
+    expect(after.paths).toEqual(['ble']);
+  });
+});

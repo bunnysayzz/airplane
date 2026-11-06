@@ -241,7 +241,11 @@ export class BleTransport {
       void (async () => {
         let peers: string[];
         try {
-          peers = this.port.connectedPeerIds?.() ?? [];
+          // Ready peers only: a flood forward is a notify, and a
+          // notify to a peer that has not subscribed to our TX yet
+          // resolves while landing nowhere (v0.1.30 drain loss).
+          // Ports without readiness fall back to connected peers.
+          peers = this.port.readyPeerIds?.() ?? this.port.connectedPeerIds?.() ?? [];
         } catch {
           peers = [];
         }

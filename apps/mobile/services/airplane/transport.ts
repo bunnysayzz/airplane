@@ -26,6 +26,7 @@ import {
   applyRelayRejection,
   healthSummary,
   isDuplicateRejection,
+  isPeerHealthy,
   planSend,
   type PeerHealth,
   type RelayHealth,
@@ -45,7 +46,7 @@ import {
 } from './reshares';
 import { notifyFeedListeners } from './feed';
 import { getDevicePublicKey, crypto } from './identity';
-import { registerDmBlePort, flushDmOutboxIfStarted, refreshDmSubscriptionIfStarted, getDmService } from './dm';
+import { registerDmBlePort, flushDmOutboxIfStarted, refreshDmSubscriptionIfStarted, getDmService, getDmRelayPoolHealth } from './dm';
 import { loadRelayUrls } from '../../src/lib/relays';
 import { addBreadcrumb } from '../../src/sentry';
 import { GattBlePort, defaultBleDeps, type BleNativeDeps } from './ble/gatt';
@@ -237,6 +238,17 @@ let bleScanUp = false;
 let scanRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let scanRetryAttempt = 0;
 const SCAN_RETRY_DELAYS_MS = [2000, 5000, 15000, 30000, 60000];
+/**
+ * Advertise retry (v0.1.31). advertiseRetryTimer re-runs advertise()
+ * with backoff after an advertise failure; at most one timer is ever
+ * pending, and it is cleared on teardown, on stop, and on advertise
+ * success. The v0.1.30 window had one advertise failure per phone at
+ * startup ("Not support bluetoothLeAdvertiser") and no retry at all:
+ * the radio stayed dark until the next restart.
+ */
+let advertiseRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let advertiseRetryAttempt = 0;
+const ADVERTISE_RETRY_DELAYS_MS = [2000, 5000, 15000];
 let bringUpPromise: Promise<void> | null = null;
 /**
  * True once startTransport() has failed and not since succeeded. The
@@ -674,24 +686,50 @@ export async function runWorldSyncPass(): Promise<void> {
 // outbox drain, and the DM flush do the sending; this layer only
 // plans, records outcomes, and triggers re-attempts.
 //
-// BLE granularity note: the radio reports sends as a count, not per
-// peer, so peer health here is the connected SET, not per peer. The
-// GATT layer's own sighting cooldown (IDENT failures, 10 s doubling
-// to 60 s) already keeps a flapping peer out of the connected set
-// entirely, so a peer that cannot connect never reaches the router;
-// the set-level backoff below covers the case the set is connected
-// but no send reaches anyone (notify race, dead link).
+// BLE granularity is per peer, not per set (v0.1.31): the radio
+// reports sends as a broadcast count, not per peer, so a send
+// outcome is folded into the peers that send targeted, but a failure
+// on one peer never backs off the others. The GATT layer's own
+// sighting cooldown (IDENT failures, 10 s doubling to 60 s) already
+// keeps a flapping peer out of the connected set entirely, so a peer
+// that cannot connect never reaches the router; the per-peer backoff
+// below covers the case the set is connected but no send reaches
+// anyone (notify race, dead link).
 
 /** Per-relay health, keyed by relay URL. */
 const relayHealthByUrl = new Map<string, RelayHealth>();
-/** BLE connected-set health: one entry for the whole set (see note above). */
-let bleSetHealth: PeerHealth = {
-  tag: 'ble-set',
-  connected: false,
-  unhealthyUntilMs: 0,
-  lastFailure: null,
-  consecutiveFailures: 0,
-};
+/**
+ * Per-peer BLE health, keyed by peer tag (first 8 hex). A peer that
+ * was never targeted has no entry and counts as healthy; a peer
+ * whose sends failed is held out on the doubling ladder until its
+ * window ends. The v0.1.27 shared set is gone: one flapping peer
+ * held out every peer.
+ */
+const peerHealthByTag = new Map<string, PeerHealth>();
+/**
+ * Per-row, per-peer BLE handoff memory for the outbox drain:
+ * event id hex -> peer tag -> handoff epoch ms. A drain pass skips a
+ * row for a peer it was handed to inside DRAIN_HANDOFF_WINDOW_MS,
+ * so the same rows are not handed to the same peer on every health
+ * trigger (v0.1.30: 3 to 4 times in a minute). Rows stay queued until
+ * World-confirmed; only the re-attempt is deduped, never the row.
+ * Bounded: pruned on every drain pass, capped row count.
+ */
+const drainHandoffByEvent = new Map<string, Map<string, number>>();
+const DRAIN_HANDOFF_WINDOW_MS = 120_000;
+const DRAIN_HANDOFF_MAX_ROWS = 500;
+/**
+ * Pacing between drain rows, ms (v0.1.31). Rows go out one at a time
+ * with a short gap, not as one back-to-back burst: the v0.1.30
+ * simultaneous burst (B draining 7 posts in 130 ms while A drained
+ * 6) lost every frame on the wire with no receipt signal, and the
+ * comparables pace or serialize for the same reason (Meshtastic
+ * retries with backoff, MeshCore 1/2/4/8/16 s). A full app-level ACK
+ * frame is the follow-up that closes this for good. Mutable only so
+ * tests can set it to 0 (fake timers never advance otherwise).
+ */
+const DRAIN_ROW_DELAY_MS = 50;
+let drainRowDelayMs = DRAIN_ROW_DELAY_MS;
 /** Recently seen post authors (full pubkey hex, in-memory only, max 30). */
 const recentAuthorHexes: string[] = [];
 /** One-shot timer for the nearest backoff expiry re-attempt. */
@@ -699,22 +737,35 @@ let balancerRetryTimer: ReturnType<typeof setTimeout> | null = null;
 /** In-flight health pass guard (see notifyTransportHealthChanged). */
 let balancerHealthRun: Promise<void> | null = null;
 let balancerHealthPending = false;
+/** Relay pool watchdog timer (see runRelayPoolWatchdog). */
+let poolWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+/** Watchdog tick interval, ms. */
+const POOL_WATCHDOG_INTERVAL_MS = 15_000;
+/**
+ * Watchdog staleness bound, ms: the watchdog only forces an attempt
+ * when no connect was attempted for this long (the reconnect cap), so
+ * it never bypasses a live backoff ladder.
+ */
+const POOL_WATCHDOG_STALE_MS = 60_000;
 
 /** Test seam: reset balancer state between tests. */
 export function __resetBalancerForTests(): void {
   relayHealthByUrl.clear();
-  bleSetHealth = {
-    tag: 'ble-set',
-    connected: false,
-    unhealthyUntilMs: 0,
-    lastFailure: null,
-    consecutiveFailures: 0,
-  };
+  peerHealthByTag.clear();
+  drainHandoffByEvent.clear();
   recentAuthorHexes.length = 0;
+  prevMeshPeers = 0;
+  prevDmOpenRelays = 0;
+  drainRowDelayMs = DRAIN_ROW_DELAY_MS;
   if (balancerRetryTimer) {
     clearTimeout(balancerRetryTimer);
     balancerRetryTimer = null;
   }
+}
+
+/** Test seam: set the inter-row drain pacing delay (0 disables it). */
+export function __setDrainRowDelayMsForTests(ms: number): void {
+  drainRowDelayMs = ms;
 }
 
 /** Current live health snapshot for one routing decision. */
@@ -734,16 +785,39 @@ export function buildTransportHealth(): TransportHealth {
     });
   }
   const connectedPeers = blePeerIdsForPublish(blePort?.port);
-  const peers: PeerHealth[] = connectedPeers.map((peerId) => ({
-    tag: peerId.slice(0, 8),
-    connected: true,
-    unhealthyUntilMs: bleSetHealth.unhealthyUntilMs,
-    lastFailure: bleSetHealth.lastFailure,
-    consecutiveFailures: bleSetHealth.consecutiveFailures,
+  // Per-peer health (v0.1.31): each ready peer carries its own
+  // backoff. A peer with no entry was never targeted and counts as
+  // healthy; a peer whose sends failed is held out alone, never the
+  // whole set. Peers listed here are ready peers only (see
+  // blePeerIdsForPublish): a connected-but-not-ready peer cannot
+  // receive a notify yet, so it is not a routing target.
+  const peers: PeerHealth[] = connectedPeers.map((peerId) => {
+    const tag = peerId.slice(0, 8);
+    const known = peerHealthByTag.get(tag);
+    return {
+      tag,
+      connected: true,
+      unhealthyUntilMs: known?.unhealthyUntilMs ?? 0,
+      lastFailure: known?.lastFailure ?? null,
+      consecutiveFailures: known?.consecutiveFailures ?? 0,
+    };
+  });
+  // DM pool sockets, when the DM service has started: mutual
+  // visibility with the post pool in one snapshot (v0.1.31). A DM
+  // pool recovery with a dead post pool now reads in the same line.
+  const dmPool = getDmRelayPoolHealth();
+  const dmRelays: RelayHealth[] = (dmPool?.urls ?? []).map((url) => ({
+    url,
+    socketOpen: dmPool?.openUrls.includes(url) ?? false,
+    lastOkAtMs: null,
+    lastRejection: null,
+    backoffUntilMs: 0,
+    consecutiveRejections: 0,
   }));
   return {
     relays,
     peers,
+    dmRelays,
     networkValidated: lastOnline,
     nowMs,
   };
@@ -789,20 +863,37 @@ function noteBalancerRelayResult(result: RouteResult): number {
 }
 
 /**
- * Fold one BLE-set send outcome into health. A broadcast that
- * reached nobody while peers were connected marks the set unhealthy
- * on the doubling ladder; any send that reached a peer clears it.
- * Returns the backoff expiry (epoch ms) or 0.
+ * Fold one BLE send outcome into per-peer health. A broadcast that
+ * reached a peer clears that peer's backoff; a broadcast that
+ * reached nobody backs off the peers it targeted, each on its own
+ * doubling ladder. A failure on one peer never holds out the others.
+ * The broadcast count cannot attribute a success to one peer, so a
+ * success clears every targeted peer: the radio path works, and a
+ * peer that still cannot receive is excluded by its own connect
+ * state or readiness, not by this ladder. Returns the nearest
+ * backoff expiry (epoch ms) or 0.
  */
-function noteBleSetOutcome(sentCount: number): number {
+function noteBlePeerOutcome(peerIds: string[], sentCount: number): number {
   const nowMs = Date.now();
-  if (sentCount > 0) {
-    bleSetHealth = { ...bleSetHealth, connected: true, unhealthyUntilMs: 0, consecutiveFailures: 0 };
-    return 0;
+  let nearestExpiry = 0;
+  for (const peerId of peerIds) {
+    const tag = peerId.slice(0, 8);
+    const prev = peerHealthByTag.get(tag) ?? {
+      tag,
+      connected: true,
+      unhealthyUntilMs: 0,
+      lastFailure: null,
+      consecutiveFailures: 0,
+    };
+    if (sentCount > 0) {
+      peerHealthByTag.set(tag, { ...prev, connected: true, unhealthyUntilMs: 0, consecutiveFailures: 0 });
+    } else {
+      const next = applyPeerFailure({ ...prev, connected: true }, 'broadcast reached no peers', nowMs);
+      peerHealthByTag.set(tag, next);
+      if (next.unhealthyUntilMs > nearestExpiry) nearestExpiry = next.unhealthyUntilMs;
+    }
   }
-  const next = applyPeerFailure({ ...bleSetHealth, connected: true }, 'broadcast reached no peers', nowMs);
-  bleSetHealth = next;
-  return next.unhealthyUntilMs;
+  return nearestExpiry;
 }
 
 /** Arm one re-attempt when the nearest backoff expires. */
@@ -842,6 +933,26 @@ export async function runAuthorCatchUp(): Promise<boolean> {
   }
   if (sent) recordServiceEvent(`relay author catch-up ${authors.size} authors`);
   return sent;
+}
+
+/**
+ * Relay pool watchdog (v0.1.31): the outside push for a pool that
+ * died with no trigger. Fires only when 0 relay sockets are open, no
+ * reconnect is pending, and no connect was attempted for at least the
+ * reconnect cap: a live ladder is never bypassed, and a dead network
+ * gets at most one forced probe per minute. Logs its reason plus a
+ * health snapshot, like every other recovery decision.
+ */
+function runRelayPoolWatchdog(): void {
+  if (!hybrid) return;
+  const nostr = hybrid.nostr;
+  if (nostr.openRelayCount() > 0) return;
+  if (nostr.pendingReconnectCount() > 0) return;
+  if (Date.now() - nostr.getLastConnectAttemptMs() < POOL_WATCHDOG_STALE_MS) return;
+  recordServiceEvent(
+    `relay pool watchdog: 0 open relays, no reconnect pending, last attempt over ${POOL_WATCHDOG_STALE_MS / 1000}s ago, forcing reconnect attempt | ${healthSummary(buildTransportHealth())}`,
+  );
+  nostr.startIfNeeded();
 }
 
 /**
@@ -908,7 +1019,11 @@ function registerAdapterStateListener(): void {
         bleRadioState = 'unavailable';
         syncDiagnosticsAdapterState();
       }
-    } else if (state === 'on' && radioWasOn && bleRadioState !== 'on') {
+    } else if (state === 'on' && (radioWasOn || bleRadioState === 'unavailable') && bleRadioState !== 'on') {
+      // Adapter powered on after being off: re-run bring-up. The
+      // 'unavailable' arm is v0.1.31: a radio left unavailable by an
+      // advertise failure at startup must recover on the adapter-on
+      // event, not only when the radio was previously on.
       void revalidateBleRadio();
     }
   });
@@ -916,20 +1031,19 @@ function registerAdapterStateListener(): void {
 
 /**
  * Re-validate the radio on foreground (AppState active) and on
- * adapter-powered-on. Guarded: runs only when the radio was previously on
- * (or is currently on, for the revocation check); a radio that never came
- * up stays with the priming UI. When the radio is on, a missing grant or
- * a powered-off adapter reclassifies it; when it is not on, a live adapter
- * plus grants re-runs bring-up. Never throws.
+ * adapter-powered-on. When the radio is on, a missing grant or a
+ * powered-off adapter reclassifies it; when it is not on, a live
+ * adapter plus grants re-runs bring-up. A radio that failed to come
+ * up at startup (state 'unavailable', e.g. an advertise failure)
+ * is retried here too (v0.1.31): the old guard refused every retry
+ * when radioWasOn was false, so the radio stayed dark until a
+ * restart. The permission check below still runs first, so a
+ * genuinely ungranted radio is reclassified, never brought up.
+ * Never throws.
  */
 export async function revalidateBleRadio(): Promise<void> {
   if (!hybrid || !blePort) return;
   if (bleRadioState === 'starting') return;
-  // Guard: a radio that was never on and is not permission-blocked stays
-  // with the priming UI. Permission-blocked is included because a grant
-  // made in Settings while the app runs must be picked up on foreground,
-  // not only on next launch.
-  if (!radioWasOn && bleRadioState !== 'on' && bleRadioState !== 'permission-blocked') return;
   try {
     // Permission revocation mid-session: grants can vanish while the app
     // is backgrounded, and a grant made in Settings is only picked up on
@@ -1054,6 +1168,20 @@ export async function startTransport(): Promise<void> {
       },
       onAuthChallenge: (relayUrl, challenge) => {
         addBreadcrumb(`relay AUTH challenge ${relayUrl}`, { challenge });
+      },
+      // Socket lifecycle lines (v0.1.31): a pool that tries and fails
+      // used to leave no line at all, so the v0.1.30 window showed 4
+      // minutes of relay silence with no reason. Every failure, close,
+      // and scheduled reconnect now logs its relay URL and reason, so
+      // the next log says whether the pool tried, failed, or never ran.
+      onConnectFailure: (relayUrl, reason) => {
+        recordServiceEvent(`relay connect failed ${relayUrl} ${reason}`);
+      },
+      onSocketClosed: (relayUrl, reason) => {
+        recordServiceEvent(`relay socket closed ${relayUrl} ${reason}`);
+      },
+      onReconnectScheduled: (relayUrl, delayMs, attempt) => {
+        recordServiceEvent(`relay reconnect in ${delayMs}ms ${relayUrl} attempt ${attempt}`);
       },
       // Replay window proof for testing: every resubscribe logs the
       // `since` it used, the relay it used it for, and whether the
@@ -1233,6 +1361,13 @@ export async function startTransport(): Promise<void> {
     netUnsub = null;
   }
 
+  // Relay pool watchdog (v0.1.31): a pool that dies with no trigger
+  // gets an outside push every 15 s (bounded to one forced probe per
+  // minute by the staleness check inside). Cleared in stopTransport.
+  if (!poolWatchdogTimer) {
+    poolWatchdogTimer = setInterval(() => runRelayPoolWatchdog(), POOL_WATCHDOG_INTERVAL_MS);
+  }
+
   transportStartFailed = false;
   // Startup retention cleanup (best-effort, never fails launch). This is
   // the first prune a long-lived install has ever run, so it deletes
@@ -1251,6 +1386,56 @@ function clearScanRetry(): void {
     scanRetryTimer = null;
   }
   scanRetryAttempt = 0;
+}
+
+/** Clear any pending advertise retry timer and reset the backoff. Never throws. */
+function clearAdvertiseRetry(): void {
+  if (advertiseRetryTimer) {
+    clearTimeout(advertiseRetryTimer);
+    advertiseRetryTimer = null;
+  }
+  advertiseRetryAttempt = 0;
+}
+
+/**
+ * Schedule one more advertise attempt after an advertise failure,
+ * with backoff. At most one timer is ever pending, and an exhausted
+ * backoff simply stops: foreground re-validation, adapter-on events,
+ * and manual Retry remain as recovery paths. Only advertise is
+ * re-attempted here, never the whole bring-up: scan may already be
+ * running, and a second bring-up would double-start it.
+ */
+function scheduleAdvertiseRetry(peerIdHex: string): void {
+  if (advertiseRetryTimer || advertiseRetryAttempt >= ADVERTISE_RETRY_DELAYS_MS.length) return;
+  const delay = ADVERTISE_RETRY_DELAYS_MS[advertiseRetryAttempt++];
+  advertiseRetryTimer = setTimeout(
+    () =>
+      (async () => {
+        advertiseRetryTimer = null;
+        if (!blePort || !hybrid) return;
+        try {
+          await blePort.port.advertise(peerIdHex);
+          // Advertise recovered: the radio is whole again. If the
+          // failed bring-up had left the state unavailable, lift it.
+          if (bleRadioState === 'unavailable') {
+            bleRadioState = 'on';
+            radioWasOn = true;
+            syncDiagnosticsAdapterState();
+          }
+          recordServiceEvent('advertise recovered after retry');
+          advertiseRetryAttempt = 0;
+        } catch (err) {
+          // Still failing (Bluetooth still enabling, or a real
+          // peripheral loss): log the reason and schedule the next
+          // attempt while any remain.
+          recordServiceEvent(
+            `advertise retry failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          scheduleAdvertiseRetry(peerIdHex);
+        }
+      })(),
+    delay,
+  );
 }
 
 /**
@@ -1283,10 +1468,12 @@ function scheduleScanRetry(): void {
 
 /**
  * Advertise our identity and scan for mesh peers. Throws only when
- * advertising fails. Concurrent callers join the in-flight bring-up
- * instead of racing it (mesh-scan fix): without this, two bring-ups
- * at startup each ran the native scan and the logs showed double
- * scan started lines.
+ * the port is not constructed. An advertise failure does NOT throw
+ * (v0.1.31): the phone can still scan and central-connect as a
+ * client, and the advertise retry timer re-attempts with backoff.
+ * Concurrent callers join the in-flight bring-up instead of racing
+ * it (mesh-scan fix): without this, two bring-ups at startup each
+ * ran the native scan and the logs showed double scan started lines.
  */
 async function bringUpBleRadio(peerIdHex: string): Promise<void> {
   if (bringUpPromise) return bringUpPromise;
@@ -1304,13 +1491,31 @@ async function bringUpBleRadio(peerIdHex: string): Promise<void> {
  * advertising: one scan timeout left the phone mute and deaf until
  * relaunch, and since the radio never reached 'on', foreground
  * re-validation refused to retry it (radioWasOn stayed false).
+ * An advertise failure does NOT throw either (v0.1.31): the scan
+ * still starts, so the phone can discover peers and connect as a
+ * client while the advertise retry timer re-attempts with backoff.
  * Callers still mark the radio 'on' after this resolves: 'on' means
- * the radio is up (advertising); live scan health is in diagnostics
- * (scanning state plus last failure) and in bleScanUp.
+ * the radio is up (scanning, advertising up or retrying); live scan
+ * health is in diagnostics (scanning state plus last failure) and in
+ * bleScanUp, and the advertising state is tracked separately there.
  */
 async function bringUpBleRadioInner(peerIdHex: string): Promise<void> {
   if (!blePort) throw new Error('ble: port not constructed');
-  await blePort.port.advertise(peerIdHex);
+  try {
+    await blePort.port.advertise(peerIdHex);
+  } catch (err) {
+    // Advertise failed at startup (v0.1.30: "Not support
+    // bluetoothLeAdvertiser" on both phones, then fine on the next
+    // restart): a startup race or Bluetooth still enabling. Do not
+    // throw: the phone can still scan and central-connect, and the
+    // retry timer re-attempts advertise with backoff. The old code
+    // threw here and every caller tore the radio down to
+    // 'unavailable' with no recovery except a restart.
+    recordServiceEvent(
+      `advertise failed, retry scheduled: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    scheduleAdvertiseRetry(peerIdHex);
+  }
   try {
     bleScanUnsub = await blePort.port.scan(() => {
       // Peer registry for future UI (MeshStatus); discovery itself drives
@@ -1330,6 +1535,7 @@ async function bringUpBleRadioInner(peerIdHex: string): Promise<void> {
 /** Tear down whatever half of the radio bring-up succeeded. Never throws. */
 async function tearDownBleRadio(): Promise<void> {
   clearScanRetry();
+  clearAdvertiseRetry();
   bleScanUp = false;
   try {
     bleScanUnsub?.();
@@ -1351,6 +1557,18 @@ export function getBleRadioState(): BleRadioState {
  * connectedPeerIds() method contribute nothing. Never throws.
  */
 export function blePeerIdsForPublish(port: TransportPort | null | undefined): string[] {
+  // Ready peers only (v0.1.31): a peer whose handshake is still in
+  // flight cannot receive a notify yet, so it is not a publish,
+  // drain, or mesh-pill target. Sending to it counts as sent while
+  // landing nowhere (v0.1.30 B drain at 03:28:05). Ports without
+  // readiness fall back to connected peers; a throwing readiness
+  // probe falls back the same way instead of returning nothing.
+  try {
+    const ready = port?.readyPeerIds?.();
+    if (ready) return ready;
+  } catch {
+    // fall through to connected peers
+  }
   try {
     return port?.connectedPeerIds?.() ?? [];
   } catch {
@@ -1410,6 +1628,8 @@ export function getMeshStatus(): MeshStatusSnapshot {
  */
 /** Connected-peer count at the last mesh-status poll (peer-arrival edge). */
 let prevMeshPeers = 0;
+/** DM relay open-socket count at the last mesh-status poll. */
+let prevDmOpenRelays = 0;
 
 export function subscribeMeshStatus(cb: () => void): () => void {
   const timer = setInterval(() => {
@@ -1427,6 +1647,15 @@ export function subscribeMeshStatus(cb: () => void): () => void {
       void notifyTransportHealthChanged('ble peer arrived').catch(() => {});
     }
     prevMeshPeers = next.peersNearby;
+    // DM pool recovery is a transport return too (v0.1.31): the DM
+    // pool recovered at 03:26:41 while the post pool stayed dead, and
+    // no balancer line covered it. A rise in the DM open count
+    // re-attempts queued posts the same way a BLE peer arrival does.
+    const dmOpen = getDmRelayPoolHealth()?.openUrls.length ?? 0;
+    if (dmOpen > prevDmOpenRelays) {
+      void notifyTransportHealthChanged('dm relay socket opened').catch(() => {});
+    }
+    prevDmOpenRelays = dmOpen;
   }, 2000);
   return () => clearInterval(timer);
 }
@@ -1529,16 +1758,22 @@ export function setRelaySubscribeCells(cells: string[]): void {
  * Apply one connectivity state to the transport. Single funnel for both
  * the NetInfo listener and the initial fetch, so both paths behave the
  * same: online (re)starts the relay sockets, runs a WorldSync pass, and
- * starts the periodic sync timer; offline stops the sockets and timer.
- * BLE always runs (mesh works offline - that is the point of the app);
- * only the Nostr/World side follows connectivity.
+ * starts the periodic sync timer; offline stops the sync timer only.
+ * BLE always runs (mesh works offline - that is the point of the app).
  *
- * The shared funnel matters: NetInfo reports isInternetReachable: null
- * until its reachability check lands, so the listener can fire offline
- * first and the fetch resolve online after. Before this funnel the fetch
- * path never restarted Nostr - it only ran sync + timer - so after that
- * race the silent WorldSync uplink stayed dead until the next
- * connectivity flap. Transitions only: duplicates are no-ops.
+ * The relay pool is deliberately NOT stopped on offline (v0.1.31).
+ * NetInfo is a lagging oracle: in the v0.1.30 window it said unknown
+ * for 2 minutes after a restart and not-validated while the DM relay
+ * was already delivering, and its online verdict lagged the real
+ * network return by about 2 minutes. The old code called
+ * nostr.stop() here, which cancelled the reconnect ladder
+ * (started=false, timers cleared) and left the pool dead with no
+ * trigger until the next online event, 3 minutes later, with no log
+ * line. The socket attempt itself is the probe now: a dead network
+ * fails fast, the ladder backs off to its 60 s cap, and the pool
+ * recovers the moment a socket actually opens. The DM pool already
+ * worked this way (no NetInfo gate, connects on demand). Transitions
+ * only: duplicates are no-ops.
  */
 function applyConnectivity(online: boolean): void {
   if (online === lastOnline) return;
@@ -1546,7 +1781,12 @@ function applyConnectivity(online: boolean): void {
   connectivityKnown = true;
   if (online) {
     addBreadcrumb('transport: connectivity online');
-    void hybrid?.nostr.start();
+    recordServiceEvent(`network validated (${lastNetInfoSummary ?? 'no NetInfo state yet'}) | ${healthSummary(buildTransportHealth())}`);
+    // Immediate re-attempt for relays that are dead with no reconnect
+    // pending; the ladder already covers the rest. start() alone would
+    // be a no-op here: the pool is never stopped on offline anymore,
+    // so it is already started.
+    hybrid?.nostr.startIfNeeded();
     // Periodic sync while online.
     startSyncTimer();
     // A transport returning drains the DM queue and replays missed DMs
@@ -1557,7 +1797,9 @@ function applyConnectivity(online: boolean): void {
     void refreshDmSubscriptionIfStarted().catch(() => {});
   } else {
     addBreadcrumb('transport: connectivity offline');
-    void hybrid?.nostr.stop();
+    recordServiceEvent(
+      `network not validated (${lastNetInfoSummary ?? 'no NetInfo state yet'}): relay pool keeps its reconnect ladder, sync timer stopped | ${healthSummary(buildTransportHealth())}`,
+    );
     stopSyncTimer();
   }
 }
@@ -1604,12 +1846,17 @@ export async function stopTransport(): Promise<void> {
     clearInterval(syncTimer);
     syncTimer = null;
   }
+  if (poolWatchdogTimer) {
+    clearInterval(poolWatchdogTimer);
+    poolWatchdogTimer = null;
+  }
   netUnsub?.();
   netUnsub = null;
   lastOnline = null;
   lastNetInfoSummary = null;
   connectivityKnown = false;
   clearScanRetry();
+  clearAdvertiseRetry();
   bleScanUp = false;
   try {
     bleScanUnsub?.();
@@ -1646,14 +1893,25 @@ export async function stopTransport(): Promise<void> {
  * A send marks the row 'ble-sent'; a send to connected peers that
  * completes on none marks it 'unsent'. No peers means no attempt at
  * all: the row waits for the next peer-arrival edge, not a timer.
- * Returns the count of rows sent to at least one peer. Never throws.
+ *
+ * Handoff memory (v0.1.31): a row handed to a peer is not handed to
+ * that same peer again inside DRAIN_HANDOFF_WINDOW_MS, so one health
+ * trigger storm does not re-send the same rows to the same peer 3 to
+ * 4 times (v0.1.30). A new ready peer still gets the row at once,
+ * and a row still unconfirmed after the window re-attempts. Skips are
+ * logged once per pass, not per row. Returns the count of rows sent
+ * to at least one peer. Never throws.
  */
 export async function drainPostOutbox(): Promise<number> {
   if (!hybrid) return 0;
   const peers = blePeerIdsForPublish(blePort?.port);
   if (peers.length === 0) return 0;
+  const nowMs = Date.now();
+  pruneDrainHandoffMemory(nowMs);
   let sentRows = 0;
   let attemptedRows = 0;
+  let skippedRows = 0;
+  const targetedPeers = new Set<string>();
   try {
     const store = getStore();
     const rows = await store.listPostOutbox();
@@ -1667,10 +1925,25 @@ export async function drainPostOutbox(): Promise<number> {
         await store.removePostOutbox(row.eventId).catch(() => {});
         continue;
       }
-      const sent = await hybrid.sendOverMesh(event, peers).catch(() => 0);
+      // Only peers this row has not been handed to inside the window:
+      // a row handed to every ready peer already waits for a new peer
+      // or the window, instead of re-burning the same radio.
+      const targets = drainTargetsForRow(row.eventId, peers, nowMs);
+      if (targets.length === 0) {
+        skippedRows += 1;
+        continue;
+      }
+      // Pacing (v0.1.31): a short gap between rows, not one burst.
+      // See DRAIN_ROW_DELAY_MS. Skipped rows do not consume a gap.
+      if (attemptedRows > 0 && drainRowDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, drainRowDelayMs));
+      }
+      for (const peerId of targets) targetedPeers.add(peerId);
+      const sent = await hybrid.sendOverMesh(event, targets).catch(() => 0);
       attemptedRows += 1;
       if (sent > 0) {
         sentRows += 1;
+        recordDrainHandoff(row.eventId, targets, nowMs);
         await store.markPostOutboxAttempt(row.eventId, 'ble-sent').catch(() => {});
       } else {
         await store.markPostOutboxAttempt(row.eventId, 'unsent').catch(() => {});
@@ -1700,15 +1973,60 @@ export async function drainPostOutbox(): Promise<number> {
     // A drain failure must never break the caller (mesh poll, start,
     // or foreground): the rows stay queued for the next trigger.
   }
-  // Fold the drain outcome into BLE-set health, but only when a send
-  // was actually attempted: an empty outbox says nothing about the
-  // radio. A drain that reached nobody backs the set off and arms
-  // one re-attempt at the backoff expiry.
+  // A skipped row is a decision, not silence: one line per pass says
+  // how many rows were held back and why, so the next log can tell a
+  // deduped drain from a dead radio.
+  if (skippedRows > 0) {
+    recordServiceEvent(
+      `drain skipped ${skippedRows} rows handed to same peers within ${DRAIN_HANDOFF_WINDOW_MS / 1000}s | ${healthSummary(buildTransportHealth())}`,
+    );
+  }
+  // Fold the drain outcome into per-peer BLE health, but only when a
+  // send was actually attempted: an empty outbox says nothing about
+  // the radio. A drain that reached nobody backs the targeted peers
+  // off and arms one re-attempt at the backoff expiry.
   if (attemptedRows > 0) {
-    armBalancerRetryTimer(noteBleSetOutcome(sentRows));
+    armBalancerRetryTimer(noteBlePeerOutcome([...targetedPeers], sentRows));
   }
   if (sentRows > 0) notifyFeedListeners();
   return sentRows;
+}
+
+/** Ready peers this row has not been handed to inside the window. */
+function drainTargetsForRow(eventId: string, readyPeers: string[], nowMs: number): string[] {
+  const handed = drainHandoffByEvent.get(eventId);
+  if (!handed || handed.size === 0) return [...readyPeers];
+  return readyPeers.filter((peerId) => {
+    const atMs = handed.get(peerId.slice(0, 8));
+    return atMs === undefined || nowMs - atMs >= DRAIN_HANDOFF_WINDOW_MS;
+  });
+}
+
+/** Record a handoff of one row to each target peer (by tag). */
+function recordDrainHandoff(eventId: string, peerIds: string[], nowMs: number): void {
+  let handed = drainHandoffByEvent.get(eventId);
+  if (!handed) {
+    handed = new Map<string, number>();
+    drainHandoffByEvent.set(eventId, handed);
+  }
+  for (const peerId of peerIds) handed.set(peerId.slice(0, 8), nowMs);
+  // Bounded: oldest rows drop when the map grows past the cap, so a
+  // long session cannot grow this memory without bound.
+  while (drainHandoffByEvent.size > DRAIN_HANDOFF_MAX_ROWS) {
+    const oldest = drainHandoffByEvent.keys().next();
+    if (oldest.done) break;
+    drainHandoffByEvent.delete(oldest.value);
+  }
+}
+
+/** Drop handoff entries older than the window, and empty rows. */
+function pruneDrainHandoffMemory(nowMs: number): void {
+  for (const [eventId, handed] of [...drainHandoffByEvent]) {
+    for (const [tag, atMs] of [...handed]) {
+      if (nowMs - atMs >= DRAIN_HANDOFF_WINDOW_MS) handed.delete(tag);
+    }
+    if (handed.size === 0) drainHandoffByEvent.delete(eventId);
+  }
 }
 
 /** Publish a local event through the ordered router (R4). */
@@ -1729,19 +2047,30 @@ export async function publishViaTransport(event: SignedEvent): Promise<RouteResu
   recordServiceEvent(
     `balancer route ${plan.paths.join('+') || 'queue'} | ${plan.detail}${plan.queuedReason ? ` | ${plan.queuedReason}` : ''} | ${healthSummary(health)}`,
   );
-  const blePeersForRouter = plan.paths.includes('ble') ? blePeersAtPublish : [];
+  // Per-peer routing (v0.1.31): the plan's BLE leg is viable when ANY
+  // ready peer is healthy, but the router only gets the healthy ones.
+  // A peer serving a backoff after failed sends is held out of this
+  // send alone; the others still get the post in the same publish,
+  // so one BLE-only peer, one mobile-only peer, and one Wi-Fi-only
+  // peer are all served by the path each can actually use.
+  const healthyTags = new Set(
+    health.peers.filter((p) => isPeerHealthy(p, health.nowMs)).map((p) => p.tag),
+  );
+  const blePeersForRouter = plan.paths.includes('ble')
+    ? blePeersAtPublish.filter((peerId) => healthyTags.has(peerId.slice(0, 8)))
+    : [];
   const bleFilteredByBackoff = blePeersAtPublish.length > 0 && blePeersForRouter.length === 0;
   const result = await hybrid!.publish(event, blePeersForRouter);
   // Fold the outcome back into health: a real relay rejection backs
   // that relay off (duplicate counts as stored, never a failure),
-  // and a BLE broadcast that reached nobody backs the set off. Both
-  // arm one re-attempt timer at the nearest expiry.
+  // and a BLE broadcast that reached nobody backs the targeted peers
+  // off. Both arm one re-attempt timer at the nearest expiry.
   const backoffUntil = noteBalancerRelayResult(result);
   armBalancerRetryTimer(backoffUntil);
-  // Only an attempted BLE leg feeds the set health: a send held out
-  // by backoff must not re-arm the backoff it is already serving.
+  // Only an attempted BLE leg feeds the per-peer health: a send held
+  // out by backoff must not re-arm the backoff it is already serving.
   if (blePeersForRouter.length > 0) {
-    armBalancerRetryTimer(noteBleSetOutcome(result.blePeers));
+    armBalancerRetryTimer(noteBlePeerOutcome(blePeersForRouter, result.blePeers));
   }
   // Rank 5, World honesty: a direct relay OK no longer confirms World
   // at once. A relay can OK an envelope and then drop it before any

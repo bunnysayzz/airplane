@@ -47,10 +47,23 @@ export interface TransportPort {
    * Full peerIds of currently established connections (identity known).
    * Optional and additive (not a breaking change): ports that do not track
    * connections omit it, and callers fall back to an empty peer set.
-   * Provisional ids (tag:/mac: keys) are never returned — only peers whose
+   * Provisional ids (tag:/mac: keys) are never returned - only peers whose
    * full identity has been resolved can receive frames.
    */
   connectedPeerIds?(): string[];
+  /**
+   * Full peerIds that are ready to RECEIVE a frame right now: our
+   * central handshake to the peer completed (we subscribed to its TX)
+   * and the peer's hello arrived on our peripheral side (it connected
+   * to us and is about to subscribe, or already has subscribed, to our
+   * TX). A peer that is connected but not ready yet must never be
+   * sent to: a GATT notify resolves even with no central subscribed,
+   * so sending to it counts as sent while nothing lands (the v0.1.30
+   * drain-before-connect loss). Optional and additive: ports that do
+   * not track readiness omit it, and callers fall back to
+   * connectedPeerIds.
+   */
+  readyPeerIds?(): string[];
   /** Subscribe to inbound frames. Returns an unsubscribe function. */
   onReceive(cb: (peerId: string, bytes: Uint8Array) => void): () => void;
 }
