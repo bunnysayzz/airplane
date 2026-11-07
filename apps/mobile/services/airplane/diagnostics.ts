@@ -489,9 +489,16 @@ export type UpdateLogDetail =
   | `check up-to-date ${string}`
   | `check available ${string}`
   | `check failed ${string}`
+  | `check deduped downloading ${string}`
+  | `check deduped checking ${string}`
   | `download started ${string}`
   | `download progress ${number}`
   | `download failed ${string}`
+  | `download coalesced ${string}`
+  | `download stalled ${string}`
+  | `download stuck after 100% ${string}`
+  | `download listener remove failed ${string}`
+  | `cached apk discarded ${string}`
   | `sums attempt ${number} download ${string}`
   | `sums attempt ${number} api-meta ${string}`
   | `sums attempt ${number} api-file ${string}`

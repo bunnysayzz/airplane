@@ -9,6 +9,12 @@
 // APK is written only inside the updates cache dir, install only ever
 // fires from a file inside that dir, and nothing here installs silently:
 // installApk opens the system install sheet and the user taps Install.
+//
+// v0.1.34 single-flight: a new downloadApk call cancels any in-flight
+// download first (its connection is disconnected), and hashCachedApk
+// hashes an APK already on disk so a previous run's 100% download can be
+// verified instead of re-downloaded. On v0.1.32 two overlapping downloads
+// writing one file left the download promise unsettled forever.
 
 package com.bunnysayzz.airplane
 
@@ -34,6 +40,14 @@ class AirplaneInstallerModule(reactContext: ReactApplicationContext) :
   ReactContextBaseJavaModule(reactContext) {
 
   override fun getName(): String = "AirplaneInstaller"
+
+  // v0.1.34: only one download may run at a time. A new downloadApk call
+  // disconnects the in-flight connection first, so a stale orphan can
+  // never corrupt the file a fresh download is writing, and can never
+  // block a retry. The JS single-flight (updateCheck.ts) is the real
+  // guard; this is the backstop.
+  private val downloadLock = Any()
+  private var activeDownload: HttpURLConnection? = null
 
   private fun updatesDir(): File {
     val dir = File(reactApplicationContext.cacheDir, "updates")
@@ -89,7 +103,16 @@ class AirplaneInstallerModule(reactContext: ReactApplicationContext) :
 
   @ReactMethod
   fun downloadApk(url: String, fileName: String, promise: Promise) {
+    // Cancel any in-flight download first: a stale download must never
+    // block or corrupt a fresh one. Disconnecting unblocks its read
+    // with an IOException, so its promise rejects and its JS side (long
+    // since finished via the watchdog, or still awaiting) ignores it.
+    synchronized(downloadLock) {
+      activeDownload?.disconnect()
+      activeDownload = null
+    }
     Thread {
+      var connection: HttpURLConnection? = null
       try {
         val parsed = URL(url)
         if (parsed.protocol != "https") {
@@ -104,23 +127,25 @@ class AirplaneInstallerModule(reactContext: ReactApplicationContext) :
           }
         }
         val target = File(dir, fileName)
-        val connection = parsed.openConnection() as HttpURLConnection
-        connection.instanceFollowRedirects = true
-        connection.connectTimeout = 30_000
-        connection.readTimeout = 120_000
-        connection.setRequestProperty("User-Agent", "Airplane-updater")
-        connection.connect()
-        val status = connection.responseCode
+        val conn = parsed.openConnection() as HttpURLConnection
+        connection = conn
+        synchronized(downloadLock) { activeDownload = conn }
+        conn.instanceFollowRedirects = true
+        conn.connectTimeout = 30_000
+        conn.readTimeout = 120_000
+        conn.setRequestProperty("User-Agent", "Airplane-updater")
+        conn.connect()
+        val status = conn.responseCode
         if (status !in 200..299) {
-          connection.disconnect()
+          conn.disconnect()
           promise.reject("DOWNLOAD_FAILED", "HTTP $status")
           return@Thread
         }
-        val total = connection.contentLengthLong
+        val total = conn.contentLengthLong
         val digest = MessageDigest.getInstance("SHA-256")
         var received = 0L
         var lastEmitted = 0L
-        connection.inputStream.use { input ->
+        conn.inputStream.use { input ->
           FileOutputStream(target).use { output ->
             val buffer = ByteArray(64 * 1024)
             while (true) {
@@ -136,7 +161,7 @@ class AirplaneInstallerModule(reactContext: ReactApplicationContext) :
             }
           }
         }
-        connection.disconnect()
+        conn.disconnect()
         val hex = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
         val result: WritableMap = Arguments.createMap()
         result.putString("path", target.absolutePath)
@@ -145,8 +170,56 @@ class AirplaneInstallerModule(reactContext: ReactApplicationContext) :
         promise.resolve(result)
       } catch (e: Exception) {
         promise.reject("DOWNLOAD_FAILED", e.message, e)
+      } finally {
+        synchronized(downloadLock) {
+          if (activeDownload === connection) activeDownload = null
+        }
       }
     }.start()
+  }
+
+  /**
+   * v0.1.34 restart resume: hash the APK already in the updates cache
+   * dir, so a download that reached 100% in a previous run can be
+   * verified and installed without re-downloading. Resolves null when no
+   * file exists for the name, or when anything about the file is wrong:
+   * absence is not an error, and the JS side then downloads fresh. The
+   * hash is computed over the file on disk, never trusted from a stored
+   * value, so a file corrupted by the pre-v0.1.34 double download can
+   * only be discarded, never installed.
+   */
+  @ReactMethod
+  fun hashCachedApk(fileName: String, promise: Promise) {
+    try {
+      if (!fileName.endsWith(".apk") || fileName.contains("/") || fileName.contains("\\")) {
+        promise.resolve(null)
+        return
+      }
+      val file = File(updatesDir(), fileName)
+      if (!isInUpdatesDir(file) || !file.isFile) {
+        promise.resolve(null)
+        return
+      }
+      val digest = MessageDigest.getInstance("SHA-256")
+      var bytes = 0L
+      file.inputStream().use { input ->
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+          val read = input.read(buffer)
+          if (read < 0) break
+          digest.update(buffer, 0, read)
+          bytes += read
+        }
+      }
+      val hex = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+      val result: WritableMap = Arguments.createMap()
+      result.putString("path", file.absolutePath)
+      result.putString("sha256", hex)
+      result.putDouble("bytes", bytes.toDouble())
+      promise.resolve(result)
+    } catch (e: Exception) {
+      promise.resolve(null)
+    }
   }
 
   @ReactMethod

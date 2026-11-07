@@ -79,6 +79,9 @@ const makeInstaller = (overrides: Partial<InstallerModule> = {}): InstallerModul
     downloadApk: jest.fn(async () => ({ path: APK_PATH, sha256: GOOD_HASH, bytes: 123 })),
     installApk: jest.fn(async () => true),
     deleteFile: jest.fn(async () => true),
+    // No cached APK by default: the restart-resume path is skipped and
+    // the download runs fresh, as on a build without hashCachedApk.
+    hashCachedApk: jest.fn(async () => null),
     ...overrides,
   }) as never;
 
@@ -95,6 +98,11 @@ const alertButtons = () => {
 };
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+const emitterInstances = () =>
+  (NativeEventEmitter as unknown as {
+    instances: Array<{ emit: (event: string, payload: unknown) => void }>;
+  }).instances;
 
 beforeEach(() => {
   resetUpdateCheckForTests();
@@ -165,9 +173,15 @@ describe('native-missing fallback', () => {
     setInstallerForTests(null);
     const openURL = jest.fn(async () => {});
     (RN as unknown as Record<string, unknown>).Linking = { openURL };
-    const status = await startUpdateDownload(update);
+    const ends: string[] = [];
+    const status = await startUpdateDownload(update, {
+      onDownloadEnd: (end) => ends.push(end),
+    });
     expect(status).toBe('browser');
     expect(openURL).toHaveBeenCalledWith(update.downloadUrl);
+    // v0.1.34: every terminal path ends the download, so the Settings
+    // row cannot sit on "downloading" after a fallback.
+    expect(ends).toEqual(['browser']);
   });
 });
 
@@ -207,7 +221,10 @@ describe('hash gate', () => {
     (RN as unknown as Record<string, unknown>).Linking = { openURL };
     const status = await startUpdateDownload(update);
     expect(status).toBe('browser');
-    expect(installer.deleteFile).toHaveBeenCalledWith(APK_PATH);
+    // v0.1.34 sums-first: no download starts when the sums file is
+    // unavailable, so there is no just-downloaded file to delete.
+    expect(installer.downloadApk).not.toHaveBeenCalled();
+    expect(installer.deleteFile).not.toHaveBeenCalled();
     expect(installer.installApk).not.toHaveBeenCalled();
     expect(openURL).toHaveBeenCalledWith(update.releaseUrl);
     expect(mockedRecordEvent()).toHaveBeenCalledWith('verify failed no-sums http-404');
@@ -221,7 +238,9 @@ describe('hash gate', () => {
     (RN as unknown as Record<string, unknown>).Linking = {};
     const status = await startUpdateDownload(update);
     expect(status).toBe('failed');
-    expect(installer.deleteFile).toHaveBeenCalledWith(APK_PATH);
+    // v0.1.34 sums-first: no download starts, so no file to delete.
+    expect(installer.downloadApk).not.toHaveBeenCalled();
+    expect(installer.deleteFile).not.toHaveBeenCalled();
     expect(installer.installApk).not.toHaveBeenCalled();
     expect(mockedToast()).toHaveBeenCalledWith('settings.updateOpenFailed');
   });
@@ -233,9 +252,15 @@ describe('hash gate', () => {
       }),
     });
     setInstallerForTests(installer);
+    // v0.1.34 sums-first: the sums fetch runs before the download, so
+    // it must be configured or the flow dies at the sums step instead
+    // of at the download this test is about.
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
     const status = await startUpdateDownload(update);
     expect(status).toBe('failed');
+    expect(installer.downloadApk).toHaveBeenCalled();
     expect(installer.installApk).not.toHaveBeenCalled();
+    expect(mockedRecordEvent()).toHaveBeenCalledWith('download failed network');
     expect(mockedToast()).toHaveBeenCalledWith('settings.updateDownloadFailed');
   });
 });
@@ -251,9 +276,16 @@ describe('install intent failure', () => {
     mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
     const openURL = jest.fn(async () => {});
     (RN as unknown as Record<string, unknown>).Linking = { openURL };
-    const status = await startUpdateDownload(update);
+    const ends: string[] = [];
+    const status = await startUpdateDownload(update, {
+      onDownloadEnd: (end) => ends.push(end),
+    });
     expect(status).toBe('browser');
     expect(openURL).toHaveBeenCalledWith(update.downloadUrl);
+    // v0.1.34: the install-intent failure path used to skip the
+    // download-end callback (the v0.1.26 nit), leaving the Settings row
+    // on "downloading" until the next check.
+    expect(ends).toEqual(['browser']);
   });
 });
 
@@ -341,5 +373,223 @@ describe('launch check', () => {
     mockedCheckForUpdate().mockResolvedValue({ available: false });
     await checkForUpdateOnLaunch();
     expect(mockedAlert()).not.toHaveBeenCalled();
+  });
+});
+
+describe('single-flight (v0.1.34)', () => {
+  const controllableDownload = () => {
+    let resolveDownload!: (value: { path: string; sha256: string; bytes: number }) => void;
+    const downloadPromise = new Promise<{ path: string; sha256: string; bytes: number }>(
+      (resolve) => {
+        resolveDownload = resolve;
+      },
+    );
+    return { downloadPromise, resolveDownload };
+  };
+
+  test('two concurrent starts coalesce to one download and one listener', async () => {
+    const { downloadPromise, resolveDownload } = controllableDownload();
+    const installer = makeInstaller({ downloadApk: jest.fn(() => downloadPromise) });
+    setInstallerForTests(installer);
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
+    const fractions1: Array<number | null> = [];
+    const fractions2: Array<number | null> = [];
+    const ends1: string[] = [];
+    const ends2: string[] = [];
+    const before = emitterInstances().length;
+    const first = startUpdateDownload(update, {
+      onDownloadProgress: (fraction) => fractions1.push(fraction),
+      onDownloadEnd: (status) => ends1.push(status),
+    });
+    await flush();
+    await flush();
+    expect(installer.downloadApk).toHaveBeenCalledTimes(1);
+    const second = startUpdateDownload(update, {
+      onDownloadProgress: (fraction) => fractions2.push(fraction),
+      onDownloadEnd: (status) => ends2.push(status),
+    });
+    // Same promise: the second caller joins the in-flight download.
+    expect(second).toBe(first);
+    expect(installer.downloadApk).toHaveBeenCalledTimes(1);
+    expect(emitterInstances().length - before).toBe(1);
+    expect(mockedRecordEvent()).toHaveBeenCalledWith('download coalesced 0.1.21');
+    emitterInstances()[emitterInstances().length - 1].emit(
+      'AirplaneInstallerDownloadProgress',
+      { received: 50, total: 100 },
+    );
+    expect(fractions1).toContain(0.5);
+    expect(fractions2).toContain(0.5);
+    resolveDownload({ path: APK_PATH, sha256: GOOD_HASH, bytes: 100 });
+    await expect(first).resolves.toBe('installed');
+    await expect(second).resolves.toBe('installed');
+    expect(ends1).toEqual(['installed']);
+    expect(ends2).toEqual(['installed']);
+  });
+
+  test('a second start for a different version joins the in-flight download', async () => {
+    const { downloadPromise, resolveDownload } = controllableDownload();
+    const installer = makeInstaller({ downloadApk: jest.fn(() => downloadPromise) });
+    setInstallerForTests(installer);
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
+    const first = startUpdateDownload(update);
+    await flush();
+    await flush();
+    const newer: UpdateInfo = {
+      version: '0.1.22',
+      tag: 'v0.1.22',
+      downloadUrl:
+        'https://github.com/bunnysayzz/airplane/releases/download/v0.1.22/airplane-v0.1.22.apk',
+      releaseUrl: 'https://github.com/bunnysayzz/airplane/releases/tag/v0.1.22',
+    };
+    const second = startUpdateDownload(newer);
+    expect(second).toBe(first);
+    expect(installer.downloadApk).toHaveBeenCalledTimes(1);
+    expect(mockedRecordEvent()).toHaveBeenCalledWith('download coalesced 0.1.21');
+    resolveDownload({ path: APK_PATH, sha256: GOOD_HASH, bytes: 100 });
+    await expect(first).resolves.toBe('installed');
+    await expect(second).resolves.toBe('installed');
+  });
+});
+
+describe('download watchdogs (v0.1.34)', () => {
+  const controllableDownload = () => {
+    let resolveDownload!: (value: { path: string; sha256: string; bytes: number }) => void;
+    const downloadPromise = new Promise<{ path: string; sha256: string; bytes: number }>(
+      (resolve) => {
+        resolveDownload = resolve;
+      },
+    );
+    return { downloadPromise, resolveDownload };
+  };
+
+  test('a download with no progress for the stall window fails visibly', async () => {
+    const { downloadPromise, resolveDownload } = controllableDownload();
+    const installer = makeInstaller({ downloadApk: jest.fn(() => downloadPromise) });
+    setInstallerForTests(installer);
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
+    const ends: string[] = [];
+    const pending = startUpdateDownload(update, {
+      stallTimeoutMs: 30,
+      settleTimeoutMs: 10_000,
+      onDownloadEnd: (status) => ends.push(status),
+    });
+    await expect(pending).resolves.toBe('failed');
+    expect(mockedRecordEvent()).toHaveBeenCalledWith('download stalled 0.1.21 at 0%');
+    expect(mockedToast()).toHaveBeenCalledWith('settings.updateDownloadFailed');
+    expect(ends).toEqual(['failed']);
+    expect(installer.installApk).not.toHaveBeenCalled();
+    // A late native resolution is ignored: no second end, no install.
+    resolveDownload({ path: APK_PATH, sha256: GOOD_HASH, bytes: 100 });
+    await flush();
+    await flush();
+    expect(ends).toEqual(['failed']);
+    expect(installer.installApk).not.toHaveBeenCalled();
+  });
+
+  test('100% progress with no settlement fails visibly', async () => {
+    const { downloadPromise, resolveDownload } = controllableDownload();
+    const installer = makeInstaller({ downloadApk: jest.fn(() => downloadPromise) });
+    setInstallerForTests(installer);
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
+    const ends: string[] = [];
+    const pending = startUpdateDownload(update, {
+      stallTimeoutMs: 10_000,
+      settleTimeoutMs: 30,
+      onDownloadEnd: (status) => ends.push(status),
+    });
+    await flush();
+    await flush();
+    emitterInstances()[emitterInstances().length - 1].emit(
+      'AirplaneInstallerDownloadProgress',
+      { received: 100, total: 100 },
+    );
+    await expect(pending).resolves.toBe('failed');
+    expect(mockedRecordEvent()).toHaveBeenCalledWith('download stuck after 100% 0.1.21');
+    expect(mockedToast()).toHaveBeenCalledWith('settings.updateDownloadFailed');
+    expect(ends).toEqual(['failed']);
+    expect(installer.installApk).not.toHaveBeenCalled();
+    resolveDownload({ path: APK_PATH, sha256: GOOD_HASH, bytes: 100 });
+    await flush();
+    await flush();
+    expect(ends).toEqual(['failed']);
+    expect(installer.installApk).not.toHaveBeenCalled();
+  });
+});
+
+describe('restart resume (v0.1.34)', () => {
+  test('a cached APK whose hash matches installs without re-downloading', async () => {
+    const installer = makeInstaller({
+      hashCachedApk: jest.fn(async () => ({ path: APK_PATH, sha256: GOOD_HASH, bytes: 123 })),
+    });
+    setInstallerForTests(installer);
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
+    const status = await startUpdateDownload(update);
+    expect(status).toBe('installed');
+    expect(installer.downloadApk).not.toHaveBeenCalled();
+    expect(installer.installApk).toHaveBeenCalledWith(APK_PATH);
+    expect(mockedRecordEvent()).toHaveBeenCalledWith('verify ok 0.1.21 (cached)');
+  });
+
+  test('a cached APK whose hash mismatches is discarded and the download runs fresh', async () => {
+    const installer = makeInstaller({
+      hashCachedApk: jest.fn(async () => ({ path: APK_PATH, sha256: OTHER_HASH, bytes: 123 })),
+    });
+    setInstallerForTests(installer);
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
+    const status = await startUpdateDownload(update);
+    expect(status).toBe('installed');
+    expect(mockedRecordEvent()).toHaveBeenCalledWith('cached apk discarded 0.1.21');
+    expect(installer.deleteFile).toHaveBeenCalledWith(APK_PATH);
+    expect(installer.downloadApk).toHaveBeenCalled();
+    expect(installer.installApk).toHaveBeenCalledWith(APK_PATH);
+  });
+
+  test('a throwing hashCachedApk falls back to a fresh download', async () => {
+    const installer = makeInstaller({
+      hashCachedApk: jest.fn(async () => {
+        throw new Error('nope');
+      }),
+    });
+    setInstallerForTests(installer);
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
+    const status = await startUpdateDownload(update);
+    expect(status).toBe('installed');
+    expect(installer.downloadApk).toHaveBeenCalled();
+    expect(installer.installApk).toHaveBeenCalledWith(APK_PATH);
+  });
+
+  test('a missing hashCachedApk method downloads fresh', async () => {
+    const installer = makeInstaller();
+    delete (installer as unknown as Record<string, unknown>).hashCachedApk;
+    setInstallerForTests(installer);
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
+    const status = await startUpdateDownload(update);
+    expect(status).toBe('installed');
+    expect(installer.downloadApk).toHaveBeenCalled();
+    expect(installer.installApk).toHaveBeenCalledWith(APK_PATH);
+  });
+});
+
+describe('progress listener removal (v0.1.34)', () => {
+  test('a throwing progress-listener remove does not skip verification', async () => {
+    const installer = makeInstaller();
+    setInstallerForTests(installer);
+    mockedDetailedSums().mockResolvedValue(detailedSums(GOOD_HASH));
+    const Emitter = NativeEventEmitter as unknown as {
+      prototype: { addListener: (...args: unknown[]) => unknown };
+    };
+    const spy = jest.spyOn(Emitter.prototype, 'addListener').mockImplementation(() => ({
+      remove: () => {
+        throw new Error('remove boom');
+      },
+    }));
+    try {
+      const status = await startUpdateDownload(update);
+      expect(status).toBe('installed');
+      expect(installer.installApk).toHaveBeenCalledWith(APK_PATH);
+      expect(mockedRecordEvent()).toHaveBeenCalledWith('download listener remove failed 0.1.21');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

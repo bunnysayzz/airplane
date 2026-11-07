@@ -18,7 +18,7 @@ import { SettingsHeader } from './header';
 import { makeStyles } from './styles';
 import { useI18n } from '../../src/i18n/i18nContext';
 import { tabBarClearance } from '../../components/TabBar/styles';
-import { recordUiEvent } from '../../services/airplane/diagnostics';
+import { recordUiEvent, recordUpdateEvent } from '../../services/airplane/diagnostics';
 import { EXPLAINER_CARDS, ExplainerCard } from '../Setup/explainerCard';
 
 // Deliberately opened in-app instead of a browser link: Airplane is an offline-first,
@@ -55,7 +55,19 @@ const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
 
   const onCheckForUpdates = () => {
-    if (updateStatus === 'checking' || updateStatus === 'downloading') return;
+    if (updateStatus === 'checking' || updateStatus === 'downloading') {
+      // Never swallow a tap silently (v0.1.34): the row already shows
+      // the state, but the log must show the tap was seen and deduped,
+      // not lost. The stuck-downloading case that swallowed five taps on
+      // v0.1.32 is fixed by the download watchdogs; this line is the
+      // proof the tap was not dropped.
+      recordUpdateEvent(
+        updateStatus === 'downloading'
+          ? `check deduped downloading ${updateVersion ?? 'unknown'}`
+          : `check deduped checking ${updateVersion ?? 'unknown'}`,
+      );
+      return;
+    }
     setUpdateStatus('checking');
     checkForUpdateFromSettings({
       onDownloadProgress: (fraction) => {

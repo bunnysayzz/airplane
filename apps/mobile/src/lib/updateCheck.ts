@@ -68,6 +68,16 @@ export interface InstallerModule {
   }>;
   installApk: (path: string) => Promise<unknown>;
   deleteFile: (path: string) => Promise<unknown>;
+  /** Hash an APK already in the updates cache dir, for the restart-resume
+   *  path (v0.1.34). Optional: older native builds do not have it, and
+   *  the JS side treats a missing method as "no cached file". Returns null
+   *  when no file exists for the name. Deliberately NOT in the required
+   *  methods list in getInstaller, so an older module still passes. */
+  hashCachedApk?: (fileName: string) => Promise<{
+    path: string;
+    sha256: string;
+    bytes: number;
+  } | null>;
 }
 
 type InstallerOverride = InstallerModule | null | undefined;
@@ -100,6 +110,12 @@ export interface DownloadOptions {
   /** Fraction downloaded (0 to 1), or null when the size is unknown. */
   onDownloadProgress?: (fraction: number | null) => void;
   onDownloadEnd?: (status: DownloadStatus) => void;
+  /** Watchdog bounds, injectable for tests. Defaults: 60 s with no
+   *  progress event, 15 s to settle after 100%. Only the caller that
+   *  starts the download sets them; coalesced callers join the in-flight
+   *  download as-is. */
+  stallTimeoutMs?: number;
+  settleTimeoutMs?: number;
 }
 
 // One prompt per release tag per app run, so the launch check does not
@@ -114,12 +130,92 @@ let pendingUpdate: UpdateInfo | null = null;
 let pendingDownloadOpts: DownloadOptions | undefined;
 let resumeListenerRegistered = false;
 
+/**
+ * v0.1.34: a download that never settles must fail visibly, not hang the
+ * updater forever. The watchdog promise rejects when either timer fires;
+ * the download race turns that rejection into a terminal 'failed'.
+ */
+class DownloadStallError extends Error {
+  readonly kind: 'stall' | 'settle';
+  constructor(kind: 'stall' | 'settle') {
+    super(kind === 'stall' ? 'download stalled' : 'download stuck after 100%');
+    this.kind = kind;
+  }
+}
+
+/** A download in flight: one native download, one progress listener, and
+ *  every caller that joined it. v0.1.34 single-flight: the launch check
+ *  and the manual Settings check used to start two downloads for the same
+ *  version, and the two native threads writing one file left the download
+ *  promise unsettled forever (v0.1.32 on the personal phone: six starts,
+ *  three times at 100%, no verification, no failure line). */
+type ActiveDownload = {
+  version: string;
+  promise: Promise<DownloadStatus>;
+  subscribers: DownloadOptions[];
+  ended: boolean;
+  cancelled: boolean;
+  stallTimer: ReturnType<typeof setTimeout> | undefined;
+  settleTimer: ReturnType<typeof setTimeout> | undefined;
+};
+
+let activeDownload: ActiveDownload | null = null;
+
+/** No progress event for this long means the download is dead, not slow:
+ *  the native module emits every 256 KB, so 60 s without one is under
+ *  4 KB/s on any working connection. */
+const DOWNLOAD_STALL_TIMEOUT_MS = 60_000;
+/** 100% progress means the last byte arrived; the native promise must
+ *  settle right after. 15 s is far past the normal sub-second settle
+ *  (phone A settled 1.3 s after 100% on v0.1.33). */
+const DOWNLOAD_SETTLE_TIMEOUT_MS = 15_000;
+
+/** Fan out the terminal status to every caller that joined the download,
+ *  exactly once. A throwing subscriber must never break the flow. */
+const finishDownload = (record: ActiveDownload, status: DownloadStatus): DownloadStatus => {
+  if (record.ended) return status;
+  record.ended = true;
+  if (record.stallTimer !== undefined) clearTimeout(record.stallTimer);
+  if (record.settleTimer !== undefined) clearTimeout(record.settleTimer);
+  record.stallTimer = undefined;
+  record.settleTimer = undefined;
+  if (activeDownload === record) activeDownload = null;
+  for (const subscriber of record.subscribers) {
+    try {
+      subscriber.onDownloadEnd?.(status);
+    } catch {
+      // A subscriber callback must never break the updater.
+    }
+  }
+  return status;
+};
+
+const reportProgressToSubscribers = (record: ActiveDownload, fraction: number | null): void => {
+  for (const subscriber of record.subscribers) {
+    try {
+      subscriber.onDownloadProgress?.(fraction);
+    } catch {
+      // A subscriber callback must never break the updater.
+    }
+  }
+};
+
 /** For tests: clear prompts, pending downloads, and installer overrides. */
 export const resetUpdateCheckForTests = (): void => {
   promptedTags.clear();
   pendingUpdate = null;
   pendingDownloadOpts = undefined;
   installerOverride = undefined;
+  // A test must never inherit a live download: cancel its watchdogs so no
+  // timer from a finished test can fire into the next one.
+  if (activeDownload) {
+    activeDownload.cancelled = true;
+    if (activeDownload.stallTimer !== undefined) clearTimeout(activeDownload.stallTimer);
+    if (activeDownload.settleTimer !== undefined) clearTimeout(activeDownload.settleTimer);
+    activeDownload.stallTimer = undefined;
+    activeDownload.settleTimer = undefined;
+    activeDownload = null;
+  }
 };
 
 type ProgressEvent = { received?: unknown; total?: unknown };
@@ -190,22 +286,78 @@ const classifyDownloadError = (error: unknown): string => {
  * failure path toasts and returns a status. The permission gate runs
  * first; the hash gate runs before any install intent; a mismatch deletes
  * the file and never installs.
+ *
+ * v0.1.34 single-flight: concurrent starts coalesce to the in-flight
+ * download. A second caller joins its progress and end callbacks and
+ * gets its outcome; no second download starts, no second progress
+ * listener is registered. A download that stalls or never settles fails
+ * visibly through the watchdogs in downloadFreshApk.
  */
-export const startUpdateDownload = async (
+export const startUpdateDownload = (
   update: UpdateInfo,
   opts: DownloadOptions = {},
+): Promise<DownloadStatus> => {
+  const existing = activeDownload;
+  if (existing) {
+    existing.subscribers.push(opts);
+    recordUpdateEvent(`download coalesced ${existing.version}`);
+    return existing.promise;
+  }
+  const record: ActiveDownload = {
+    version: update.version,
+    promise: Promise.resolve('failed'),
+    subscribers: [opts],
+    ended: false,
+    cancelled: false,
+    stallTimer: undefined,
+    settleTimer: undefined,
+  };
+  const promise = runUpdateDownload(update, opts, record);
+  record.promise = promise;
+  activeDownload = record;
+  return promise;
+};
+
+/** Never-throwing wrapper: a bug in the flow must not strand the Settings
+ *  row on "downloading" or reject a caller that awaits the download. */
+const runUpdateDownload = async (
+  update: UpdateInfo,
+  opts: DownloadOptions,
+  record: ActiveDownload,
+): Promise<DownloadStatus> => {
+  try {
+    return await runUpdateDownloadInner(update, opts, record);
+  } catch {
+    recordUpdateEvent(`download failed download-error`);
+    dialog.toast(defaultTranslator().t('settings.updateDownloadFailed'));
+    return finishDownload(record, 'failed');
+  } finally {
+    // Backstop: every return path in the inner flow ends the download,
+    // but a missed one must never leave the row stuck on "downloading".
+    if (!record.ended) finishDownload(record, 'failed');
+  }
+};
+
+const runUpdateDownloadInner = async (
+  update: UpdateInfo,
+  opts: DownloadOptions,
+  record: ActiveDownload,
 ): Promise<DownloadStatus> => {
   const t = defaultTranslator().t;
   const downloadUrl = update.downloadUrl;
   if (downloadUrl === null || !isAllowedUpdateUrl(downloadUrl, { downloadHost: true })) {
     // No APK asset, or a URL outside the allowlist: the release page is
     // the only safe fallback.
-    return openBrowserFallback(update.releaseUrl, 'no-apk');
+    return finishDownload(record, await openBrowserFallback(update.releaseUrl, 'no-apk'));
   }
   const fileName = apkFileNameFromUrl(downloadUrl);
-  if (fileName === null) return openBrowserFallback(update.releaseUrl, 'bad-filename');
+  if (fileName === null) {
+    return finishDownload(record, await openBrowserFallback(update.releaseUrl, 'bad-filename'));
+  }
   const installer = getInstaller();
-  if (!installer) return openBrowserFallback(downloadUrl, 'no-installer');
+  if (!installer) {
+    return finishDownload(record, await openBrowserFallback(downloadUrl, 'no-installer'));
+  }
 
   let allowed: boolean;
   try {
@@ -213,8 +365,7 @@ export const startUpdateDownload = async (
   } catch {
     recordUpdateEvent(`download failed can-install-check`);
     dialog.toast(t('settings.updateDownloadFailed'));
-    opts.onDownloadEnd?.('failed');
-    return 'failed';
+    return finishDownload(record, 'failed');
   }
   if (!allowed) {
     pendingUpdate = update;
@@ -237,39 +388,12 @@ export const startUpdateDownload = async (
         },
       },
     ]);
-    opts.onDownloadEnd?.('permission');
-    return 'permission';
+    return finishDownload(record, 'permission');
   }
 
-  dialog.toast(t('settings.updateDownloading'));
-  recordUpdateEvent(`download started ${update.version}`);
-  // Progress milestones only (0, 25, 50, 75, 100): per-chunk fractions
-  // would flood the log, but a download with no milestone at all must
-  // still be visible as started-and-stalled, not silent.
-  let lastMilestone = -1;
-  const reportProgress = (fraction: number | null): void => {
-    opts.onDownloadProgress?.(fraction);
-    if (fraction === null) return;
-    const milestone = fraction >= 1 ? 100 : Math.floor(fraction * 4) * 25;
-    if (milestone > lastMilestone) {
-      lastMilestone = milestone;
-      recordUpdateEvent(`download progress ${milestone}`);
-    }
-  };
-  reportProgress(0);
-  const subscription = subscribeProgress(installer, reportProgress);
-  let downloaded: { path: string; sha256: string; bytes: number };
-  try {
-    downloaded = await installer.downloadApk(downloadUrl, fileName);
-  } catch (error: unknown) {
-    subscription?.remove();
-    recordUpdateEvent(`download failed ${classifyDownloadError(error)}`);
-    dialog.toast(t('settings.updateDownloadFailed'));
-    opts.onDownloadEnd?.('failed');
-    return 'failed';
-  }
-  subscription?.remove();
-
+  // Sums first (v0.1.34): fail fast when the sums file is unavailable
+  // instead of spending a 32 MB download first, and the expected hash is
+  // needed to judge a cached APK from a previous run.
   const sumsResult = await fetchSha256SumsDetailed(update.tag);
   for (const attempt of sumsResult.attempts) {
     recordUpdateEvent(
@@ -278,11 +402,8 @@ export const startUpdateDownload = async (
   }
   const expected =
     sumsResult.sums === null ? null : expectedApkHash(sumsResult.sums, fileName);
-  if (expected === null || expected.toLowerCase() !== downloaded.sha256.toLowerCase()) {
-    await installer.deleteFile(downloaded.path).catch(() => {});
-    recordUpdateEvent(
-      `verify failed ${expected === null ? `no-sums ${sumsResult.lastReason}` : 'mismatch'}`,
-    );
+  if (expected === null) {
+    recordUpdateEvent(`verify failed no-sums ${sumsResult.lastReason}`);
     dialog.toast(t('settings.updateVerifyFailed'));
     // Never a dead toast: verification failure used to strand the user
     // on the old version (v0.1.25 rollout, three no-sums failures, no
@@ -293,10 +414,37 @@ export const startUpdateDownload = async (
     // choose. The install intent path below keeps opening the APK URL
     // because there verification already passed.
     const fallbackStatus = await openBrowserFallback(update.releaseUrl, 'verify-failed');
-    opts.onDownloadEnd?.(fallbackStatus);
-    return fallbackStatus;
+    return finishDownload(record, fallbackStatus);
   }
-  recordUpdateEvent(`verify ok ${update.version}`);
+
+  // Restart resume: a download that reached 100% in a previous run is
+  // already on disk. Hash it and install from it when it matches; a
+  // mismatched file is discarded and the download runs fresh. The hash is
+  // computed over the file on disk, never trusted from a stored value, so
+  // a file corrupted by the pre-v0.1.34 double download can only be
+  // discarded, never installed.
+  const cached = await tryCachedApk(installer, fileName);
+  let downloaded: { path: string; sha256: string; bytes: number };
+  if (cached && cached.sha256.toLowerCase() === expected.toLowerCase()) {
+    recordUpdateEvent(`verify ok ${update.version} (cached)`);
+    downloaded = cached;
+  } else {
+    if (cached) {
+      recordUpdateEvent(`cached apk discarded ${update.version}`);
+      await installer.deleteFile(cached.path).catch(() => {});
+    }
+    const fresh = await downloadFreshApk(installer, downloadUrl, fileName, update, opts, record);
+    if (fresh === null) return finishDownload(record, 'failed');
+    if (fresh.sha256.toLowerCase() !== expected.toLowerCase()) {
+      await installer.deleteFile(fresh.path).catch(() => {});
+      recordUpdateEvent(`verify failed mismatch`);
+      dialog.toast(t('settings.updateVerifyFailed'));
+      const fallbackStatus = await openBrowserFallback(update.releaseUrl, 'verify-failed');
+      return finishDownload(record, fallbackStatus);
+    }
+    recordUpdateEvent(`verify ok ${update.version}`);
+    downloaded = fresh;
+  }
 
   try {
     await installer.installApk(downloaded.path);
@@ -304,13 +452,130 @@ export const startUpdateDownload = async (
     // Never a dead button: if the install intent cannot fire (for
     // example on a pre-Android 8 device, where the install intent action
     // does not resolve), fall back to the browser download instead of
-    // leaving the user with a toast and no way forward.
+    // leaving the user with a toast and no way forward. v0.1.34: this
+    // path now ends the download, so the Settings row cannot sit on
+    // "downloading" after a failed intent.
     recordUpdateEvent(`install failed intent`);
-    return openBrowserFallback(downloadUrl, 'install-intent-failed');
+    const fallbackStatus = await openBrowserFallback(downloadUrl, 'install-intent-failed');
+    return finishDownload(record, fallbackStatus);
   }
   recordUpdateEvent(`install intent fired ${update.version}`);
-  opts.onDownloadEnd?.('installed');
-  return 'installed';
+  return finishDownload(record, 'installed');
+};
+
+/** Hash a cached APK from a previous run, when the native module supports
+ *  it. Any failure means "no usable cache": the download runs fresh. */
+const tryCachedApk = async (
+  installer: InstallerModule,
+  fileName: string,
+): Promise<{ path: string; sha256: string; bytes: number } | null> => {
+  if (typeof installer.hashCachedApk !== 'function') return null;
+  try {
+    const cached = await installer.hashCachedApk(fileName);
+    if (!cached) return null;
+    if (typeof cached.path !== 'string' || typeof cached.sha256 !== 'string') return null;
+    if (!(cached.bytes > 0)) return null;
+    return cached;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Download the APK with watchdogs. Returns the downloaded file, or null
+ * when the download failed: the reason is already logged and toasted, and
+ * the caller ends the download with 'failed'. The native promise is raced
+ * against a watchdog promise, so a download that never settles (the
+ * v0.1.32 failure: 100% progress, no resolution, no rejection) fails
+ * visibly instead of hanging the updater forever.
+ */
+const downloadFreshApk = async (
+  installer: InstallerModule,
+  downloadUrl: string,
+  fileName: string,
+  update: UpdateInfo,
+  opts: DownloadOptions,
+  record: ActiveDownload,
+): Promise<{ path: string; sha256: string; bytes: number } | null> => {
+  const t = defaultTranslator().t;
+  const stallTimeoutMs = opts.stallTimeoutMs ?? DOWNLOAD_STALL_TIMEOUT_MS;
+  const settleTimeoutMs = opts.settleTimeoutMs ?? DOWNLOAD_SETTLE_TIMEOUT_MS;
+  dialog.toast(t('settings.updateDownloading'));
+  recordUpdateEvent(`download started ${update.version}`);
+  // Progress milestones only (0, 25, 50, 75, 100): per-chunk fractions
+  // would flood the log, but a download with no milestone at all must
+  // still be visible as started-and-stalled, not silent.
+  let lastMilestone = -1;
+  let watchdogReject: (error: DownloadStallError) => void = () => {};
+  const watchdogPromise = new Promise<never>((_resolve, reject) => {
+    watchdogReject = reject;
+  });
+  const armStallTimer = (): void => {
+    if (record.stallTimer !== undefined) clearTimeout(record.stallTimer);
+    record.stallTimer = setTimeout(() => {
+      if (record.cancelled || record.ended) return;
+      recordUpdateEvent(`download stalled ${update.version} at ${lastMilestone}%`);
+      watchdogReject(new DownloadStallError('stall'));
+    }, stallTimeoutMs);
+  };
+  const armSettleTimer = (): void => {
+    if (record.settleTimer !== undefined) return;
+    record.settleTimer = setTimeout(() => {
+      if (record.cancelled || record.ended) return;
+      recordUpdateEvent(`download stuck after 100% ${update.version}`);
+      watchdogReject(new DownloadStallError('settle'));
+    }, settleTimeoutMs);
+  };
+  const clearWatchdogTimers = (): void => {
+    if (record.stallTimer !== undefined) clearTimeout(record.stallTimer);
+    if (record.settleTimer !== undefined) clearTimeout(record.settleTimer);
+    record.stallTimer = undefined;
+    record.settleTimer = undefined;
+  };
+  const reportProgress = (fraction: number | null): void => {
+    reportProgressToSubscribers(record, fraction);
+    if (fraction === null) return;
+    const milestone = fraction >= 1 ? 100 : Math.floor(fraction * 4) * 25;
+    if (milestone > lastMilestone) {
+      lastMilestone = milestone;
+      recordUpdateEvent(`download progress ${milestone}`);
+    }
+    armStallTimer();
+    if (milestone >= 100) armSettleTimer();
+  };
+  reportProgress(0);
+  const subscription = subscribeProgress(installer, reportProgress);
+  // A throwing remove must never kill the continuation (v0.1.34
+  // hardening: remove used to sit outside any try/catch, so a throw
+  // there would have skipped verification with no log line).
+  const removeSubscription = (): void => {
+    if (!subscription) return;
+    try {
+      subscription.remove();
+    } catch {
+      recordUpdateEvent(`download listener remove failed ${update.version}`);
+    }
+  };
+  try {
+    const downloaded = await Promise.race([
+      installer.downloadApk(downloadUrl, fileName),
+      watchdogPromise,
+    ]);
+    clearWatchdogTimers();
+    removeSubscription();
+    return downloaded;
+  } catch (error: unknown) {
+    clearWatchdogTimers();
+    removeSubscription();
+    if (error instanceof DownloadStallError) {
+      // The reason is already on the log line the timer wrote.
+      dialog.toast(t('settings.updateDownloadFailed'));
+      return null;
+    }
+    recordUpdateEvent(`download failed ${classifyDownloadError(error)}`);
+    dialog.toast(t('settings.updateDownloadFailed'));
+    return null;
+  }
 };
 
 /**
