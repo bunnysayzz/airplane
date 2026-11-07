@@ -408,7 +408,6 @@ describe('HybridTransport', () => {
     h.nostr.publishWithAck = async () => ({
       ok: ['wss://relay.test'],
       rejected: [],
-      rejectionReasons: [],
       timedOut: false,
       cancelled: false,
     });
@@ -444,7 +443,6 @@ describe('HybridTransport', () => {
     h.nostr.publishWithAck = async () => ({
       ok: [],
       rejected: [],
-      rejectionReasons: [],
       timedOut: true,
       cancelled: false,
     });
@@ -753,3 +751,59 @@ describe('HybridTransport lifecycle', () => {
   });
 });
 
+
+describe('A1 gate: internet off, post each way over BLE (v0.1.35)', () => {
+  test('two phones with no relays exchange posts both ways over BLE', async () => {
+    // Two HybridTransports with cross-wired fake BLE ports: what A
+    // sends, B receives, and vice versa. No relays configured: the
+    // internet is off, so the router must fall through to mesh at
+    // once, with no readiness gate and no health plan in the way.
+    // This is the test-level form of the A1 device gate: a post each
+    // way over Bluetooth within seconds, internet off on both phones.
+    const portA = new FakeBlePort();
+    const portB = new FakeBlePort();
+    const hA = new HybridTransport(new BleTransport(portA), { relays: [] });
+    const hB = new HybridTransport(new BleTransport(portB), { relays: [] });
+    await hA.start();
+    await hB.start();
+    const receivedA: SignedEvent[] = [];
+    const receivedB: SignedEvent[] = [];
+    hA.onPost((e, source) => {
+      if (source === 'ble') receivedA.push(e);
+    });
+    hB.onPost((e, source) => {
+      if (source === 'ble') receivedB.push(e);
+    });
+    const forward = (from: FakeBlePort, to: FakeBlePort, peerId: string): void => {
+      for (const { bytes } of from.sent.splice(0)) to.inject(peerId, bytes);
+    };
+    const postA = makePost('A1 from A');
+    const resA = await hA.publish(postA, ['phoneB']);
+    expect(resA.transport).toBe('mesh');
+    expect(resA.blePeers).toBe(1);
+    forward(portA, portB, 'phoneA');
+    expect(receivedB.map((e) => toHex(e.id))).toContain(toHex(postA.id));
+    const postB = makePost('A1 from B');
+    const resB = await hB.publish(postB, ['phoneA']);
+    expect(resB.transport).toBe('mesh');
+    expect(resB.blePeers).toBe(1);
+    forward(portB, portA, 'phoneB');
+    expect(receivedA.map((e) => toHex(e.id))).toContain(toHex(postB.id));
+    await hA.stop();
+    await hB.stop();
+  });
+
+  test('a publish with connected peers never waits on a readiness gate', async () => {
+    // Regression test for the v0.1.31 ready gate: the publish path
+    // must not consult any readiness state. A peer that is connected
+    // is a publish target, full stop.
+    const port = new FakeBlePort();
+    const h = new HybridTransport(new BleTransport(port), { relays: [] });
+    await h.start();
+    const res = await h.publish(makePost('no gate'), ['phoneB']);
+    expect(res.transport).toBe('mesh');
+    expect(res.blePeers).toBe(1);
+    expect(port.sent.length).toBeGreaterThan(0);
+    await h.stop();
+  });
+});

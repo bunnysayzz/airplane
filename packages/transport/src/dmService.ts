@@ -265,19 +265,6 @@ export class MemoryDmStore implements DmStorePort {
 export interface DmRelayPublishResult {
   accepted: boolean;
   rejected: boolean;
-  /**
-   * The relay's own reason (NIP-01 OK element 3) for a rejection,
-   * in the relay's words. Empty when no relay rejected with a reason.
-   * Before v0.1.27 this was dropped at the socket handler, so every
-   * rejection read the same and a "duplicate:" looked like a failure.
-   */
-  reason?: string;
-  /**
-   * True when a relay rejection was a "duplicate:": the relay already
-   * holds the envelope. accepted is true in that case; this flag is
-   * what tells the traffic line it was a duplicate, not a fresh OK.
-   */
-  duplicate?: boolean;
 }
 
 /** Options for a relay subscription. `backfillSinceSec` overrides the
@@ -522,16 +509,6 @@ export class DmService {
     return () => {
       this.listeners.delete(cb);
     };
-  }
-
-  /**
-   * Peer hexes with a conversation row. Used by the app layer for
-   * author-targeted relay catch-up: DM-thread peers are authors worth
-   * asking open relays about after a replay miss.
-   */
-  async listConversationPeers(): Promise<string[]> {
-    const convs = await this.store.listConversations();
-    return convs.map((c) => c.peerHex);
   }
 
   private emit(): void {
@@ -972,29 +949,10 @@ export class DmService {
     if (relayRes.rejected) {
       // A relay judgement burns one re-publish and waits a fresh
       // window: retrying the same rejected envelope at once helps no
-      // one, and the cap still bounds the total attempts. The burn
-      // gets its own line with the relay's reason: a silent burn was
-      // invisible in the log, so a DM could reach Failed with no
-      // re-publish line explaining why. A "duplicate:" never reaches
-      // here: the relay port accepts it as stored.
+      // one, and the cap still bounds the total attempts.
       m.relayRepublishAttempts = (m.relayRepublishAttempts ?? 0) + 1;
       m.nextAttemptAtMs = now + DM_RELAYED_ACK_WINDOW_MS;
       await this.store.updateMessage(m);
-      this.emitDm({
-        kind: 'traffic',
-        direction: 'out',
-        peerHex: m.peerHex,
-        state: 'relayed',
-        sizeBytes: dmEnvelopeBytes(envelope),
-        seq: m.seq,
-        attempts: [
-          {
-            transport: 'relay',
-            outcome: 'failed',
-            detail: `relay rejected re-publish${relayRes.reason ? `: ${relayRes.reason}` : ''}`,
-          },
-        ],
-      });
       return true;
     }
     // Unreachable: no relay judgement, so the cap is not burned. The
@@ -1082,13 +1040,7 @@ export class DmService {
         sizeBytes: dmEnvelopeBytes(envelope),
         seq: m.seq,
         attempts: [
-          {
-            transport: 'relay',
-            outcome: 'ok',
-            detail: relayRes.duplicate
-              ? `relay duplicate${relayRes.reason ? `: ${relayRes.reason}` : ''}`
-              : 'relay OK',
-          },
+          { transport: 'relay', outcome: 'ok', detail: 'relay OK' },
           this.mesh
             ? bleThrew
               ? { transport: 'ble', outcome: 'failed', detail: 'BLE send failed' }
@@ -1128,9 +1080,7 @@ export class DmService {
           {
             transport: 'relay',
             outcome: 'failed',
-            detail: relayRes.rejected
-              ? `relay rejected${relayRes.reason ? `: ${relayRes.reason}` : ''}`
-              : 'relay unreachable',
+            detail: relayRes.rejected ? 'relay rejected' : 'relay unreachable',
           },
           { transport: 'ble', outcome: 'ok', detail: `handed to radio for ${meshPeers} peers` },
         ],
@@ -1171,9 +1121,7 @@ export class DmService {
           {
             transport: 'relay',
             outcome: 'failed',
-            detail: relayRes.rejected
-              ? `relay rejected${relayRes.reason ? `: ${relayRes.reason}` : ''}`
-              : 'relay unreachable',
+            detail: relayRes.rejected ? 'relay rejected' : 'relay unreachable',
           },
           !this.mesh
             ? { transport: 'ble', outcome: 'skipped', detail: 'no BLE port' }

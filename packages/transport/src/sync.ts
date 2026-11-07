@@ -70,29 +70,15 @@ export class WorldSync {
   private readonly ackDeadlineMs: number;
   private readonly opts: WorldSyncOpts;
   /**
-   * Grace re-push set: event ids this engine pushed on the previous
-   * pass. Confirmation is not delivery: a relay OK followed by a
-   * query hit confirms the event and WorldSync stops pushing it, but
-   * the receiver may never have fetched it (the .26 window: B posts
-   * 1 and 3 relay-OK'd, confirmed, never received). So every pushed
-   * id gets exactly one extra push on the next pass, whether or not
-   * it was confirmed in between. An id pushed from grace is not
-   * re-added, so the grace is one extra push, never a loop. An id
-   * still unconfirmed is pushed from the unconfirmed list anyway and
-   * re-enters grace from there. In-memory only: a restart loses the
-   * set, and the next pass simply starts a fresh one.
-   */
-  private graceIds = new Set<Hex64>();
-  /**
    * Last sync push time per event id (epoch ms). A pass used to re-push
    * the whole unconfirmed backlog (relay-win pass, health pass, 60 s
    * tick), so one post was pushed 3 times in 1.3 s in the v0.1.31
    * window while confirmation still awaited a query round trip. An id
    * pushed within the throttle window is skipped on later passes; the
    * first push after a blackout is still immediate (never-pushed ids
-   * are not throttled). In-memory only, like graceIds: a restart loses
-   * the map and the next pass starts fresh. Pruned each pass to the
-   * throttle window, so it stays bounded by one minute of pushes.
+   * are not throttled). In-memory only: a restart loses the map and
+   * the next pass starts fresh. Pruned each pass to the throttle
+   * window, so it stays bounded by one minute of pushes.
    */
   private lastPushedAtMs = new Map<Hex64, number>();
 
@@ -133,19 +119,10 @@ export class WorldSync {
     }
     const unconfirmed = (await this.store.getUnconfirmed()).slice(0, SYNC_MAX_PER_PASS);
     // Per-event push throttle: an unconfirmed id pushed within the
-    // last minute is skipped on this pass (see lastPushedAtMs). Grace
-    // pushes of just-confirmed events are unaffected.
+    // last minute is skipped on this pass (see lastPushedAtMs).
     const pushableUnconfirmed = unconfirmed.filter(
       (id) => nowMs - (this.lastPushedAtMs.get(id) ?? 0) >= SYNC_PUSH_MIN_INTERVAL_MS,
     );
-    // Grace tail: ids pushed on the previous pass, confirmed or not,
-    // get one extra push this pass (see graceIds). They fill the pass
-    // only up to the cap, after the unconfirmed backlog, and an id
-    // already in the unconfirmed list is pushed once, not twice.
-    const grace = [...this.graceIds]
-      .filter((id) => !unconfirmed.includes(id))
-      .slice(0, Math.max(0, SYNC_MAX_PER_PASS - pushableUnconfirmed.length));
-    const pushIds = [...pushableUnconfirmed, ...grace];
 
     // 1. Push each unconfirmed event to relays. Store reads for a page
     //    run concurrently (batched), and pushes for a page run
@@ -153,16 +130,11 @@ export class WorldSync {
     //    flood the store or the relays with the whole backlog at once.
     const pushedIds: Hex64[] = [];
     const pushedEvents: SignedEvent[] = [];
-    const pushedFromUnconfirmed: Hex64[] = [];
-    for (let i = 0; i < pushIds.length; i += SYNC_PAGE_SIZE) {
-      const page = pushIds.slice(i, i + SYNC_PAGE_SIZE);
+    for (let i = 0; i < pushableUnconfirmed.length; i += SYNC_PAGE_SIZE) {
+      const page = pushableUnconfirmed.slice(i, i + SYNC_PAGE_SIZE);
       const events = await Promise.all(
         page.map(async (idHex) => {
-          // Grace ids bypass the confirmed check on purpose: they are
-          // pushed BECAUSE they were just confirmed, to give receivers
-          // one more chance to fetch them. An unconfirmed-list id that
-          // confirmed since the list was read is skipped as before.
-          if (!grace.includes(idHex) && (await this.store.isWorldConfirmed(idHex))) {
+          if (await this.store.isWorldConfirmed(idHex)) {
             report.skipped.push(idHex);
             return null;
           }
@@ -191,23 +163,9 @@ export class WorldSync {
         // Record the push time for the throttle: a later pass within
         // the window skips this id while it stays unconfirmed.
         this.lastPushedAtMs.set(row.idHex, nowMs);
-        // Only ids pushed from the unconfirmed list re-enter grace:
-        // an id pushed from grace had its one extra push already.
-        if (unconfirmed.includes(row.idHex)) pushedFromUnconfirmed.push(row.idHex);
       }
     }
     report.pushed = pushedIds;
-    // Grace for the next pass is exactly the ids this pass pushed
-    // from the unconfirmed list. Grace ids that were not reached (the
-    // pass capped before them) keep their one extra push: they stay
-    // in the set, ahead of the new entries. Throttled unconfirmed ids
-    // keep their grace slot too: they were pushed on an earlier pass
-    // and are still owed their one extra push once they confirm.
-    // Without this they would drop out of the grace set while
-    // throttled and never get the extra push after confirming.
-    const unpushedGrace = grace.filter((id) => !pushedIds.includes(id));
-    const throttled = unconfirmed.filter((id) => !pushableUnconfirmed.includes(id));
-    this.graceIds = new Set([...unpushedGrace, ...pushedFromUnconfirmed, ...throttled].slice(0, SYNC_MAX_PER_PASS));
 
     // The push phase is done: report the pushed events now, before
     // the query phase, so the app can log each re-push as its own

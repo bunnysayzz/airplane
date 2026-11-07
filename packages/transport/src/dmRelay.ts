@@ -48,7 +48,6 @@
 
 import { schnorr } from '@noble/curves/secp256k1.js';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { isDuplicateRejection } from './balancer';
 import { dmFromHex, dmToHex, type DmEnvelope } from './dm';
 import type { DmRelayPort, DmRelayPublishResult, DmRelaySubscribeOpts } from './dmService';
 import { DEFAULT_RELAYS, type WebSocketLike } from './nostr';
@@ -184,8 +183,6 @@ interface PublishWaiter {
   resolve: (r: DmRelayPublishResult) => void;
   /** Per-relay outcome once settled: 'ok', 'rejected', or 'failed'. */
   settled: Map<string, 'ok' | 'rejected' | 'failed'>;
-  /** The relay's own rejection reason per URL (NIP-01 OK element 3). */
-  rejectionReasons: Map<string, string>;
   done: boolean;
 }
 
@@ -376,20 +373,13 @@ export class WsDmRelay implements DmRelayPort {
           resolve(r);
         },
         settled: new Map(),
-        rejectionReasons: new Map(),
         done: false,
       };
       this.publishWaiters.add(waiter);
-      const firstReason = (): string | undefined => {
-        for (const reason of waiter.rejectionReasons.values()) {
-          if (reason) return reason;
-        }
-        return undefined;
-      };
       const timer = setTimeout(() => {
         if (waiter.done) return;
         const rejected = [...waiter.settled.values()].some(v => v === 'rejected');
-        waiter.resolve({ accepted: false, rejected, reason: firstReason() });
+        waiter.resolve({ accepted: false, rejected });
       }, this.publishTimeoutMs);
       const settle = (url: string, outcome: 'ok' | 'rejected' | 'failed'): void => {
         if (waiter.done) return;
@@ -401,7 +391,7 @@ export class WsDmRelay implements DmRelayPort {
         }
         if (waiter.settled.size >= this.relays.length) {
           const rejected = [...waiter.settled.values()].some(v => v === 'rejected');
-          waiter.resolve({ accepted: false, rejected, reason: firstReason() });
+          waiter.resolve({ accepted: false, rejected });
         }
       };
       if (this.relays.length === 0) {
@@ -524,26 +514,15 @@ export class WsDmRelay implements DmRelayPort {
         if (data[0] === 'OK' && typeof data[1] === 'string') {
           for (const waiter of [...this.publishWaiters]) {
             if (waiter.eventId !== data[1]) continue;
-            // The relay's own reason is OK element 3: keep it, so a
-            // rejection is diagnosable instead of generic.
-            const reason = typeof data[3] === 'string' ? data[3].slice(0, 200) : '';
             if (data[2] === true) {
               waiter.settled.set(url, 'ok');
               waiter.resolve({ accepted: true, rejected: false });
-            } else if (isDuplicateRejection(reason)) {
-              // "duplicate:" means the relay already holds the envelope:
-              // stored, not failed. Accept at once like a fresh OK; the
-              // recipient fetches it the same way. Before v0.1.27 this
-              // burned a re-publish attempt toward Failed.
-              waiter.settled.set(url, 'ok');
-              waiter.resolve({ accepted: true, rejected: false, reason, duplicate: true });
             } else {
               // Explicit rejection: settle this relay at once. The old
               // code ignored OK=false and burned the full timeout here.
               waiter.settled.set(url, 'rejected');
-              waiter.rejectionReasons.set(url, reason);
               if (waiter.settled.size >= this.relays.length) {
-                waiter.resolve({ accepted: false, rejected: true, reason });
+                waiter.resolve({ accepted: false, rejected: true });
               }
             }
           }

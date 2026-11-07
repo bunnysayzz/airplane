@@ -30,13 +30,6 @@
 // written (kept for runtimes where peripheral write events do arrive),
 // but on current builds the peripheral side never learns the central
 // identity from it, so no send path may depend on inbound writes.
-// v0.1.33: the hello is ALSO notified on our own TX after the central
-// handshake completes (see startHelloNotify). The peer receives it
-// through its central subscription (codegen emitter, proven working),
-// so the ready gate no longer depends on the dead write channel.
-// A settle fallback covers old-version peers that never notify hellos:
-// a central handshake with no hello inside 5 s still becomes ready,
-// logged as via-settle so the next log can tell the paths apart.
 //
 // Port-layer framing (below the protocol fragment layer): every send() frame
 // is wrapped as u16be(len) || kind || payload and chunked to (link MTU - 3)
@@ -213,8 +206,6 @@ interface PeerConn {
   inbound: DatagramReassembler;
   /** True while an ATT chunk arrived without completing a datagram. */
   partialOpen: boolean;
-  /** Epoch ms this conn registered (drives the stalled-provisional line). */
-  connectedAtMs: number;
 }
 
 const PROVISIONAL_TAG_PREFIX = 'tag:';
@@ -290,40 +281,6 @@ const TRANSIENT_CONNECT_FAILURES: RegExp[] = [
 ];
 /** Settle delay before the IDENT re-read after fresh discovery. */
 export const IDENT_RETRY_SETTLE_MS = 300;
-/**
- * Settle after a peripheral hello before a peer counts as ready
- * without a completed central handshake: the peer writes hello and
- * then subscribes to our TX, and the subscribe follows within
- * milliseconds, but a send in that gap notifies with no subscriber
- * and is lost while counting as sent (v0.1.30 B drain at 03:28:05).
- * The 2 s mesh poll normally absorbs this; the settle covers a live
- * publish that lands in the same instant as the hello.
- */
-export const READY_SETTLE_MS = 300;
-/**
- * Settle fallback for old-version peers (v0.1.33): a central handshake
- * that completed without any hello arriving within this window makes
- * the peer ready anyway, logged as via-settle. .30/.31/.32 phones
- * never notify hellos, so the hello condition is unreachable for
- * them; without the fallback a mixed network would never use BLE.
- * The strict path (hello over notify) is what .33 to .33 uses. The
- * window assumes the peer's crossed central link completes inside
- * it, which held in every device run so far (the .32 crossed pair
- * was 0.6 s apart); a settle that fires too early is visible in the
- * log, and the drain rows stay queued until World-confirmed, so the
- * loss is bounded to a redundant BLE attempt, not a lost post.
- */
-export const HELLO_SETTLE_MS = 5_000;
-/** Hello-notify attempts per central handshake: first plus retries. */
-export const HELLO_NOTIFY_MAX_ATTEMPTS = 4;
-/** Delays before hello-notify retries 2, 3, 4 (cumulative 0.5 s, 2 s, 5 s). */
-export const HELLO_NOTIFY_RETRY_DELAYS_MS = [500, 1_500, 3_000];
-/**
- * Smallest ATT payload (MTU 23 minus 3-byte header): the hello-notify
- * is broadcast to every subscribed central, and a subscriber may not
- * have negotiated a larger MTU yet, so chunk small enough to fit any link.
- */
-export const HELLO_NOTIFY_CHUNK_SIZE = 20;
 
 /** Discovered peers older than this are stale (pruned on discover and before connect). */
 export const DISCOVERED_STALE_MS = 60_000;
@@ -395,15 +352,7 @@ export class GattBlePort implements TransportPort {
   private advertisePromise: Promise<void> | null = null;
   /** bleIds with a handshake in flight: reserved before the first await, freed in finally. */
   private readonly pendingConnects = new Set<string>();
-  /**
-   * Tags (8 hex) with a central handshake in flight. The per-bleId set
-   * above cannot dedup a peer seen under a second BLE address (RPA
-   * rotation): two central connects then race for one peer, and the
-   * second discovery can return an incomplete service table, which is
-   * the intermittent IDENT not-found in the field (v0.1.31: two
-   * attempts 9 s apart for one tag, one succeeding, one failing).
-   * A registered central conn for the tag counts the same way.
-   */
+  /** Tags with a central handshake in flight: reserved before the first await, freed in finally. */
   private readonly pendingCentralTags = new Set<string>();
   /** One scheduled auto-connect retry per bleId (single retry, about 2s). */
   private readonly autoConnectRetries = new Map<string, ReturnType<typeof setTimeout>>();
@@ -411,45 +360,6 @@ export class GattBlePort implements TransportPort {
   private readonly connectCooldownUntil = new Map<string, number>();
   /** Consecutive auto-connect failures per bleId (drives the backoff). */
   private readonly connectCooldownFailures = new Map<string, number>();
-  /**
-   * Send readiness per peerId (full hex). `central` means our central
-   * handshake to the peer completed (we subscribed to its TX);
-   * `peripheral` means the peer's hello arrived on our peripheral
-   * side (it connected to us and subscribes to our TX next).
-   * A peer is ready to receive when its hello arrived AND
-   * (our central completed OR the settle elapsed): the hello proves
-   * the peer is connecting to us, the settle covers the hello to
-   * subscribe gap. Kept apart from the conns map because the
-   * peripheral conn entry is dropped when a central conn for the same
-   * peer registers, while the peer stays subscribed to our TX.
-   * v0.1.33 adds the settle fallback: a central handshake with no
-   * hello inside HELLO_SETTLE_MS is ready anyway (old-version peers
-   * never notify hellos). `centralReadyAtMs` is the clock for that
-   * fallback; `readyLogged` keeps the ready line to one per episode.
-   */
-  private readonly peerReady = new Map<
-    string,
-    {
-      central: boolean;
-      peripheral: boolean;
-      peripheralHelloAtMs: number;
-      centralReadyAtMs: number;
-      readyLogged: boolean;
-    }
-  >();
-  /** Hello-notify retry state per central bleId: attempt count + pending timer. */
-  private readonly helloNotifyTimers = new Map<
-    string,
-    { attempt: number; timer: ReturnType<typeof setTimeout> | null }
-  >();
-  /** Provisional conn keys already logged as waiting for a hello (one line per episode). */
-  private readonly stalledProvisionalLogged = new Set<string>();
-  /**
-   * Serialized TX notify chain: notifies from send() and the hello
-   * ladder must not interleave chunks on the air, or the receiver
-   * reassembles garbage. Every peripheral.notify goes through here.
-   */
-  private notifyChain: Promise<void> = Promise.resolve();
   private peripheral: PeripheralAdapter | null = null;
   private readonly peripheralUnsubs: (() => void)[] = [];
   private centralUnsubs: (() => void)[] = [];
@@ -582,19 +492,6 @@ export class GattBlePort implements TransportPort {
     // survive - the GATT client is independent of our advertiser.
     for (const [key, conn] of [...this.conns]) {
       if (conn.role === 'peripheral') this.dropConn(key);
-    }
-    // Our TX is gone with the advertiser: nobody can be subscribed to
-    // it anymore, so every peer's peripheral-side readiness is void
-    // until it re-hellos after the next advertise. Central readiness
-    // survives: we can still receive from peers we subscribed to.
-    // The settle clock restarts with the advertiser: a settle computed
-    // from the old central handshake would mark the peer ready
-    // immediately after the next advertise, before any subscribe.
-    // The ready line resets too, so the next readiness is logged.
-    for (const entry of this.peerReady.values()) {
-      entry.peripheral = false;
-      entry.centralReadyAtMs = Date.now();
-      entry.readyLogged = false;
     }
   }
 
@@ -899,16 +796,16 @@ export class GattBlePort implements TransportPort {
     if (this.bleIndex.has(bleId)) return;
     if (this.pendingConnects.has(bleId)) return;
     if (!this.ownPeerId) throw new Error('ble: advertise() must run before connect');
-    // Per-tag dedup (see pendingCentralTags): a second BLE address for
-    // the same peer must not start a second central handshake while
-    // one is in flight or a central conn already covers the tag. A
-    // peripheral conn does not suppress it: the central link carries
-    // our TX subscription, which the peripheral link cannot.
+    // Per-tag dedup for in-flight handshakes only (see
+    // pendingCentralTags): a second BLE address for the same peer must
+    // not start a second central handshake while one is in flight. A
+    // registered connection does NOT suppress it: the peer's address
+    // can rotate, and a rotated address must reconnect and
+    // re-subscribe. A peripheral conn does not suppress it either:
+    // the central link carries our TX subscription, which the
+    // peripheral link cannot.
     const tagHex = toHex(tag);
     if (this.pendingCentralTags.has(tagHex)) return;
-    for (const conn of this.conns.values()) {
-      if (conn.role === 'central' && conn.tag && toHex(conn.tag) === tagHex) return;
-    }
     // The peer-limit check counts reservations, not just registered conns:
     // two handshakes that both passed a conns-only check could together
     // exceed the limit. The reservation is made before the first await.
@@ -941,27 +838,20 @@ export class GattBlePort implements TransportPort {
       } catch {
         // keep default 23
       }
-      // IDENT read: the peer identity for the central link. The read
-      // is flaky on Android: right after service discovery, some stacks
-      // report the characteristic as not found even though the service
-      // is there, and the retry then fails identically because Android
-      // caches the service table per device and a second
-      // discoverServices returns the cached table. On a not-found error
-      // only, clear the native GATT cache (refreshCache), re-run
-      // discovery, wait a brief settle so the peer GATT table is
-      // actually ready, and read once more. One line per retry episode
-      // records the stage outcome with timings, so the next device run
-      // can tell a stale cache apart from a genuinely missing
-      // characteristic. When the second read also fails, the link is
-      // NOT torn down: it is kept as a provisional tag-keyed conn and
-      // the inbound hello resolves the identity (the hello carries the
-      // full pubkey), so a flaky IDENT read no longer leaves the peer
-      // unready. The old code threw "ident retry failed" here, which
-      // the caller logged as a connect failure, armed the cooldown,
-      // and disconnected the native link (v0.1.31: three such failures
-      // in 4.5 minutes, BLE carrying nothing all window).
+      // IDENT read race: right after service discovery, some Android
+      // stacks report the characteristic as not found even though the
+      // service is there, and the peer then connects fine moments
+      // later. On a not-found error only, clear the native GATT cache
+      // (refreshCache), re-run discovery, wait a brief settle so the
+      // peer GATT table is actually ready, and read once more before
+      // giving up. One line per retry episode records the stage outcome
+      // with timings, so the next device run can tell a stale cache
+      // apart from a genuinely missing characteristic. When the second
+      // read also fails, the thrown message carries an ident retry
+      // failed marker, so the caller's single failure line still shows
+      // the retry happened and lost.
       const identStartMs = Date.now();
-      let identRaw: Uint8Array | null = null;
+      let identRaw: Uint8Array;
       try {
         identRaw = await withBleTimeout(central.read(bleId, MESH_SERVICE_UUID, MESH_IDENT_CHAR_UUID), BLE_TIMEOUT_MS.read, 'ident read');
       } catch (error: unknown) {
@@ -975,61 +865,35 @@ export class GattBlePort implements TransportPort {
           recordServiceEvent(
             `ble ident retry tag ${toHex(tag).slice(0, 8)} refreshCache ${refresh} read2 ok ${Date.now() - identStartMs}ms`,
           );
-        } catch {
+        } catch (retryError: unknown) {
+          const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
           recordServiceEvent(
-            `ble ident retry tag ${toHex(tag).slice(0, 8)} refreshCache ${refresh} read2 not-found ${Date.now() - identStartMs}ms link provisional`,
+            `ble ident retry tag ${toHex(tag).slice(0, 8)} refreshCache ${refresh} read2 not-found ${Date.now() - identStartMs}ms`,
           );
-          // Fall through with identRaw null: provisional path below.
+          throw new Error(`ble: ident retry failed: ${retryMessage}`);
         }
       }
-      let peerId: string | null = null;
-      if (identRaw !== null) {
-        const decoded = new TextDecoder().decode(identRaw);
-        if (!HEX64_RE.test(decoded)) throw new Error('ble: peer IDENT malformed');
-        // Bind the claimed identity to the discovery hint: the IDENT pubkey
-        // must carry the advertised tag, or this is a different peer (or a
-        // spoofed IDENT) and the connect must fail, not register.
-        if (toHex(peerTagOf(fromHex(decoded))) !== toHex(tag)) {
-          throw new Error('ble: peer IDENT does not match advertised tag');
-        }
-        peerId = decoded;
-        recordServiceEvent(
-          `ble ident ok tag ${toHex(tag).slice(0, 8)} ${Date.now() - identStartMs}ms`,
-        );
+      const peerId = new TextDecoder().decode(identRaw);
+      if (!HEX64_RE.test(peerId)) throw new Error('ble: peer IDENT malformed');
+      // Bind the claimed identity to the discovery hint: the IDENT pubkey
+      // must carry the advertised tag, or this is a different peer (or a
+      // spoofed IDENT) and the connect must fail, not register.
+      if (toHex(peerTagOf(fromHex(peerId))) !== toHex(tag)) {
+        throw new Error('ble: peer IDENT does not match advertised tag');
       }
       // Register before the hello so any inbound traffic is attributed.
-      // Keyed by the full peerId when IDENT resolved it; otherwise by
-      // the provisional tag key, so send()/disconnect() resolve by
-      // peerId once the hello rekeys it (see promoteProvisionalCentral).
-      // A provisional peer counts in peerCount but not in
-      // connectedPeerIds, and send() still refuses it until the hello
-      // resolves the identity.
-      if (peerId !== null) {
-        this.registerConn(peerId, {
-          role: 'central',
-          bleId,
-          tag,
-          peerId,
-          mtu,
-          inbound: new DatagramReassembler(),
-          partialOpen: false,
-          connectedAtMs: Date.now(),
-        });
-        registeredKey = peerId;
-      } else {
-        const provisionalKey = provisionalTagKey(tag);
-        this.registerConn(provisionalKey, {
-          role: 'central',
-          bleId,
-          tag,
-          peerId: null,
-          mtu,
-          inbound: new DatagramReassembler(),
-          partialOpen: false,
-          connectedAtMs: Date.now(),
-        });
-        registeredKey = provisionalKey;
-      }
+      // Keyed by the full peerId (known from IDENT) - not the provisional
+      // tag key - so send()/disconnect() resolve by peerId.
+      this.registerConn(peerId, {
+        role: 'central',
+        bleId,
+        tag,
+        peerId,
+        mtu,
+        inbound: new DatagramReassembler(),
+        partialOpen: false,
+      });
+      registeredKey = peerId;
       // Announce ourselves: the peripheral side learns our identity + MTU.
       const hello = encodeHello(fromHex(ownPeerId), mtu);
       for (const chunk of chunkBytes(hello, mtu - ATT_OVERHEAD)) {
@@ -1037,37 +901,19 @@ export class GattBlePort implements TransportPort {
       }
       await withBleTimeout(central.startNotification(bleId, MESH_SERVICE_UUID, MESH_TX_CHAR_UUID), BLE_TIMEOUT_MS.startNotification, 'startNotification');
       // Subscribed to the peer TX characteristic: CCCD is on for this link.
-      // Identified peers only: a provisional peer is announced when its
-      // hello rekeys it (see dispatchDatagram), not here.
-      if (peerId !== null) {
-        recordPeerConnected(peerId, mtu, true);
-        this.markPeerCentralReady(peerId);
-        // Surface the resolved identity through the scan channel, matching
-        // the peripheral-side hello path: subscribers see the full peerId,
-        // not just the provisional tag key. (Previously the central side
-        // never re-fired, so the scan channel only ever resolved identities
-        // learned via inbound hellos.)
-        for (const cb of this.scanSubs) {
-          try {
-            cb({ peerId });
-          } catch {
-            // subscriber errors must not break connect
-          }
+      recordPeerConnected(peerId, mtu, true);
+      // Surface the resolved identity through the scan channel, matching
+      // the peripheral-side hello path: subscribers see the full peerId,
+      // not just the provisional tag key. (Previously the central side
+      // never re-fired, so the scan channel only ever resolved identities
+      // learned via inbound hellos.)
+      for (const cb of this.scanSubs) {
+        try {
+          cb({ peerId });
+        } catch {
+          // subscriber errors must not break connect
         }
       }
-      // Hello over notify (v0.1.33): the central write above reaches
-      // the peer JS layer only through the peripheral library's legacy
-      // bridge emitter, which does not deliver on new-arch builds, so
-      // the peer never learns our identity from it and the ready gate
-      // never opens (v0.1.32: links formed, zero hellos, zero BLE
-      // traffic). Notify the same hello on our own TX: the peer
-      // receives it through its central subscription (codegen emitter,
-      // proven working) and its HELLO path marks us ready. The ladder
-      // retries while the peer is connected-but-not-ready, covering
-      // the crossed-link race where the peer has not subscribed to
-      // our TX yet. Provisional peers get it too: their hello is what
-      // promotes the link, and the notify is a broadcast anyway.
-      this.startHelloNotify(bleId, peerId !== null ? peerId.slice(0, 8) : toHex(tag).slice(0, 8));
     } catch (err) {
       // Never tear down another attempt's live link: two central
       // connects for one peer can share a bleId, and the failed
@@ -1106,133 +952,6 @@ export class GattBlePort implements TransportPort {
     }
   }
 
-  /**
-   * Promote a provisional central conn to the full peerId when the
-   * peer's hello identifies it. Called from the hello path before the
-   * peripheral conn is rekeyed, so the clash check there drops the
-   * peripheral duplicate instead of the central link that carries our
-   * TX subscription. Marks the central handshake complete: the
-   * subscription to the peer TX was made during connect.
-   */
-  private promoteProvisionalCentral(peerId: string): void {
-    let tag: Uint8Array;
-    try {
-      tag = peerTagOf(fromHex(peerId));
-    } catch {
-      return;
-    }
-    const tagHex = toHex(tag);
-    for (const conn of this.conns.values()) {
-      if (conn.role === 'central' && conn.peerId === null && conn.tag && toHex(conn.tag) === tagHex) {
-        this.rekeyConn(conn, peerId);
-        this.markPeerCentralReady(peerId);
-        return;
-      }
-    }
-  }
-
-  /**
-   * Serialize one TX notify batch onto the shared notify chain, so a
-   * hello retry can never interleave chunks with a frame send (the
-   * receiver reassembles a plain byte stream per link: interleaved
-   * datagrams corrupt each other). The chain survives a failure: a
-   * rejected batch does not wedge later notifies.
-   */
-  private enqueueNotify(work: () => Promise<void>): Promise<void> {
-    const run = this.notifyChain.then(work, work);
-    this.notifyChain = run.then(
-      () => {},
-      () => {},
-    );
-    return run;
-  }
-
-  /**
-   * Start the hello-notify ladder for a central link (v0.1.33). The
-   * first attempt fires at once; retries follow at
-   * HELLO_NOTIFY_RETRY_DELAYS_MS while the peer is connected but
-   * not ready. Keyed by bleId, which is stable across a provisional
-   * promotion (the conn key changes, the bleId does not).
-   */
-  private startHelloNotify(bleId: string, label: string): void {
-    this.clearHelloNotify(bleId);
-    const state = { attempt: 0, timer: null as ReturnType<typeof setTimeout> | null };
-    this.helloNotifyTimers.set(bleId, state);
-    void this.runHelloNotifyAttempt(bleId, label, state);
-  }
-
-  private clearHelloNotify(bleId: string): void {
-    const state = this.helloNotifyTimers.get(bleId);
-    if (!state) return;
-    if (state.timer !== null) clearTimeout(state.timer);
-    this.helloNotifyTimers.delete(bleId);
-  }
-
-  private async runHelloNotifyAttempt(
-    bleId: string,
-    label: string,
-    state: { attempt: number; timer: ReturnType<typeof setTimeout> | null },
-  ): Promise<void> {
-    // Liveness is checked at fire time: the link may have been
-    // promoted (provisional to full id) or dropped since scheduling,
-    // and a stale attempt must not resurrect a dead ladder.
-    const key = this.bleIndex.get(bleId);
-    const conn = key ? this.conns.get(key) : undefined;
-    if (!conn || this.helloNotifyTimers.get(bleId) !== state) return;
-    if (conn.peerId && this.isPeerReady(conn.peerId, Date.now())) {
-      this.helloNotifyTimers.delete(bleId);
-      return;
-    }
-    state.attempt += 1;
-    const sent = await this.notifyHelloOnce(label, state.attempt);
-    if (!sent) {
-      // No advertiser (or a notify failure): stop the ladder. The
-      // settle fallback still covers the peer, and a later health
-      // change retries the handshake from the transport side.
-      this.helloNotifyTimers.delete(bleId);
-      return;
-    }
-    if (state.attempt >= HELLO_NOTIFY_MAX_ATTEMPTS) {
-      this.helloNotifyTimers.delete(bleId);
-      return;
-    }
-    const delay = HELLO_NOTIFY_RETRY_DELAYS_MS[state.attempt - 1] ?? 0;
-    state.timer = setTimeout(() => {
-      state.timer = null;
-      void this.runHelloNotifyAttempt(bleId, label, state);
-    }, delay);
-  }
-
-  /**
-   * Notify our hello datagram on our own TX, directly through the
-   * peripheral adapter (NOT through send(), which gates on readiness
-   * and would throw "peer not ready" for exactly the peer this hello
-   * is meant to unlock). Returns false when there is no advertiser
-   * to notify on. One line per attempt records the stage outcome,
-   * so the next device run can tell a missing hello apart from a
-   * hello the peer never processed.
-   */
-  private async notifyHelloOnce(label: string, attempt: number): Promise<boolean> {
-    const ownPeerId = this.ownPeerId;
-    const peripheral = this.peripheral;
-    if (!ownPeerId || !peripheral) return false;
-    const hello = encodeHello(fromHex(ownPeerId), ATT_DEFAULT_MTU);
-    try {
-      await this.enqueueNotify(async () => {
-        for (const chunk of chunkBytes(hello, HELLO_NOTIFY_CHUNK_SIZE)) {
-          await withBleTimeout(peripheral.notify(chunk), BLE_TIMEOUT_MS.notify, 'hello notify');
-        }
-      });
-      recordServiceEvent(`ble hello notify tag ${label} attempt ${attempt}`);
-      return true;
-    } catch (err) {
-      recordServiceEvent(
-        `ble hello notify failed tag ${label} attempt ${attempt}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return false;
-    }
-  }
-
   async disconnect(peerId: string): Promise<void> {
     const conn = this.conns.get(peerId);
     if (!conn) return;
@@ -1255,19 +974,6 @@ export class GattBlePort implements TransportPort {
   async send(peerId: string, frame: Uint8Array): Promise<void> {
     const conn = this.conns.get(peerId);
     if (!conn) throw new Error(`ble: unknown peer ${peerId}`);
-    // A down advertiser is checked first: without it there is no TX
-    // to notify on, so the error must name the radio, not the peer.
-    // The readiness gate below only applies when a TX exists.
-    const peripheral = this.peripheral;
-    if (!peripheral) throw new Error('ble: peripheral role unavailable');
-    // Readiness gate (v0.1.31): a notify resolves even with no central
-    // subscribed to our TX, so sending to a peer whose handshake has
-    // not finished counts as sent while landing nowhere. The caller
-    // (broadcast, DM mesh) treats this throw as not-sent and queues or
-    // falls back instead of logging a phantom handoff.
-    if (!this.isPeerReady(peerId, Date.now())) {
-      throw new Error(`ble: peer not ready ${peerId.slice(0, 8)}`);
-    }
     const datagram = encodeDatagram(DATAGRAM_FRAME, frame);
     const chunkSize = Math.max(conn.mtu - ATT_OVERHEAD, 1);
     // Send on our own TX characteristic, whatever the conn role. A
@@ -1284,15 +990,13 @@ export class GattBlePort implements TransportPort {
     // centrals (library limitation); non-target peers drop the frames
     // at the mesh layer via event-ID dedup. Bandwidth-inefficient, not
     // incorrect. Failing closed when our advertiser is down is honest:
-    // without it there is no TX to notify on (checked above). The
-    // notify runs on the shared chain (see enqueueNotify) so a hello
-    // retry can never interleave chunks with this frame.
-    await this.enqueueNotify(async () => {
-      for (const chunk of chunkBytes(datagram, chunkSize)) {
-        await withBleTimeout(peripheral.notify(chunk), BLE_TIMEOUT_MS.notify, 'notify');
-        recordFragmentsSent(peerId, 1);
-      }
-    });
+    // without it there is no TX to notify on.
+    const peripheral = this.peripheral;
+    if (!peripheral) throw new Error('ble: peripheral role unavailable');
+    for (const chunk of chunkBytes(datagram, chunkSize)) {
+      await withBleTimeout(peripheral.notify(chunk), BLE_TIMEOUT_MS.notify, 'notify');
+      recordFragmentsSent(peerId, 1);
+    }
     recordPacketSent(peerId);
   }
 
@@ -1313,7 +1017,7 @@ export class GattBlePort implements TransportPort {
   }
 
   /** Feed one ATT chunk into a connection, tracking fragments and partial sets. */
-  private feedChunk(conn: PeerConn, key: string, value: Uint8Array, via: 'central' | 'peripheral'): void {
+  private feedChunk(conn: PeerConn, key: string, value: Uint8Array): void {
     const peerKey = conn.peerId ?? key;
     recordFragmentsReceived(peerKey, 1);
     // Per-datagram expiry: a stalled partial buffer is dropped here
@@ -1329,7 +1033,7 @@ export class GattBlePort implements TransportPort {
       return;
     }
     conn.partialOpen = false;
-    for (const dg of datagrams) this.dispatchDatagram(conn, dg, via);
+    for (const dg of datagrams) this.dispatchDatagram(conn, dg);
   }
 
   /** Central role: frames arriving as TX notifications from a peer. */
@@ -1337,7 +1041,7 @@ export class GattBlePort implements TransportPort {
     const key = this.bleIndex.get(bleId);
     const conn = key ? this.conns.get(key) : undefined;
     if (!key || !conn) return;
-    this.feedChunk(conn, key, value, 'central');
+    this.feedChunk(conn, key, value);
   }
 
   /** Peripheral role: a central wrote to our RX characteristic. */
@@ -1350,17 +1054,17 @@ export class GattBlePort implements TransportPort {
         return; // drop, bounded
       }
       key = `${PROVISIONAL_MAC_PREFIX}${device}`;
-      conn = { role: 'peripheral', bleId: device, tag: null, peerId: null, mtu: ATT_DEFAULT_MTU, inbound: new DatagramReassembler(), partialOpen: false, connectedAtMs: Date.now() };
+      conn = { role: 'peripheral', bleId: device, tag: null, peerId: null, mtu: ATT_DEFAULT_MTU, inbound: new DatagramReassembler(), partialOpen: false };
       this.registerConn(key, conn);
       // A central is writing to us, but the library does not report
       // whether it subscribed to our TX characteristic: CCCD stays unknown.
       recordPeerConnected(key, ATT_DEFAULT_MTU, null);
     }
     if (!key) return;
-    this.feedChunk(conn, key, value, 'peripheral');
+    this.feedChunk(conn, key, value);
   }
 
-  private dispatchDatagram(conn: PeerConn, dg: Uint8Array, via: 'central' | 'peripheral'): void {
+  private dispatchDatagram(conn: PeerConn, dg: Uint8Array): void {
     if (dg.length < 1) return;
     const kind = dg[0];
     const payload = dg.slice(1);
@@ -1368,25 +1072,6 @@ export class GattBlePort implements TransportPort {
       const hello = parseHello(payload);
       if (!hello) return;
       const peerId = toHex(hello.publicKey);
-      // One line per hello received, naming the channel it arrived
-      // on: a hello over central notify proves the .33 path works,
-      // while a hello over a peripheral write proves the legacy
-      // emitter delivers on this runtime. In v0.1.32 neither line
-      // ever appeared, which is how the dead handshake stayed silent.
-      recordServiceEvent(
-        `ble hello received tag ${toHex(peerTagOf(hello.publicKey)).slice(0, 8)} via ${via === 'central' ? 'notify' : 'write'}`,
-      );
-      // The peer connected to our peripheral and will subscribe to our
-      // TX next: mark peripheral readiness before rekeying, so the
-      // central-clash drop below (which drops this peripheral entry
-      // when a central conn already covers the peer) cannot lose it.
-      this.markPeerPeripheralHello(peerId);
-      // A provisional central link for this peer (IDENT read failed,
-      // link kept tag-keyed) is promoted to the full peerId first, so
-      // the clash check in rekeyConn below drops the peripheral
-      // duplicate instead of the central link that carries our TX
-      // subscription.
-      this.promoteProvisionalCentral(peerId);
       conn.mtu = Math.min(Math.max(hello.centralMtu, ATT_DEFAULT_MTU), 517);
       this.rekeyConn(conn, peerId);
       // The peripheral side learns the central identity and MTU here.
@@ -1459,29 +1144,12 @@ export class GattBlePort implements TransportPort {
     const conn = this.conns.get(key);
     if (!conn) return;
     this.cancelAutoConnectRetry(conn.bleId);
-    this.clearHelloNotify(conn.bleId);
-    this.stalledProvisionalLogged.delete(key);
     // A disconnect starts a fresh episode: the next sightings after
     // it are not gated by failures from the previous episode.
     this.clearConnectCooldown(conn.bleId);
     recordPeerDisconnected(key);
     this.conns.delete(key);
     if (this.bleIndex.get(conn.bleId) === key) this.bleIndex.delete(conn.bleId);
-    // Forget readiness only when the peer is fully gone: the central
-    // and peripheral links are separate connections, and one can drop
-    // while the other still carries the peer (a central drop does not
-    // mean the peer unsubscribed from our TX).
-    const peerId = conn.peerId ?? (HEX64_RE.test(key) ? key : null);
-    if (peerId !== null) {
-      let stillPresent = false;
-      for (const c of this.conns.values()) {
-        if (c.peerId === peerId) {
-          stillPresent = true;
-          break;
-        }
-      }
-      if (!stillPresent) this.peerReady.delete(peerId);
-    }
   }
 
   // ------------------------------------------------------------------ close
@@ -1513,8 +1181,6 @@ export class GattBlePort implements TransportPort {
     }
     for (const timer of this.autoConnectRetries.values()) clearTimeout(timer);
     this.autoConnectRetries.clear();
-    for (const bleId of [...this.helloNotifyTimers.keys()]) this.clearHelloNotify(bleId);
-    this.stalledProvisionalLogged.clear();
     this.pendingCentralTags.clear();
     this.discovered.clear();
     await this.stopAdvertise();
@@ -1525,109 +1191,10 @@ export class GattBlePort implements TransportPort {
     return this.conns.size;
   }
 
-  /** Central handshake to this peer completed: we subscribed to its TX. */
-  private markPeerCentralReady(peerId: string): void {
-    const entry = this.peerReady.get(peerId) ?? {
-      central: false,
-      peripheral: false,
-      peripheralHelloAtMs: 0,
-      centralReadyAtMs: 0,
-      readyLogged: false,
-    };
-    entry.central = true;
-    entry.centralReadyAtMs = Date.now();
-    this.peerReady.set(peerId, entry);
-  }
-
-  /** A hello arrived on our peripheral side: the peer connected to us. */
-  private markPeerPeripheralHello(peerId: string): void {
-    const entry = this.peerReady.get(peerId) ?? {
-      central: false,
-      peripheral: false,
-      peripheralHelloAtMs: 0,
-      centralReadyAtMs: 0,
-      readyLogged: false,
-    };
-    entry.peripheral = true;
-    entry.peripheralHelloAtMs = Date.now();
-    this.peerReady.set(peerId, entry);
-  }
-
-  /**
-   * True when a notify to this peer has a subscriber: the peer's hello
-   * arrived on our peripheral side (it connected to us and subscribes
-   * to our TX next) and either our central handshake completed or the
-   * hello-to-subscribe settle elapsed. The central completion alone
-   * does not prove the peer subscribed to OUR TX, and the hello alone
-   * does not prove the subscribe already happened; both halves plus
-   * the settle close the v0.1.30 drain-before-connect gap.
-   * v0.1.33 settle fallback: a completed central handshake with no
-   * hello inside HELLO_SETTLE_MS is ready anyway. The hello travels
-   * as a central write the peer JS layer never receives on new-arch
-   * builds, so a gate that requires it is unreachable (v0.1.32: links
-   * formed, ready set always empty, BLE carried nothing). Old-version
-   * peers never notify hellos either, so without the fallback a mixed
-   * network would never use BLE. The ready line names the path.
-   */
-  private isPeerReady(peerId: string, nowMs: number): boolean {
-    const entry = this.peerReady.get(peerId);
-    if (!entry) return false;
-    if (entry.peripheral) {
-      if (entry.central) return true;
-      return nowMs - entry.peripheralHelloAtMs >= READY_SETTLE_MS;
-    }
-    if (entry.central) {
-      return nowMs - entry.centralReadyAtMs >= HELLO_SETTLE_MS;
-    }
-    return false;
-  }
-
-  /**
-   * Full peerIds that are ready to RECEIVE a frame right now (see
-   * isPeerReady). This is the set publish, drain, DM mesh, and flood
-   * forward target: connectedPeerIds also lists peers whose handshake
-   * is still in flight, and a notify to one of those resolves while
-   * landing nowhere. A peer that becomes ready logs one line naming
-   * the path (hello or settle), so the next device run can tell them
-   * apart; a provisional peer that waits past the settle without a
-   * hello logs one stalled line.
-   */
-  readyPeerIds(): string[] {
-    const nowMs = Date.now();
-    const ids: string[] = [];
-    for (const [peerId, entry] of this.peerReady) {
-      if (this.isPeerReady(peerId, nowMs)) {
-        ids.push(peerId);
-        if (!entry.readyLogged) {
-          entry.readyLogged = true;
-          const via = entry.peripheral ? 'hello' : 'settle, no hello';
-          recordServiceEvent(`ble peer ready tag ${peerId.slice(0, 8)} via ${via}`);
-        }
-      }
-    }
-    this.logStalledProvisionalPeers(nowMs);
-    return ids;
-  }
-
-  /** One stalled line per provisional conn that waits past the settle without a hello. */
-  private logStalledProvisionalPeers(nowMs: number): void {
-    for (const [key, conn] of this.conns) {
-      if (!isProvisionalKey(key)) continue;
-      if (this.stalledProvisionalLogged.has(key)) continue;
-      if (nowMs - conn.connectedAtMs < HELLO_SETTLE_MS) continue;
-      this.stalledProvisionalLogged.add(key);
-      const label = key.startsWith(PROVISIONAL_TAG_PREFIX) ? key.slice(4, 12) : 'mac-peer';
-      recordServiceEvent(`ble peer waiting hello tag ${label}`);
-    }
-  }
-
   /**
    * Full peerIds of established connections (deduped). Provisional ids
    * (tag:/mac: keys) are excluded: only peers whose full identity has been
-   * resolved are listed. This is the mesh-pill count, NOT the publish
-   * set: a peer whose handshake is still in flight is connected but
-   * not ready to receive, so publish, drain, and DM mesh target
-   * readyPeerIds instead.
+   * resolved can receive frames, so this is exactly the set publish targets.
    */
   connectedPeerIds(): string[] {
     const ids = new Set<string>();

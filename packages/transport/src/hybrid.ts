@@ -24,7 +24,6 @@ import {
   type SignedEvent,
   type TransportPort,
 } from '@airplane/protocol';
-import { isDuplicateRejection } from './balancer';
 import { NostrTransport, type NostrTransportOpts } from './nostr';
 
 /** Where an inbound post arrived from. */
@@ -241,11 +240,7 @@ export class BleTransport {
       void (async () => {
         let peers: string[];
         try {
-          // Ready peers only: a flood forward is a notify, and a
-          // notify to a peer that has not subscribed to our TX yet
-          // resolves while landing nowhere (v0.1.30 drain loss).
-          // Ports without readiness fall back to connected peers.
-          peers = this.port.readyPeerIds?.() ?? this.port.connectedPeerIds?.() ?? [];
+          peers = this.port.connectedPeerIds?.() ?? [];
         } catch {
           peers = [];
         }
@@ -352,19 +347,6 @@ export interface RouteResult {
   relayTried: boolean;
   /** Why the relay stage was skipped or failed; null when relay won. */
   relayDetail: string | null;
-  /**
-   * The relay's own rejection reason per rejecting URL (NIP-01 OK
-   * element 3), when the relay leg was rejected. Empty when the relay
-   * was never tried or never rejected. The balancer uses this to back
-   * a real rejection off and to treat "duplicate:" as stored.
-   */
-  relayRejections?: Array<{ url: string; reason: string }>;
-  /**
-   * True when a relay rejection was a "duplicate:": the relay already
-   * holds the event, so it is stored even though no OK arrived. The
-   * publish is reported as a relay win (relayed), not a failure.
-   */
-  relayDuplicate?: boolean;
 }
 
 /** Ordered-router options (R4). */
@@ -563,11 +545,7 @@ export class HybridTransport {
     this.seen.add(idHex);
     const relay = await this.attemptRelay(event);
     let result: RouteResult;
-    // A "duplicate:" rejection is a relay win, not a failure: the
-    // relay already holds the event, so receivers can fetch it. Before
-    // v0.1.27 it was reported as rejected, which misreported delivered
-    // posts as failed and burned DM attempts.
-    if (relay.ok.length > 0 || relay.duplicate) {
+    if (relay.ok.length > 0) {
       // Relay-plus-BLE (v0.1.19): a relay win no longer skips Bluetooth.
       // Connected peers also get the event over the radio, best effort,
       // so an online sender's post reaches a nearby offline peer at
@@ -577,10 +555,9 @@ export class HybridTransport {
       // never fails because of the radio leg. The peer count rides the
       // existing blePeers field so diagnostics can show both paths
       // without a RouteResult shape change. A peer arriving AFTER
-      // publish gets the post over Bluetooth from the outbox drain:
-      // since v0.1.27 the app keeps the outbox row as 'ble-sent' on a
-      // relay win (removed only on World confirmation), so the drain
-      // still has a copy to hand to the late peer.
+      // publish still gets nothing over Bluetooth from this publish;
+      // that residual gap is unchanged (the outbox row is removed on
+      // relay win, and the outbox holds own posts only).
       let blePeers = 0;
       if (blePeerIds.length > 0) {
         try {
@@ -596,8 +573,6 @@ export class HybridTransport {
         relays: relay.ok,
         relayTried: true,
         relayDetail: null,
-        relayRejections: relay.rejections,
-        relayDuplicate: relay.duplicate,
       };
     } else {
       result = await this.attemptMesh(event, blePeerIds, relay);
@@ -628,56 +603,30 @@ export class HybridTransport {
     ok: string[];
     tried: boolean;
     detail: string | null;
-    rejections: Array<{ url: string; reason: string }>;
-    duplicate: boolean;
   }> {
-    const empty = {
-      ok: [] as string[],
-      tried: false,
-      detail: null as string | null,
-      rejections: [] as Array<{ url: string; reason: string }>,
-      duplicate: false,
-    };
     if (this.networkValidated && !this.networkValidated()) {
-      return { ...empty, detail: 'network not validated' };
+      return { ok: [], tried: false, detail: 'network not validated' };
     }
     if (!this.nostr.online) {
-      return { ...empty, detail: 'no open relay socket' };
+      return { ok: [], tried: false, detail: 'no open relay socket' };
     }
     const unknown = this.networkUnknown?.() ?? false;
     const deadlineMs = unknown ? this.unknownNetworkDeadlineMs : this.relayDeadlineMs;
     const ack = await this.nostr.publishWithAck(event, deadlineMs);
-    if (ack.ok.length > 0) {
-      return { ok: ack.ok, tried: true, detail: null, rejections: ack.rejectionReasons, duplicate: false };
-    }
+    if (ack.ok.length > 0) return { ok: ack.ok, tried: true, detail: null };
     // Cancelled by stop(): skipped, not a relay failure. The caller
     // reports it as unattempted rather than failed.
-    if (ack.cancelled) return { ...empty, detail: 'relay publish cancelled' };
-    if (ack.rejected.length > 0) {
-      // The relay's own reasons ride the detail line, so a rejection
-      // is diagnosable instead of generic. A "duplicate:" means the
-      // relay already holds the event: stored, not failed.
-      const reasons = ack.rejectionReasons
-        .map(({ url, reason }) => `${url} ${reason || '(no reason)'}`)
-        .join('; ');
-      const duplicate = ack.rejectionReasons.some(({ reason }) => isDuplicateRejection(reason));
-      return {
-        ok: [],
-        tried: true,
-        detail: `relays rejected the event: ${reasons}`,
-        rejections: ack.rejectionReasons,
-        duplicate,
-      };
-    }
+    if (ack.cancelled) return { ok: [], tried: false, detail: 'relay publish cancelled' };
+    if (ack.rejected.length > 0) return { ok: [], tried: true, detail: 'relays rejected the event' };
     if (ack.timedOut)
       return {
-        ...empty,
+        ok: [],
         tried: true,
         detail: unknown
           ? `no relay OK within ${deadlineMs}ms (shortened deadline: network state unknown)`
           : `no relay OK within ${deadlineMs}ms`,
       };
-    return { ...empty, tried: true, detail: 'relay unavailable' };
+    return { ok: [], tried: true, detail: 'relay unavailable' };
   }
 
   /**
@@ -688,13 +637,7 @@ export class HybridTransport {
   private async attemptMesh(
     event: SignedEvent,
     blePeerIds: string[],
-    relay: {
-      ok: string[];
-      tried: boolean;
-      detail: string | null;
-      rejections: Array<{ url: string; reason: string }>;
-      duplicate: boolean;
-    },
+    relay: { ok: string[]; tried: boolean; detail: string | null },
   ): Promise<RouteResult> {
     if (blePeerIds.length === 0) {
       return {
@@ -704,8 +647,6 @@ export class HybridTransport {
         relays: [],
         relayTried: relay.tried,
         relayDetail: relay.detail,
-        relayRejections: relay.rejections,
-        relayDuplicate: relay.duplicate,
       };
     }
     const sent = await this.ble.broadcast(event, blePeerIds);
@@ -717,8 +658,6 @@ export class HybridTransport {
         relays: [],
         relayTried: relay.tried,
         relayDetail: relay.detail,
-        relayRejections: relay.rejections,
-        relayDuplicate: relay.duplicate,
       };
     }
     return {
@@ -728,8 +667,6 @@ export class HybridTransport {
       relays: [],
       relayTried: relay.tried,
       relayDetail: relay.detail,
-      relayRejections: relay.rejections,
-      relayDuplicate: relay.duplicate,
     };
   }
 

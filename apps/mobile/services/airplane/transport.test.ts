@@ -30,7 +30,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, buildTransportHealth, runAuthorCatchUp, __resetBalancerForTests, __setDrainRowDelayMsForTests, __resetNetInfoForTests, __resetPulledPostsForTests, __resetFailedInboundForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, retryBleRadio, revalidateBleRadio } from './transport';
+import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, __resetTransportForTests, __setDrainRowDelayMsForTests, __resetNetInfoForTests, __resetPulledPostsForTests, __resetFailedInboundForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, subscribeMeshStatus, retryBleRadio, revalidateBleRadio } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
@@ -1049,10 +1049,11 @@ describe('BLE publish targets + mesh status', () => {
     expect(blePeerIdsForPublish({ connectedPeerIds: () => { throw new Error('boom'); } } as never)).toEqual([]);
   });
 
-  test('blePeerIdsForPublish prefers ready peers, and a throwing readiness probe falls back to connected', () => {
-    expect(blePeerIdsForPublish({ readyPeerIds: () => ['r1'], connectedPeerIds: () => ['c1', 'c2'] } as never)).toEqual(['r1']);
-    expect(blePeerIdsForPublish({ readyPeerIds: () => [], connectedPeerIds: () => ['c1'] } as never)).toEqual([]);
-    expect(blePeerIdsForPublish({ readyPeerIds: () => { throw new Error('boom'); }, connectedPeerIds: () => ['c1'] } as never)).toEqual(['c1']);
+  test('blePeerIdsForPublish returns connected peers, with no readiness probe', () => {
+    expect(blePeerIdsForPublish({ connectedPeerIds: () => ['c1', 'c2'] } as never)).toEqual(['c1', 'c2']);
+    expect(blePeerIdsForPublish({ connectedPeerIds: () => [] } as never)).toEqual([]);
+    expect(blePeerIdsForPublish(null)).toEqual([]);
+    expect(blePeerIdsForPublish(undefined)).toEqual([]);
   });
 
   test('resolveRelayState truth table', () => {
@@ -1205,7 +1206,7 @@ describe('mesh-scan fix: scan failure keeps advertising', () => {
     }
   });
 
-describe('transport load balancer (v0.1.27)', () => {
+describe('transport revert (v0.1.35): no balancer decision layer in the publish path', () => {
   const serviceLines: string[] = [];
 
   beforeEach(() => {
@@ -1213,15 +1214,15 @@ describe('transport load balancer (v0.1.27)', () => {
     setDiagnosticsLogSink((kind, detail) => {
       if (kind === 'service') serviceLines.push(detail);
     });
-    __resetBalancerForTests();
+    __resetTransportForTests();
   });
 
   afterEach(() => {
     setDiagnosticsLogSink(null);
-    __resetBalancerForTests();
+    __resetTransportForTests();
   });
 
-  test('a relay win keeps the outbox row as ble-sent, so a late peer still gets the post over BLE', async () => {
+  test('a relay win removes the outbox row (v0.1.26 behavior restored)', async () => {
     await startTransport();
     const hybrid = __getHybridForTests();
     expect(hybrid).not.toBeNull();
@@ -1238,96 +1239,14 @@ describe('transport load balancer (v0.1.27)', () => {
       relayDetail: null,
     });
     await publishViaTransport(event);
-    // The row must NOT be removed on relay win: a peer arriving after
-    // publish still needs a Bluetooth copy from the drain.
+    // The row is removed on relay win: the relay-win Bluetooth
+    // broadcast (inside the router) already seeded connected peers,
+    // so the outbox has no late-peer copy to hold.
     const rows = await store.listPostOutbox();
-    expect(rows.map((r) => r.eventId)).toContain(toHex(event.id));
-    expect(rows.find((r) => r.eventId === toHex(event.id))!.status).toBe('ble-sent');
-    // The late peer arrives: the drain hands it the same post.
-    jest.spyOn(hybrid!, 'sendOverMesh').mockResolvedValue(1);
-    __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
-    expect(await drainPostOutbox()).toBe(1);
-    __setBlePortForTests(null);
+    expect(rows.map((r) => r.eventId)).not.toContain(toHex(event.id));
   });
 
-  test('every publish logs the balancer route with its reason and health snapshot', async () => {
-    await startTransport();
-    const hybrid = __getHybridForTests();
-    expect(hybrid).not.toBeNull();
-    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
-      transport: 'none',
-      status: 'queued',
-      blePeers: 0,
-      relays: [],
-      relayTried: false,
-      relayDetail: 'no open relay socket',
-    });
-    await publishViaTransport(makeSignedEvent());
-    const route = serviceLines.find((l) => l.startsWith('balancer route '));
-    expect(route).toBeDefined();
-    expect(route!).toContain('queue');
-    expect(route!).toContain('no live path');
-    expect(route!).toContain('relays 0 open');
-  });
-
-  test('a real relay rejection backs the relay off and the backoff expiry re-probes it', async () => {
-    await startTransport();
-    const hybrid = __getHybridForTests();
-    expect(hybrid).not.toBeNull();
-    const relayUrl = DEFAULT_RELAYS[0];
-    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
-      transport: 'none',
-      status: 'queued',
-      blePeers: 0,
-      relays: [],
-      relayTried: true,
-      relayDetail: `relays rejected the event: ${relayUrl} rate-limited: slow down`,
-      relayRejections: [{ url: relayUrl, reason: 'rate-limited: slow down' }],
-    });
-    await publishViaTransport(makeSignedEvent());
-    // The rejecting relay is backed off for 10 s on the first failure.
-    const health = buildTransportHealth();
-    const relay = health.relays.find((r) => r.url === relayUrl);
-    expect(relay).toBeDefined();
-    expect(relay!.backoffUntilMs).toBeGreaterThan(health.nowMs);
-    expect(relay!.backoffUntilMs - health.nowMs).toBe(10_000);
-    // Advancing past the window re-probes: the backoff has expired.
-    await jest.advanceTimersByTimeAsync(11_000);
-    const after = buildTransportHealth();
-    const relayAfter = after.relays.find((r) => r.url === relayUrl);
-    expect(relayAfter!.backoffUntilMs).toBeLessThanOrEqual(after.nowMs);
-  });
-
-  test('a duplicate relay rejection backs nothing off', async () => {
-    await startTransport();
-    const hybrid = __getHybridForTests();
-    expect(hybrid).not.toBeNull();
-    const relayUrl = DEFAULT_RELAYS[0];
-    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
-      transport: 'relay',
-      status: 'relayed',
-      blePeers: 0,
-      relays: [],
-      relayTried: true,
-      relayDetail: null,
-      relayRejections: [{ url: relayUrl, reason: 'duplicate: already stored' }],
-      relayDuplicate: true,
-    });
-    const event = { ...makeSignedEvent(), tags: [['seq', '13']] };
-    await publishViaTransport(event);
-    const health = buildTransportHealth();
-    const relay = health.relays.find((r) => r.url === relayUrl);
-    expect(relay?.backoffUntilMs ?? 0).toBe(0);
-    // The diagnostics line says duplicate, not a generic relay OK.
-    const lines = getDiagnosticsSnapshot().messages;
-    const line = lines.find((m) => m.direction === 'outbound' && m.kind === 'post');
-    expect(line).toBeDefined();
-    expect(line!.attempts[0]?.detail).toContain('duplicate');
-  });
-
-
-
-  test('a publish serves the healthy ready peer and holds out the backed-off peer', async () => {
+  test('a publish passes every connected peer to the router, unfiltered', async () => {
     await startTransport();
     const hybrid = __getHybridForTests();
     expect(hybrid).not.toBeNull();
@@ -1346,70 +1265,44 @@ describe('transport load balancer (v0.1.27)', () => {
       };
     });
     try {
-      // First publish reaches only A and the radio reaches nobody: A
-      // backs off for 10 s, B was never attempted and stays healthy.
-      __setBlePortForTests({ readyPeerIds: () => [peerA], connectedPeerIds: () => [peerA] } as never);
-      const eventA = { ...makeSignedEvent(), id: new Uint8Array(32).fill(71) };
-      await publishViaTransport(eventA);
-      expect(captured).toEqual([[peerA]]);
-      const health = buildTransportHealth();
-      const peerAHealth = health.peers.find((p) => p.tag === peerA.slice(0, 8));
-      expect(peerAHealth).toBeDefined();
-      expect(peerAHealth!.unhealthyUntilMs).toBeGreaterThan(health.nowMs);
-      // Second publish, both peers ready: the plan still includes BLE
-      // (B is healthy), but the router only gets B. A is held out of
-      // this send alone, not dropped: it recovers on its own window.
-      __setBlePortForTests({ readyPeerIds: () => [peerA, peerB], connectedPeerIds: () => [peerA, peerB] } as never);
-      const eventB = { ...makeSignedEvent(), id: new Uint8Array(32).fill(72) };
-      await publishViaTransport(eventB);
-      expect(captured[1]).toEqual([peerB]);
-      const route = serviceLines.find((l) => l.startsWith('balancer route '));
-      expect(route).toBeDefined();
-      expect(route!).toContain('ble');
+      __setBlePortForTests({ connectedPeerIds: () => [peerA, peerB] } as never);
+      await publishViaTransport(makeSignedEvent());
+      // No health gating, no ready gate, no backoff hold-out: the
+      // router gets both connected peers.
+      expect(captured).toEqual([[peerA, peerB]]);
+      expect(serviceLines.some((l) => l.startsWith('balancer route '))).toBe(false);
     } finally {
       __setBlePortForTests(null);
     }
   });
 
-  test('author catch-up queries open relays for a recently seen author with no cell filter', async () => {
+  test('a peer arriving drains the post outbox over BLE (mesh poll 0-to-N edge)', async () => {
     await startTransport();
     const hybrid = __getHybridForTests();
     expect(hybrid).not.toBeNull();
-    // Bring the transport online via the NetInfo listener (the offline
-    // initial fetch stops Nostr right after start): the listener
-    // restart re-creates the relay sockets, and opening one gives the
-    // query somewhere to go. The listener must come from the live
-    // require-time NetInfo module, not the file-level netInfoMock: the
-    // 'survives NetInfo load failure' test above calls jest.resetModules,
-    // so the module transport.ts re-requires afterwards is a fresh
-    // instance and the file-level mock no longer receives registrations.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const liveNetInfo = require('@react-native-community/netinfo').default as {
-      addEventListener: jest.Mock;
-    };
-    const listener = liveNetInfo.addEventListener.mock.calls[0][0] as (s: {
-      isConnected: boolean;
-      isInternetReachable: boolean;
-    }) => void;
-    listener({ isConnected: true, isInternetReachable: true });
-    for (let i = 0; i < 10; i++) await Promise.resolve();
-    // Bring one relay socket up so the query has somewhere to go.
-    const socket = FakeSocket.instances[FakeSocket.instances.length - 3];
-    expect(socket).toBeDefined();
-    socket.onopen?.({});
-    // A post arrives from a peer: that author is now recently seen.
-    const event = { ...makeSignedEvent(), pubkey: new Uint8Array(32).fill(9) };
-    hybrid!.ingress(event as never, 'nostr');
-    for (let i = 0; i < 10; i++) await Promise.resolve();
-    const sent = await runAuthorCatchUp();
-    expect(sent).toBe(true);
-    const req = socket.sent
-      .map((s: string) => JSON.parse(s))
-      .find((m: unknown[]) => m[0] === 'REQ' && m[2] && 'authors' in (m[2] as Record<string, unknown>));
-    expect(req).toBeDefined();
-    expect((req[2] as Record<string, unknown>).authors).toEqual([toHex(event.pubkey)]);
-    expect((req[2] as Record<string, unknown>)['#g']).toBeUndefined();
-    expect(serviceLines.some((l) => l.startsWith('relay author catch-up '))).toBe(true);
+    const store = getStore();
+    const event = { ...makeSignedEvent(), id: new Uint8Array(32).fill(61), created_at: Math.floor(Date.now() / 1000) - 600 };
+    await store.saveEvent(event);
+    await store.enqueuePostOutbox(toHex(event.id), event.created_at);
+    const sentIds: string[] = [];
+    jest.spyOn(hybrid!, 'sendOverMesh').mockImplementation(async (e) => {
+      sentIds.push(toHex(e.id));
+      return 1;
+    });
+    // No peers at first: the poll sees 0 peers, nothing drains.
+    __setBlePortForTests({ connectedPeerIds: () => [] } as never);
+    const unsub = subscribeMeshStatus(() => {});
+    try {
+      await jest.advanceTimersByTimeAsync(2100);
+      expect(sentIds).toEqual([]);
+      // A peer arrives: the 0-to-N edge drains the queued post.
+      __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
+      await jest.advanceTimersByTimeAsync(2100);
+      expect(sentIds).toEqual([toHex(event.id)]);
+    } finally {
+      unsub();
+      __setBlePortForTests(null);
+    }
   });
 });
 });

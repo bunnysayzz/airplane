@@ -212,14 +212,11 @@ export interface NostrTransportOpts {
   /** Relay NOTICE/CLOSED frames (relay URL, frame type, relay message). */
   onRelayNotice?: (relayUrl: string, frame: 'NOTICE' | 'CLOSED', message: string) => void;
   /**
-   * Fired on every main resubscribe with the replay `since` it used, the
-   * relay URL it used it for, and whether the window came from the last
-   * event actually seen on that relay ('anchor') or from the 24 h cap
-   * ('cap', fresh instance or nothing seen on that relay yet). The
-   * values are a unix second and a relay URL, never content, never an
-   * identifier.
+   * Fired on every main resubscribe with the replay `since` it used, so
+   * the app can log the replay window for testing. The value is a unix
+   * second, never content, never an identifier.
    */
-  onResubscribe?: (sinceSec: number, relayUrl: string, source: 'anchor' | 'cap') => void;
+  onResubscribe?: (sinceSec: number) => void;
   /**
    * Relay AUTH challenges (NIP-42). The client does not authenticate
    * yet; the challenge is surfaced so an auth-required failure is
@@ -271,14 +268,6 @@ export interface RelayPublishAck {
   ok: string[];
   /** Relay URLs that sent a rejected OK for the envelope. */
   rejected: string[];
-  /**
-   * The relay's own reason per rejecting URL, in the relay's words
-   * (NIP-01 OK message element 3, e.g. "duplicate:", "rate-limited:",
-   * "blocked:"). Empty string when the relay sent no reason. This is
-   * what makes a rejection diagnosable: before v0.1.27 the reason was
-   * dropped at the socket handler and every rejection read the same.
-   */
-  rejectionReasons: Array<{ url: string; reason: string }>;
   /** True when the deadline expired before any OK arrived. */
   timedOut: boolean;
   /**
@@ -294,7 +283,6 @@ interface OkWaiter {
   remaining: Set<string>;
   ok: Set<string>;
   rejected: Set<string>;
-  rejectionReasons: Map<string, string>;
   resolve: (ack: RelayPublishAck) => void;
   timer: ReturnType<typeof setTimeout> | null;
 }
@@ -323,25 +311,17 @@ export class NostrTransport {
   private readonly onReconnectScheduled: NostrTransportOpts['onReconnectScheduled'];
   private subscribeCells: string[];
   /**
-   * Created_at of the newest event received on a main subscription,
-   * per relay URL. Reconnect replay `since` anchors here (minus
-   * overlap), never on subscribe time: a subscribe-time watermark
-   * advances on every socket open before any replay event arrives, so
-   * an event that no replay delivered yet falls out of every later
-   * window and is lost unless the sender re-pushes it while the
-   * receiver is live. Anchoring on the last event actually seen
-   * mirrors the DM backfill rule, which recovered 10/10 in the same
-   * offline window where the old rule dropped 6 posts.
-   *
-   * Per relay, not global: replays run per socket, and a socket that
-   * connects late must replay from ITS OWN last-delivered point. A
-   * global anchor advances on events other sockets delivered, so a
-   * late socket's window can already be past events only it could
-   * have delivered (the .26 window: posts relay-OK'd on one relay,
-   * receiver replay missed them after the anchor moved on). A relay
-   * with no entry replays from the 24 h cap, the safe direction.
+   * Created_at of the newest event received on a main subscription.
+   * Reconnect replay `since` anchors here (minus overlap), never on
+   * subscribe time: a subscribe-time watermark advances on every socket
+   * open before any replay event arrives, so an event that no replay
+   * delivered yet falls out of every later window and is lost unless
+   * the sender re-pushes it while the receiver is live. Anchoring on
+   * the last event actually seen mirrors the DM backfill rule, which
+   * recovered 10/10 in the same offline window where the old rule
+   * dropped 6 posts.
    */
-  private lastMainEventByRelay = new Map<string, number>();
+  private lastMainEventCreatedAtSec: number | null = null;
   /** Main subscription id per socket, for CLOSED-triggered resubscribe. */
   private mainSubIds = new Map<WebSocketLike, string>();
   /** Last inbound frame time per relay (liveness proof for silence detection). */
@@ -422,31 +402,9 @@ export class NostrTransport {
     return this.states.get(url) ?? 'closed';
   }
 
-  /**
-   * Balancer backoff per relay URL (epoch ms until which the relay is
-   * out of rotation). Set by the app when a relay rejects with a real
-   * reason (rate-limited, blocked, invalid). A duplicate rejection
-   * never sets it: the relay holds the event. Expires lazily: every
-   * send re-checks the clock, so no timer is needed to re-probe.
-   */
-  private relayBackoffUntilMs = new Map<string, number>();
-
-  /** Take one relay out of rotation until the given epoch ms. */
-  setRelayBackoff(url: string, untilMs: number): void {
-    this.relayBackoffUntilMs.set(url, untilMs);
-  }
-
-  /** True when the relay is currently backed off by the balancer. */
-  isRelayBackedOff(url: string, nowMs: number = Date.now()): boolean {
-    return (this.relayBackoffUntilMs.get(url) ?? 0) > nowMs;
-  }
-
-  /** True when at least one relay is open and not backed off. */
+  /** True when at least one relay is open. */
   get online(): boolean {
-    const nowMs = Date.now();
-    for (const [url, s] of this.states) {
-      if (s === 'open' && !this.isRelayBackedOff(url, nowMs)) return true;
-    }
+    for (const s of this.states.values()) if (s === 'open') return true;
     return false;
   }
 
@@ -545,13 +503,7 @@ export class NostrTransport {
     for (const w of this.allOkWaiters) {
       if (w.timer) clearTimeout(w.timer);
       w.timer = null;
-      w.resolve({
-        ok: [...w.ok],
-        rejected: [...w.rejected],
-        rejectionReasons: [...w.rejectionReasons.entries()].map(([url, reason]) => ({ url, reason })),
-        timedOut: false,
-        cancelled: true,
-      });
+      w.resolve({ ok: [...w.ok], rejected: [...w.rejected], timedOut: false, cancelled: true });
     }
     this.allOkWaiters.clear();
     this.okWaiters.clear();
@@ -727,18 +679,9 @@ export class NostrTransport {
     return Math.max(1, Math.round(capped * jitter));
   }
 
-  private sendMsg(url: string, msg: ClientMsg, opts?: { bypassBackoff?: boolean }): boolean {
+  private sendMsg(url: string, msg: ClientMsg): boolean {
     const ws = this.sockets.get(url);
     if (!ws || this.states.get(url) !== 'open') return false;
-    // A backed-off relay is skipped at the send, not at the waiter:
-    // publishes and one-shot queries all route through here, so one
-    // check keeps a rejecting relay out of new work until its window
-    // ends. The standing main subscription (resubscribe) sends on the
-    // socket directly, so inbound delivery from that relay keeps
-    // working while publishes pause. CLOSE cleanup bypasses the
-    // backoff: ending a subscription is not new work, and a stale
-    // subscription must never be left behind on a relay.
-    if (!opts?.bypassBackoff && this.isRelayBackedOff(url)) return false;
     try {
       ws.send(JSON.stringify(msg));
       return true;
@@ -775,20 +718,15 @@ export class NostrTransport {
     for (const url of this.relays) {
       if (this.sendMsg(url, msg)) sent.push(url);
     }
-    if (sent.length === 0) {
-      return { ok: [], rejected: [], rejectionReasons: [], timedOut: false, cancelled: false };
-    }
+    if (sent.length === 0) return { ok: [], rejected: [], timedOut: false, cancelled: false };
     return new Promise<RelayPublishAck>((resolve) => {
       const waiter: OkWaiter = {
         remaining: new Set(sent),
         ok: new Set(),
         rejected: new Set(),
-        rejectionReasons: new Map(),
         resolve,
         timer: null,
       };
-      const rejectionReasons = (): Array<{ url: string; reason: string }> =>
-        [...waiter.rejectionReasons.entries()].map(([url, reason]) => ({ url, reason }));
       const finish = (ack: RelayPublishAck): void => {
         if (waiter.timer) {
           clearTimeout(waiter.timer);
@@ -805,13 +743,7 @@ export class NostrTransport {
       };
       waiter.resolve = (ack) => finish(ack);
       const timer = setTimeout(() => {
-        finish({
-          ok: [...waiter.ok],
-          rejected: [...waiter.rejected],
-          rejectionReasons: rejectionReasons(),
-          timedOut: true,
-          cancelled: false,
-        });
+        finish({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: true, cancelled: false });
       }, deadlineMs);
       waiter.timer = timer;
       this.timers.add(timer);
@@ -835,57 +767,26 @@ export class NostrTransport {
       if (!waiter.remaining.has(url)) continue;
       waiter.remaining.delete(url);
       if (waiter.remaining.size === 0 && waiter.ok.size === 0) {
-        waiter.resolve({
-          ok: [],
-          rejected: [...waiter.rejected],
-          rejectionReasons: [...waiter.rejectionReasons.entries()].map(([u, reason]) => ({ url: u, reason })),
-          timedOut: false,
-          cancelled: false,
-        });
+        waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false, cancelled: false });
       }
     }
   }
 
-  /**
-   * Route one relay OK message to every waiter for that envelope id.
-   * The relay's reason (OK element 3) is kept per URL: before
-   * v0.1.27 it was dropped here, so every rejection read the same
-   * and a "duplicate:" (already stored) looked like a judgement.
-   */
-  private handleOk(
-    relayUrl: string,
-    envelopeId: unknown,
-    accepted: unknown,
-    reason?: string,
-  ): void {
+  /** Route one relay OK message to every waiter for that envelope id. */
+  private handleOk(relayUrl: string, envelopeId: unknown, accepted: unknown): void {
     if (typeof envelopeId !== 'string' || typeof accepted !== 'boolean') return;
     const waiters = this.okWaiters.get(envelopeId);
     if (!waiters) return;
-    const rejectionReasons = (waiter: OkWaiter): Array<{ url: string; reason: string }> =>
-      [...waiter.rejectionReasons.entries()].map(([url, r]) => ({ url, reason: r }));
     for (const waiter of [...waiters]) {
       if (!waiter.remaining.has(relayUrl)) continue;
       waiter.remaining.delete(relayUrl);
       if (accepted) {
         waiter.ok.add(relayUrl);
-        waiter.resolve({
-          ok: [...waiter.ok],
-          rejected: [...waiter.rejected],
-          rejectionReasons: rejectionReasons(waiter),
-          timedOut: false,
-          cancelled: false,
-        });
+        waiter.resolve({ ok: [...waiter.ok], rejected: [...waiter.rejected], timedOut: false, cancelled: false });
       } else {
         waiter.rejected.add(relayUrl);
-        waiter.rejectionReasons.set(relayUrl, reason ?? '');
         if (waiter.remaining.size === 0) {
-          waiter.resolve({
-            ok: [],
-            rejected: [...waiter.rejected],
-            rejectionReasons: rejectionReasons(waiter),
-            timedOut: false,
-            cancelled: false,
-          });
+          waiter.resolve({ ok: [], rejected: [...waiter.rejected], timedOut: false, cancelled: false });
         }
       }
     }
@@ -927,50 +828,7 @@ export class NostrTransport {
     const timer = setTimeout(() => {
       this.timers.delete(timer);
       for (const url of sentUrls) {
-        if (!this.sendMsg(url, ['CLOSE', subId], { bypassBackoff: true })) {
-          this.pendingQueryCloses.push({ subId, url });
-          while (this.pendingQueryCloses.length > MAX_PENDING_QUERY_CLOSES) {
-            this.pendingQueryCloses.shift();
-          }
-        }
-      }
-      this.closeQuery(subId);
-    }, 5000);
-    this.timers.add(timer);
-    this.pendingQueries.set(subId, { filter, timer });
-    return true;
-  }
-
-  /**
-   * Catch-up query for known authors (Nostr REQ with an `authors`
-   * filter). Responses arrive via onReceive, exactly like a replay.
-   * Returns true when the query reached at least one open relay.
-   *
-   * This closes the hole the .26 window showed: a post from a peer
-   * the user talks to can be missed by the main replay when its cell
-   * is outside the subscriber's current cells, or when it sits on a
-   * relay whose socket was down at resubscribe time. The authors
-   * filter has no `#g` cell filter by design: the caller names the
-   * authors (DM-thread peers, recently seen authors), bounded to 30
-   * pubkeys and the last 24 h, so a global flood is impossible while
-   * a friend's post in any cell still arrives. The feed stays
-   * cell-scoped client-side; this only affects delivery into storage.
-   */
-  async catchUpAuthors(authorHexes: string[], sinceSec: number, limit = 100): Promise<boolean> {
-    const authors = [...new Set(authorHexes.filter((a) => /^[0-9a-f]{64}$/.test(a)))].slice(0, 30);
-    if (authors.length === 0) return false;
-    const subId = `q${++this.subIdCounter}`;
-    const filter = { kinds: [AIRPLANE_NOSTR_KIND], authors, since: sinceSec, limit };
-    const msg: ClientMsg = ['REQ', subId, filter];
-    const sentUrls: string[] = [];
-    for (const url of this.relays) {
-      if (this.sendMsg(url, msg)) sentUrls.push(url);
-    }
-    if (sentUrls.length === 0) return false;
-    const timer = setTimeout(() => {
-      this.timers.delete(timer);
-      for (const url of sentUrls) {
-        if (!this.sendMsg(url, ['CLOSE', subId], { bypassBackoff: true })) {
+        if (!this.sendMsg(url, ['CLOSE', subId])) {
           this.pendingQueryCloses.push({ subId, url });
           while (this.pendingQueryCloses.length > MAX_PENDING_QUERY_CLOSES) {
             this.pendingQueryCloses.shift();
@@ -991,7 +849,7 @@ export class NostrTransport {
     this.pendingQueries.delete(subId);
     clearTimeout(pending.timer);
     this.timers.delete(pending.timer);
-    for (const url of this.relays) this.sendMsg(url, ['CLOSE', subId], { bypassBackoff: true });
+    for (const url of this.relays) this.sendMsg(url, ['CLOSE', subId]);
   }
 
   /** Subscribe to new Airplane events from all open relays. */
@@ -1000,25 +858,17 @@ export class NostrTransport {
     this.mainSubIds.set(ws, subId);
     const nowSec = Math.floor(Date.now() / 1000);
     // First subscribe replays the last 24h. A reconnect replays from
-    // the last main-subscription event actually seen ON THIS RELAY,
-    // minus a 300 s overlap (capped at 24h back, never past now):
-    // events never received stay inside the window no matter how many
-    // sockets opened since, and the overlap absorbs relay propagation
-    // delay and small clock skew. The previous rule anchored on
-    // subscribe time and advanced on every socket open before any
-    // replay event arrived, which is how offline posts were skipped
-    // for good. The anchor is per relay (v0.1.27): a global anchor
-    // advances on events other sockets delivered, so a socket that
-    // connects late would replay from a window already past events
-    // only it could have delivered.
-    const relayUrl = [...this.sockets.entries()].find(([, s]) => s === ws)?.[0] ?? '';
-    const anchor = relayUrl === '' ? null : (this.lastMainEventByRelay.get(relayUrl) ?? null);
-    const source: 'anchor' | 'cap' = anchor === null ? 'cap' : 'anchor';
-    const since =
-      anchor === null
-        ? nowSec - 86400
-        : Math.min(Math.max(anchor - 300, nowSec - 86400), nowSec);
-    this.onResubscribe?.(since, relayUrl, source);
+    // the last main-subscription event actually seen, minus a 300 s
+    // overlap (capped at 24h back, never past now): events never
+    // received stay inside the window no matter how many sockets
+    // opened since, and the overlap absorbs relay propagation delay
+    // and small clock skew. The previous rule anchored on subscribe
+    // time and advanced on every socket open before any replay event
+    // arrived, which is how offline posts were skipped for good.
+    const since = this.lastMainEventCreatedAtSec === null
+      ? nowSec - 86400
+      : Math.min(Math.max(this.lastMainEventCreatedAtSec - 300, nowSec - 86400), nowSec);
+    this.onResubscribe?.(since);
     const filter: Record<string, unknown> = { kinds: [AIRPLANE_NOSTR_KIND], since, limit: 500 };
     if (this.subscribeCells.length > 0) filter['#g'] = [...this.subscribeCells];
     const msg: ClientMsg = ['REQ', subId, filter];
@@ -1057,15 +907,8 @@ export class NostrTransport {
     }
     if (!Array.isArray(msg)) return;
     // Relay acknowledgement for a published envelope: ["OK", id, accepted, message].
-    // Element 3 is the relay's own reason (e.g. "duplicate:", "rate-limited:"):
-    // pass it through so a rejection is diagnosable instead of generic.
     if (msg[0] === 'OK') {
-      this.handleOk(
-        relayUrl,
-        msg[1],
-        msg[2],
-        typeof msg[3] === 'string' ? msg[3].slice(0, 200) : undefined,
-      );
+      this.handleOk(relayUrl, msg[1], msg[2]);
       return;
     }
     // End of stored events for a one-shot query: close it now instead
@@ -1118,11 +961,9 @@ export class NostrTransport {
     if (typeof msg[1] === 'string' && typeof nostr.created_at === 'number') {
       for (const mainSubId of this.mainSubIds.values()) {
         if (mainSubId === msg[1]) {
-          // Per-relay anchor: this socket's relay delivered this event,
-          // so only its window advances. Other relays keep their own
-          // last-delivered point for when their sockets reconnect.
-          const prev = this.lastMainEventByRelay.get(relayUrl) ?? 0;
-          if (nostr.created_at > prev) this.lastMainEventByRelay.set(relayUrl, nostr.created_at);
+          if (this.lastMainEventCreatedAtSec === null || nostr.created_at > this.lastMainEventCreatedAtSec) {
+            this.lastMainEventCreatedAtSec = nostr.created_at;
+          }
           break;
         }
       }

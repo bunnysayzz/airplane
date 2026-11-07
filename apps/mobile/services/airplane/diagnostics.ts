@@ -539,10 +539,7 @@ export type ServiceLogDetail =
   | `dm start failed ${string}`
   | 'sync pass failed'
   | `dm ${string}`
-  | `relay resubscribe since ${number} ${string} ${'anchor' | 'cap'}`
-  | `balancer route ${string} | ${string}`
-  | `balancer health changed: ${string}`
-  | `relay author catch-up ${number} authors`
+  | `relay resubscribe since ${number}`
   | `relay pool watchdog: ${string}`
   | `relay connect failed ${string}`
   | `relay socket closed ${string}`
@@ -550,15 +547,10 @@ export type ServiceLogDetail =
   | 'advertise recovered after retry'
   | `advertise retry failed: ${string}`
   | `advertise failed, retry scheduled: ${string}`
-  | `network validated (${string}) | ${string}`
-  | `network not validated (${string}): ${string} | ${string}`
-  | `drain skipped ${number} rows handed to same peers within ${number}s | ${string}`
-  | `ble ident ${string}`
-  | `ble hello notify ${string}`
-  | `ble hello notify failed ${string}`
-  | `ble hello received ${string}`
-  | `ble peer ready ${string}`
-  | `ble peer waiting hello ${string}`;
+  | `network validated (${string})`
+  | `network not validated (${string}): ${string}`
+  | `drain skipped ${number} rows handed to same peers within ${number}s`
+  | `ble ident ${string}`;
 
 export function recordServiceEvent(detail: ServiceLogDetail): void {
   logEvent('service', detail);

@@ -127,8 +127,8 @@ describe('getDmRelayPoolHealth (v0.1.31)', () => {
     const svc = await getDmService();
     expect(svc).toBeDefined();
     // The relay is stubbed, so no real socket ever opens: the pool
-    // reports its URLs and zero open, which is what the balancer
-    // renders as its DM leg.
+    // reports its URLs and zero open, which is what the mesh poll
+    // reads as its DM leg.
     const health = getDmRelayPoolHealth();
     expect(health).not.toBeNull();
     expect(health!.urls.length).toBeGreaterThan(0);
