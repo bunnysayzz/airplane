@@ -894,11 +894,20 @@ export class GattBlePort implements TransportPort {
     // boundary; the inner method must not trust that narrowing.
     const ownPeerId = this.ownPeerId;
     if (!ownPeerId) throw new Error('ble: advertise() must run before connect');
-    await withBleTimeout(central.connect(bleId), BLE_TIMEOUT_MS.connect, 'central connect');
     // Set only once a connection is registered in this call, so the catch
     // below drops exactly the stale registration this call created.
     let registeredKey: string | null = null;
     try {
+      // The connect await lives inside this try on purpose (v0.1.37):
+      // a connect-stage failure, refusal or the 10 s JS timeout, must
+      // cancel the native attempt. withBleTimeout is a race that does
+      // not cancel the native promise, so without this the native GATT
+      // connect keeps running after JS has given up, and the next
+      // attempt times out against the same dangling attempt (v0.1.35:
+      // four timeouts in 96 s at rssi -46). The catch below issues the
+      // disconnect only when no registered conn uses this bleId, so a
+      // failed attempt never tears down another attempt's live link.
+      await withBleTimeout(central.connect(bleId), BLE_TIMEOUT_MS.connect, 'central connect');
       await withBleTimeout(central.retrieveServices(bleId), BLE_TIMEOUT_MS.retrieveServices, 'retrieveServices');
       let mtu = ATT_DEFAULT_MTU;
       try {
@@ -1402,7 +1411,12 @@ export class GattBlePort implements TransportPort {
    */
   async sendAck(peerId: string, eventId: Uint8Array): Promise<void> {
     const conn = this.conns.get(peerId);
-    if (!conn) throw new Error(`ble: unknown peer ${peerId}`);
+    if (!conn) {
+      // Logged, not silent (v0.1.37): the receiver acked nothing, and
+      // without this line the sender's ack timeout is the only trace.
+      recordServiceEvent(`ble ack skipped unknown peer ${peerId.slice(0, 8)} event ${toHex(eventId).slice(0, 8)}`);
+      throw new Error(`ble: unknown peer ${peerId}`);
+    }
     const peripheral = this.peripheral;
     if (!peripheral) throw new Error('ble: peripheral role unavailable');
     const datagram = encodeDatagram(DATAGRAM_ACK, eventId);
@@ -1410,6 +1424,10 @@ export class GattBlePort implements TransportPort {
     for (const chunk of chunkBytes(datagram, chunkSize)) {
       await withBleTimeout(peripheral.notify(chunk), BLE_TIMEOUT_MS.notify, 'notify');
     }
+    // The ack send is logged (v0.1.37): without this line the
+    // receiver's acks are unobservable in its own log, and a zero-ack
+    // sender log cannot tell "peer never acked" from "ack never arrived".
+    recordServiceEvent(`ble ack sent ${peerId.slice(0, 8)} event ${toHex(eventId).slice(0, 8)}`);
   }
 
   /** Subscribe to inbound BLE acknowledgement datagrams. Returns an unsubscribe function. */
@@ -1495,7 +1513,15 @@ export class GattBlePort implements TransportPort {
   private async resetCentralScan(bleId: string): Promise<void> {
     const central = this.deps.central;
     if (!central || !this.centralStarted) return;
-    if (this.pendingConnects.has(bleId)) {
+    // Clear a wedged native connect for this bleId (v0.1.37). The old
+    // gate, pendingConnects, could never fire: connectCentral's finally
+    // clears the set the moment the attempt settles, so by the time the
+    // watchdog's reset runs on a later tick it is always empty, and the
+    // reset was stopScan plus scan only. The live-link guard is the
+    // same as the connect-failure cleanup: disconnect only when no
+    // registered conn uses this bleId, so the reset never tears down
+    // a live link.
+    if (!this.bleIndex.has(bleId)) {
       await central.disconnect(bleId).catch(() => {});
     }
     await central.stopScan().catch(() => {});

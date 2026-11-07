@@ -553,6 +553,8 @@ export type ServiceLogDetail =
   | `ble ident ${string}`
   | `ble ack received ${string} event ${string}`
   | `ble ack timeout ${string} event ${string} attempts ${number}`
+  | `ble ack sent ${string} event ${string}`
+  | `ble ack skipped unknown peer ${string} event ${string}`
   | `ble liveness watchdog tag ${string} attempting connect`
   | `ble radio reset tag ${string} after ${number} timeouts`
   | `ble radio reset failed ${string}`

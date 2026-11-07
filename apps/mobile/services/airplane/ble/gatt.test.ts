@@ -1842,3 +1842,127 @@ describe('BLE ACK frame + liveness watchdog (v0.1.36)', () => {
     await port.close();
   });
 });
+
+describe('BLE connect-cancel + radio-reset fix (v0.1.37)', () => {
+  const EVENT_ID = new Uint8Array(32).fill(0x42);
+  const TIMEOUT_ERR = new Error('ble: central connect timed out after 10000ms');
+
+  /** Connect the fake peer, then drop the central link (peer stays sighted + known). */
+  async function connectThenDisconnect(
+    deps: BleNativeDeps,
+    central: FakeCentral,
+    port: GattBlePort,
+  ): Promise<void> {
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    central.disconnectCb!('ble-1');
+    await tick(20);
+    expect(port.connectedPeerIds()).toEqual([]);
+  }
+
+  test('a failed connect cancels the native attempt, and the port is not wedged', async () => {
+    const { deps, central } = makeDeps();
+    central.failConnect.add('ble-1');
+    central.failConnectError = TIMEOUT_ERR;
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(0);
+    // The failed attempt was cancelled natively: disconnect ran for
+    // the bleId even though no conn was ever registered for it. This
+    // is the v0.1.35 hole: the 10 s JS timeout used to abandon the
+    // native GATT connect without cancelling it, so the next attempt
+    // timed out against the same dangling attempt.
+    expect(central.disconnects).toContain('ble-1');
+    // A later peer can still connect (the disconnect did not wedge the port).
+    central.failConnect.clear();
+    central.discoverCb!({ id: 'ble-2', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.peerCount).toBe(1);
+    await port.close();
+  });
+
+  test('radio reset disconnects the wedged bleId (the old pendingConnects gate never fired)', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind: string, detail: string) => lines.push(`${kind}:${detail}`));
+    try {
+      const { deps, central } = makeDeps();
+      const port = new GattBlePort(deps);
+      await connectThenDisconnect(deps, central, port);
+      central.failConnect.add('ble-1');
+      central.failConnect.add('ble-2');
+      central.failConnectError = TIMEOUT_ERR;
+      // Timeout 1 (sighting path, ble-1) and timeout 2 (sighting
+      // path after rotation to ble-2): the streak is per tag, so
+      // rotation does not reset it.
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+      await tick(50);
+      central.discoverCb!({ id: 'ble-2', rssi: -58, tag: PEER_TAG });
+      await tick(50);
+      // Timeout 3 comes from the scheduled retry (~2 s after the
+      // first failure), which re-resolves to the fresh ble-2.
+      await tick(2200);
+      // Every failed connect already cancelled its native attempt
+      // (fix 1), so disconnects holds one entry per failed attempt.
+      expect(central.disconnects).toContain('ble-1');
+      expect(central.disconnects).toContain('ble-2');
+      // The watchdog fires the reset even while the cooldown is
+      // active. The reset must disconnect the wedged bleId: the old
+      // gate (pendingConnects) was always empty by reset time, because
+      // connectCentral's finally clears it when the attempt settles.
+      // Retries are on 2 s boundaries from failures at t=0/50/2000/
+      // 2050, so none fires during the 50 ms tick below.
+      const before = central.disconnects.length;
+      expect(central.scanCalls).toBe(1);
+      port.runBleLivenessWatchdog();
+      await tick(50);
+      expect(central.scanCalls).toBe(2);
+      expect(central.stopScanCalls).toBe(1);
+      expect(lines.some((l) => l.includes('ble radio reset'))).toBe(true);
+      expect(central.disconnects.length).toBe(before + 1);
+      expect(central.disconnects[central.disconnects.length - 1]).toBe('ble-2');
+      // A second watchdog tick does not reset again (once per episode).
+      port.runBleLivenessWatchdog();
+      await tick(50);
+      expect(central.scanCalls).toBe(2);
+      expect(central.disconnects.length).toBe(before + 1);
+      expect(port.peerCount).toBe(0);
+      await port.close();
+    } finally {
+      setDiagnosticsLogSink(null);
+      resetDiagnosticsForTests();
+    }
+  });
+
+  test('sendAck logs the sent ack; unknown peer logs the skip before throwing', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind: string, detail: string) => lines.push(`${kind}:${detail}`));
+    try {
+      const { deps, central } = makeDeps();
+      const port = new GattBlePort(deps);
+      await port.advertise(OWN_HEX);
+      await port.scan(() => {});
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+      await tick(50);
+      expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+      await port.sendAck(PEER_HEX, EVENT_ID);
+      expect(lines.some((l) => l.includes('ble ack sent'))).toBe(true);
+      // Unknown peer: the skip is logged, then it throws.
+      await expect(
+        port.sendAck('deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef', EVENT_ID),
+      ).rejects.toThrow(/unknown peer/);
+      expect(lines.some((l) => l.includes('ble ack skipped unknown peer'))).toBe(true);
+      await port.close();
+    } finally {
+      setDiagnosticsLogSink(null);
+      resetDiagnosticsForTests();
+    }
+  });
+});
