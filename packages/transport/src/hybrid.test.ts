@@ -50,6 +50,39 @@ class FakeBlePort implements TransportPort {
   }
 }
 
+/** TransportPort with the v0.1.36 optional surface (ack + sighted + blind notify). */
+class FakeBlePortV36 extends FakeBlePort {
+  blindSent: { peerId: string; bytes: Uint8Array }[] = [];
+  acksSent: { peerId: string; eventId: Uint8Array }[] = [];
+  sighted: string[] = [];
+  connected: string[] = [];
+  private ackSubs = new Set<(peerId: string, eventId: Uint8Array) => void>();
+
+  connectedPeerIds(): string[] {
+    return [...this.connected];
+  }
+  sightedPeerIds(): string[] {
+    return [...this.sighted];
+  }
+  async notifyUnconnected(peerId: string, bytes: Uint8Array): Promise<void> {
+    this.blindSent.push({ peerId, bytes });
+  }
+  async sendAck(peerId: string, eventId: Uint8Array): Promise<void> {
+    this.acksSent.push({ peerId, eventId });
+  }
+  onAck(cb: (peerId: string, eventId: Uint8Array) => void): () => void {
+    this.ackSubs.add(cb);
+    return () => {
+      this.ackSubs.delete(cb);
+    };
+  }
+
+  /** Simulate an inbound ack datagram from a peer. */
+  injectAck(peerId: string, eventId: Uint8Array): void {
+    for (const cb of this.ackSubs) cb(peerId, eventId);
+  }
+}
+
 const tick = (ms = 10) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
@@ -804,6 +837,119 @@ describe('A1 gate: internet off, post each way over BLE (v0.1.35)', () => {
     expect(res.transport).toBe('mesh');
     expect(res.blePeers).toBe(1);
     expect(port.sent.length).toBeGreaterThan(0);
+    await h.stop();
+  });
+});
+
+describe('BLE ACK frame + blind notify (v0.1.36)', () => {
+  test('a received post is acked to its ingress peer, duplicates included, invalid posts never', async () => {
+    const port = new FakeBlePortV36();
+    const crypto = new NobleCrypto();
+    const ble = new BleTransport(port, {
+      verify: (event) => verifyEvent(crypto, event),
+    });
+    await ble.start();
+    const received: SignedEvent[] = [];
+    ble.onReceive((e) => {
+      received.push(e);
+    });
+
+    const event = makePost('ack me');
+    injectEvent(port, 'peer1', event);
+    expect(received).toHaveLength(1);
+    expect(port.acksSent).toHaveLength(1);
+    expect(port.acksSent[0].peerId).toBe('peer1');
+    expect(toHex(port.acksSent[0].eventId)).toBe(toHex(event.id));
+
+    // A duplicate re-send is acked too (the ack fires before the
+    // seen-check), so the sender's retry ladder stops on redelivery.
+    injectEvent(port, 'peer2', event);
+    expect(received).toHaveLength(1);
+    expect(port.acksSent).toHaveLength(2);
+    expect(port.acksSent[1].peerId).toBe('peer2');
+
+    // A tampered post is dropped before the ack: invalid posts are
+    // never acked.
+    const genuine = makePost('victim');
+    const badSig = new Uint8Array(genuine.sig);
+    badSig[0] ^= 1;
+    injectEvent(port, 'peer1', { ...genuine, sig: badSig });
+    expect(received).toHaveLength(1);
+    expect(port.acksSent).toHaveLength(2);
+    await ble.stop();
+  });
+
+  test('inbound acks reach the onBleAck hook, and stop unsubscribes it', async () => {
+    const port = new FakeBlePortV36();
+    const seen: { peerId: string; eventIdHex: string }[] = [];
+    const ble = new BleTransport(port, {
+      onBleAck: (peerId, eventIdHex) => {
+        seen.push({ peerId, eventIdHex });
+      },
+    });
+    await ble.start();
+    const eventId = new Uint8Array(32).fill(0x42);
+    port.injectAck('peer1', eventId);
+    expect(seen).toEqual([{ peerId: 'peer1', eventIdHex: toHex(eventId) }]);
+    await ble.stop();
+    port.injectAck('peer1', eventId);
+    expect(seen).toHaveLength(1);
+  });
+
+  test('broadcast sends to connected peers and blind-notifies sighted-only peers', async () => {
+    const port = new FakeBlePortV36();
+    port.connected = ['p1'];
+    port.sighted = ['p2'];
+    const ble = new BleTransport(port);
+    await ble.start();
+    const event = makePost('blind me');
+    const sent = await ble.broadcast(event, ['p1']);
+    expect(sent).toBe(2);
+    expect(port.sent).toHaveLength(1);
+    expect(port.sent[0].peerId).toBe('p1');
+    expect(port.blindSent).toHaveLength(1);
+    expect(port.blindSent[0].peerId).toBe('p2');
+    // The blind frame is the same event, reassembled identically.
+    expect(port.blindSent[0].bytes).toEqual(port.sent[0].bytes);
+    await ble.stop();
+  });
+
+  test('a port without the v0.1.36 surface still receives and broadcasts (old-peer interop)', async () => {
+    // The legacy FakeBlePort has no sendAck, onAck, sightedPeerIds,
+    // or notifyUnconnected: receiving must not throw for the missing
+    // ack path, and broadcast must use send() for every target.
+    const port = new FakeBlePort();
+    const ble = new BleTransport(port);
+    await ble.start();
+    const received: SignedEvent[] = [];
+    ble.onReceive((e) => {
+      received.push(e);
+    });
+    const event = makePost('old peer');
+    injectEvent(port, 'peer1', event);
+    expect(received).toHaveLength(1);
+    const sent = await ble.broadcast(event, ['p1', 'p2']);
+    expect(sent).toBe(2);
+    expect(port.sent).toHaveLength(2);
+    await ble.stop();
+  });
+
+  test('mesh stage attempts a blind notify for a sighted-only peer instead of queuing', async () => {
+    const port = new FakeBlePortV36();
+    port.connected = [];
+    port.sighted = ['peerX'];
+    const ble = new BleTransport(port);
+    const h = new HybridTransport(ble, { relays: [] });
+    await h.start();
+    // No connected peers at all: without the sighted expansion this
+    // publish would queue. With it, the radio leg runs blind.
+    const res = await h.publish(makePost('sighted only'), []);
+    expect(res.transport).toBe('mesh');
+    expect(res.status).toBe('sent');
+    expect(res.blePeers).toBe(1);
+    expect(port.sent).toHaveLength(0);
+    expect(port.blindSent).toHaveLength(1);
+    expect(port.blindSent[0].peerId).toBe('peerX');
     await h.stop();
   });
 });

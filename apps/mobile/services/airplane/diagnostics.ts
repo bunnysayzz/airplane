@@ -550,7 +550,13 @@ export type ServiceLogDetail =
   | `network validated (${string})`
   | `network not validated (${string}): ${string}`
   | `drain skipped ${number} rows handed to same peers within ${number}s`
-  | `ble ident ${string}`;
+  | `ble ident ${string}`
+  | `ble ack received ${string} event ${string}`
+  | `ble ack timeout ${string} event ${string} attempts ${number}`
+  | `ble liveness watchdog tag ${string} attempting connect`
+  | `ble radio reset tag ${string} after ${number} timeouts`
+  | `ble radio reset failed ${string}`
+  | `ble blind notify tag ${string} fragments ${number}`;
 
 export function recordServiceEvent(detail: ServiceLogDetail): void {
   logEvent('service', detail);

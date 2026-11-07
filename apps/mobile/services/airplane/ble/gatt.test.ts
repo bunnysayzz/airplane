@@ -22,6 +22,7 @@ import {
   ATT_OVERHEAD,
   DATAGRAM_FRAME,
   DATAGRAM_HELLO,
+  DATAGRAM_ACK,
   DatagramReassembler,
   chunkBytes,
   encodeDatagram,
@@ -71,10 +72,14 @@ class FakeCentral implements CentralAdapter {
     if (this.failStart) throw new Error('central start refused');
     this.started = true;
   }
+  scanCalls = 0;
+  stopScanCalls = 0;
   async scan(): Promise<void> {
+    this.scanCalls += 1;
     this.scanning = true;
   }
   async stopScan(): Promise<void> {
+    this.stopScanCalls += 1;
     this.scanning = false;
   }
   onDiscover(cb: (info: { id: string; rssi: number; tag: Uint8Array | null }) => void): () => void {
@@ -1611,6 +1616,229 @@ describe('mesh-scan fix: adapter pre-check', () => {
     const port = new GattBlePort(deps);
     await expect(port.scan(() => {})).rejects.toThrow('adapter not on, scan skipped');
     expect(central.scanning).toBe(false);
+    await port.close();
+  });
+});
+
+describe('BLE ACK frame + liveness watchdog (v0.1.36)', () => {
+  const EVENT_ID = new Uint8Array(32).fill(0x42);
+  const TIMEOUT_ERR = new Error('ble: central connect timed out after 10000ms');
+
+  /** Connect the fake peer, then drop the central link (peer stays sighted + known). */
+  async function connectThenDisconnect(
+    deps: BleNativeDeps,
+    central: FakeCentral,
+    port: GattBlePort,
+  ): Promise<void> {
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    central.disconnectCb!('ble-1');
+    await tick(20);
+    expect(port.connectedPeerIds()).toEqual([]);
+  }
+
+  test('sightedPeerIds lists a resolved peer after disconnect, empty before it is known', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    expect(port.sightedPeerIds()).toEqual([]);
+    // Discovered but never connected: the tag is known, the identity is not.
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    expect(port.sightedPeerIds()).toEqual([PEER_HEX]);
+    // After the link drops the peer stays sighted and addressable:
+    // the identity is remembered past the connection, and the
+    // advertisement is still fresh.
+    central.disconnectCb!('ble-1');
+    await tick(20);
+    expect(port.connectedPeerIds()).toEqual([]);
+    expect(port.sightedPeerIds()).toEqual([PEER_HEX]);
+    await port.close();
+  });
+
+  test('liveness watchdog reconnects a sighted peer with no connection (defect 1)', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind: string, detail: string) => lines.push(`${kind}:${detail}`));
+    try {
+      const { deps, central } = makeDeps();
+      const port = new GattBlePort(deps);
+      await connectThenDisconnect(deps, central, port);
+      expect(central.connectAttempts).toEqual(['ble-1']);
+      // No new sighting arrives: the sighting path has nothing to
+      // fire on, which is exactly the .35 hole. The watchdog is the
+      // only attempter, and it reconnects.
+      port.runBleLivenessWatchdog();
+      await tick(50);
+      expect(central.connectAttempts).toEqual(['ble-1', 'ble-1']);
+      expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+      expect(lines.some((l) => l.includes('ble liveness watchdog'))).toBe(true);
+      await port.close();
+    } finally {
+      setDiagnosticsLogSink(null);
+      resetDiagnosticsForTests();
+    }
+  });
+
+  test('liveness watchdog stays quiet when connected, and when the cooldown is active', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    // Connected: nothing to do.
+    port.runBleLivenessWatchdog();
+    await tick(20);
+    expect(central.connectAttempts).toEqual(['ble-1']);
+    // Disconnect, then fail the next connect: the cooldown arms.
+    central.disconnectCb!('ble-1');
+    await tick(20);
+    central.failConnect.add('ble-1');
+    central.failConnectError = TIMEOUT_ERR;
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connectAttempts).toEqual(['ble-1', 'ble-1']);
+    expect(port.peerCount).toBe(0);
+    // Cooldown active (10 s): the watchdog must not storm.
+    port.runBleLivenessWatchdog();
+    await tick(20);
+    expect(central.connectAttempts).toEqual(['ble-1', 'ble-1']);
+    await port.close();
+  });
+
+  test('fresh-bleId retry: after rotation the retry uses the new address, never the stale one', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await connectThenDisconnect(deps, central, port);
+    central.failConnect.add('ble-1');
+    central.failConnect.add('ble-2');
+    central.failConnectError = TIMEOUT_ERR;
+    // First failure on the old address: one retry is scheduled.
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connectAttempts).toEqual(['ble-1', 'ble-1']);
+    // Address rotation: the same tag is now heard on ble-2. The
+    // sighting path attempts the fresh address at once.
+    central.discoverCb!({ id: 'ble-2', rssi: -58, tag: PEER_TAG });
+    await tick(50);
+    expect(central.connectAttempts).toEqual(['ble-1', 'ble-1', 'ble-2']);
+    // The scheduled retry fires ~2 s after the first failure. It
+    // must re-resolve to ble-2 (the current address), not close over
+    // the stale ble-1: ble-1 is attempted exactly twice in total
+    // (the good connect plus the one failure), never again.
+    await tick(2200);
+    expect(central.connectAttempts.filter((id) => id === 'ble-1')).toHaveLength(2);
+    expect(central.connectAttempts.filter((id) => id === 'ble-2').length).toBeGreaterThanOrEqual(2);
+    expect(port.peerCount).toBe(0);
+    await port.close();
+  });
+
+  test('radio reset fires once after three timeouts, then attempts resume', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind: string, detail: string) => lines.push(`${kind}:${detail}`));
+    try {
+      const { deps, central } = makeDeps();
+      const port = new GattBlePort(deps);
+      await connectThenDisconnect(deps, central, port);
+      central.failConnect.add('ble-1');
+      central.failConnect.add('ble-2');
+      central.failConnectError = TIMEOUT_ERR;
+      // Timeout 1 (sighting path, ble-1) and timeout 2 (sighting
+      // path after rotation to ble-2): the streak is per tag, so
+      // rotation does not reset it.
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+      await tick(50);
+      central.discoverCb!({ id: 'ble-2', rssi: -58, tag: PEER_TAG });
+      await tick(50);
+      // Timeout 3 comes from the scheduled retry (~2 s after the
+      // first failure), which re-resolves to the fresh ble-2.
+      await tick(2200);
+      expect(central.connectAttempts.filter((id) => id === 'ble-1')).toHaveLength(2);
+      expect(central.connectAttempts.filter((id) => id === 'ble-2').length).toBeGreaterThanOrEqual(2);
+      // The watchdog fires the reset even while the cooldown is
+      // active (the reset is a one-time radio recovery, not a
+      // connect attempt): the scan restarts, exactly once.
+      expect(central.scanCalls).toBe(1);
+      port.runBleLivenessWatchdog();
+      await tick(50);
+      expect(central.scanCalls).toBe(2);
+      expect(central.stopScanCalls).toBe(1);
+      expect(central.scanning).toBe(true);
+      expect(lines.some((l) => l.includes('ble radio reset'))).toBe(true);
+      // A second watchdog tick does not reset again (once per episode).
+      port.runBleLivenessWatchdog();
+      await tick(50);
+      expect(central.scanCalls).toBe(2);
+      expect(central.stopScanCalls).toBe(1);
+      expect(port.peerCount).toBe(0);
+      await port.close();
+    } finally {
+      setDiagnosticsLogSink(null);
+      resetDiagnosticsForTests();
+    }
+  });
+
+  test('blind notify reaches a sighted peer with no connection, chunked at the remembered MTU', async () => {
+    const { deps, central, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await connectThenDisconnect(deps, central, port);
+    // The peer is sighted but unconnected; the remembered MTU is 512
+    // (negotiated at connect), so a 600-byte frame chunks at 509
+    // bytes: 2 chunks, not the ~31 the ATT default of 23 would give.
+    const frame = new Uint8Array(600).fill(0x55);
+    await port.notifyUnconnected(PEER_HEX, frame);
+    expect(peripheral.notified).toHaveLength(2);
+    const datagrams = peripheral.notifiedDatagrams();
+    expect(datagrams).toHaveLength(1);
+    expect(datagrams[0][0]).toBe(DATAGRAM_FRAME);
+    expect(datagrams[0].slice(1)).toEqual(frame);
+    // Unknown peer: fail closed.
+    await expect(port.notifyUnconnected('deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef', frame)).rejects.toThrow(
+      /unknown peer/,
+    );
+    await port.close();
+  });
+
+  test('ack frame: sendAck notifies the event id, inbound ack reaches subscribers, malformed acks drop', async () => {
+    const { deps, central, peripheral } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    const acks: { peerId: string; eventId: Uint8Array }[] = [];
+    const unsub = port.onAck((peerId, eventId) => acks.push({ peerId, eventId }));
+    // Outbound: the ack notifies as a datagram on our TX.
+    await port.sendAck(PEER_HEX, EVENT_ID);
+    const sent = peripheral.notifiedDatagrams();
+    expect(sent).toHaveLength(1);
+    expect(sent[0][0]).toBe(DATAGRAM_ACK);
+    expect(sent[0].slice(1)).toEqual(EVENT_ID);
+    // Inbound: an ack frame arriving as a TX notification reaches subscribers.
+    central.notifyCb!({ id: 'ble-1', value: encodeDatagram(DATAGRAM_ACK, EVENT_ID) });
+    expect(acks).toHaveLength(1);
+    expect(acks[0].peerId).toBe(PEER_HEX);
+    expect(acks[0].eventId).toEqual(EVENT_ID);
+    // Malformed ack (31 bytes, not 32) is dropped silently.
+    central.notifyCb!({ id: 'ble-1', value: encodeDatagram(DATAGRAM_ACK, new Uint8Array(31).fill(1)) });
+    expect(acks).toHaveLength(1);
+    // Unsubscribe stops delivery.
+    unsub();
+    central.notifyCb!({ id: 'ble-1', value: encodeDatagram(DATAGRAM_ACK, EVENT_ID) });
+    expect(acks).toHaveLength(1);
+    // sendAck to an unknown peer throws.
+    await expect(port.sendAck('deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef', EVENT_ID)).rejects.toThrow(
+      /unknown peer/,
+    );
     await port.close();
   });
 });

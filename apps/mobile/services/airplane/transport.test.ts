@@ -30,7 +30,7 @@ const AsyncStorageMock = require('@react-native-async-storage/async-storage').de
 };
 
 import NetInfo from '@react-native-community/netinfo';
-import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, __resetTransportForTests, __setDrainRowDelayMsForTests, __resetNetInfoForTests, __resetPulledPostsForTests, __resetFailedInboundForTests, __getHybridForTests, __setBlePortForTests, getBleRadioState, blePeerIdsForPublish, resolveRelayState, getMeshStatus, subscribeMeshStatus, retryBleRadio, revalidateBleRadio } from './transport';
+import { startTransport, stopTransport, publishViaTransport, pruneExpiredStore, drainPostOutbox, runWorldSyncPass, __resetTransportForTests, __setDrainRowDelayMsForTests, __resetNetInfoForTests, __resetPulledPostsForTests, __resetFailedInboundForTests, __getHybridForTests, __setBlePortForTests, __simulateBleAckForTests, getBleRadioState, blePeerIdsForPublish, bleTargetPeerIds, resolveRelayState, getMeshStatus, subscribeMeshStatus, retryBleRadio, revalidateBleRadio } from './transport';
 import { getStore, __resetStoreForTests } from './store';
 import { subscribeFeed } from './feed';
 import { __resetDeviceKeypairForTests } from './identity';
@@ -186,10 +186,11 @@ describe('transport manager', () => {
   test('offline initial state does not start the sync timer', async () => {
     const setIntervalSpy = jest.spyOn(globalThis, 'setInterval');
     await startTransport();
-    // The relay pool watchdog (15 s, v0.1.31) is the only interval at
-    // startup: the periodic sync timer (60 s) must not start offline.
-    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
-    expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 15_000);
+    // Two 15 s watchdogs at startup (the relay pool watchdog v0.1.31
+    // and the BLE liveness watchdog v0.1.36): the periodic sync timer
+    // (60 s) must not start offline.
+    expect(setIntervalSpy).toHaveBeenCalledTimes(2);
+    expect(setIntervalSpy.mock.calls.filter((c) => c[1] === 15_000)).toHaveLength(2);
     expect(setIntervalSpy).not.toHaveBeenCalledWith(expect.any(Function), 60_000);
     setIntervalSpy.mockRestore();
   });
@@ -630,10 +631,12 @@ describe('transport manager', () => {
 
     listener({ isConnected: true, isInternetReachable: true });
     listener({ isConnected: true, isInternetReachable: true }); // duplicate
-    // Two intervals total: the relay pool watchdog (15 s, started at
-    // launch) and the periodic sync timer (60 s, started once here).
-    expect(setIntervalSpy).toHaveBeenCalledTimes(2);
+    // Three intervals total: the relay pool watchdog (15 s) and the
+    // BLE liveness watchdog (15 s, both started at launch) and the
+    // periodic sync timer (60 s, started once here).
+    expect(setIntervalSpy).toHaveBeenCalledTimes(3);
     expect(setIntervalSpy.mock.calls.filter((c) => c[1] === 60_000)).toHaveLength(1);
+    expect(setIntervalSpy.mock.calls.filter((c) => c[1] === 15_000)).toHaveLength(2);
     expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 60_000);
     setIntervalSpy.mockRestore();
   });
@@ -1038,6 +1041,129 @@ describe('transport manager', () => {
     expect(getBleRadioState()).toBe('on');
     expect(__getHybridForTests()).not.toBeNull();
   });
+
+  // BLE ACK frame (v0.1.36): a BLE-sent post is not done until acked.
+  test('acked post: the drain never re-sends it, even after the handoff window', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const event = { ...makeSignedEvent(), id: new Uint8Array(32).fill(71), created_at: Math.floor(Date.now() / 1000) - 600, tags: [['seq', '21']] };
+    await store.saveEvent(event);
+    await store.enqueuePostOutbox(toHex(event.id), event.created_at);
+    const sendOverMesh = jest.spyOn(hybrid!, 'sendOverMesh').mockResolvedValue(1);
+    __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
+    expect(await drainPostOutbox()).toBe(1);
+    expect(sendOverMesh).toHaveBeenCalledTimes(1);
+    // The peer acks the post: the pair is done, even though the row
+    // stays queued until World-confirmed.
+    __simulateBleAckForTests('peerX', toHex(event.id));
+    // Past the 120 s handoff window, the drain still must not
+    // re-send an acked pair (the .35 duplicate drain).
+    await jest.advanceTimersByTimeAsync(121_000);
+    expect(await drainPostOutbox()).toBe(0);
+    expect(sendOverMesh).toHaveBeenCalledTimes(1);
+    const rows = await store.listPostOutbox();
+    expect(rows.map((r) => r.eventId)).toContain(toHex(event.id));
+    __setBlePortForTests(null);
+  });
+
+  test('unacked post: the drain re-sends it inside the handoff window, then stops at the cap', async () => {
+    const serviceLines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => {
+      if (kind === 'service') serviceLines.push(detail);
+    });
+    try {
+      await startTransport();
+      const hybrid = __getHybridForTests();
+      expect(hybrid).not.toBeNull();
+      const store = getStore();
+      const event = { ...makeSignedEvent(), id: new Uint8Array(32).fill(72), created_at: Math.floor(Date.now() / 1000) - 600, tags: [['seq', '22']] };
+      await store.saveEvent(event);
+      await store.enqueuePostOutbox(toHex(event.id), event.created_at);
+      const sendOverMesh = jest.spyOn(hybrid!, 'sendOverMesh').mockResolvedValue(1);
+      __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
+      // Attempt 1 (direct drain). Attempts 2 and 3 come from the
+      // 5 s ack timer: each fires only once the ack is overdue, so
+      // the retry stays spaced at the timeout instead of per drain
+      // trigger. After attempt 3 the ladder is exhausted, the
+      // timeout line logs once, and no further timer is armed. The
+      // row stays queued for relay confirmation throughout.
+      expect(await drainPostOutbox()).toBe(1);
+      expect(sendOverMesh).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(6000);
+      expect(sendOverMesh).toHaveBeenCalledTimes(2);
+      await jest.advanceTimersByTimeAsync(6000);
+      expect(sendOverMesh).toHaveBeenCalledTimes(3);
+      await jest.advanceTimersByTimeAsync(6000);
+      expect(sendOverMesh).toHaveBeenCalledTimes(3);
+      expect(serviceLines.some((l) => l.includes('ble ack timeout'))).toBe(true);
+      const rows = await store.listPostOutbox();
+      expect(rows.map((r) => r.eventId)).toContain(toHex(event.id));
+      __setBlePortForTests(null);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
+  test('old-peer-no-ack fallback: the row leaves via relay confirmation, nothing stalls', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const event = { ...makeSignedEvent(), id: new Uint8Array(32).fill(73), created_at: Math.floor(Date.now() / 1000) - 600, tags: [['seq', '23']] };
+    await store.saveEvent(event);
+    await store.enqueuePostOutbox(toHex(event.id), event.created_at);
+    const sendOverMesh = jest.spyOn(hybrid!, 'sendOverMesh').mockResolvedValue(1);
+    __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
+    // The old peer never acks: the bounded ladder runs out (3 sends
+    // via the direct drain plus two timer fires), the drain stops
+    // retrying, and the row is not wedged.
+    expect(await drainPostOutbox()).toBe(1);
+    await jest.advanceTimersByTimeAsync(6000);
+    await jest.advanceTimersByTimeAsync(6000);
+    expect(sendOverMesh).toHaveBeenCalledTimes(3);
+    await jest.advanceTimersByTimeAsync(6000);
+    expect(sendOverMesh).toHaveBeenCalledTimes(3);
+    // Relay confirmation removes the row, and the next drain prunes
+    // the stale ack entry instead of retrying forever.
+    await store.markWorldConfirmed(toHex(event.id));
+    expect(await drainPostOutbox()).toBe(0);
+    const rows = await store.listPostOutbox();
+    expect(rows.map((r) => r.eventId)).not.toContain(toHex(event.id));
+    __setBlePortForTests(null);
+  });
+
+  test('mesh publish arms the ack retry timer; the ack disarms it', async () => {
+    await startTransport();
+    const hybrid = __getHybridForTests();
+    expect(hybrid).not.toBeNull();
+    const store = getStore();
+    const event = { ...makeSignedEvent(), id: new Uint8Array(32).fill(74), created_at: Math.floor(Date.now() / 1000) - 600, tags: [['seq', '24']] };
+    await store.saveEvent(event);
+    await store.enqueuePostOutbox(toHex(event.id), event.created_at);
+    jest.spyOn(hybrid!, 'publish').mockResolvedValue({
+      transport: 'mesh',
+      status: 'sent',
+      blePeers: 1,
+      relays: [],
+      relayTried: true,
+      relayDetail: null,
+    });
+    const sendOverMesh = jest.spyOn(hybrid!, 'sendOverMesh').mockResolvedValue(1);
+    __setBlePortForTests({ connectedPeerIds: () => ['peerX'] } as never);
+    await publishViaTransport(event);
+    // No ack arrives: the 5 s timer fires the drain, which re-sends
+    // the unacked row once.
+    await jest.advanceTimersByTimeAsync(6000);
+    expect(sendOverMesh).toHaveBeenCalledTimes(1);
+    // The peer acks: the timer is disarmed, and no further drain
+    // fires for this pair.
+    __simulateBleAckForTests('peerX', toHex(event.id));
+    await jest.advanceTimersByTimeAsync(6000);
+    expect(sendOverMesh).toHaveBeenCalledTimes(1);
+    __setBlePortForTests(null);
+  });
 });
 
 describe('BLE publish targets + mesh status', () => {
@@ -1054,6 +1180,22 @@ describe('BLE publish targets + mesh status', () => {
     expect(blePeerIdsForPublish({ connectedPeerIds: () => [] } as never)).toEqual([]);
     expect(blePeerIdsForPublish(null)).toEqual([]);
     expect(blePeerIdsForPublish(undefined)).toEqual([]);
+  });
+
+  test('bleTargetPeerIds unions connected and sighted peers, deduped (v0.1.36)', () => {
+    expect(bleTargetPeerIds(null)).toEqual([]);
+    expect(bleTargetPeerIds(undefined)).toEqual([]);
+    expect(bleTargetPeerIds({} as never)).toEqual([]);
+    // Connected only when the port has no sighting surface (old port).
+    expect(bleTargetPeerIds({ connectedPeerIds: () => ['a'] } as never)).toEqual(['a']);
+    // Sighted-only peers join the target set; duplicates collapse.
+    expect(
+      bleTargetPeerIds({
+        connectedPeerIds: () => ['a'],
+        sightedPeerIds: () => ['b', 'a'],
+      } as never),
+    ).toEqual(['a', 'b']);
+    expect(bleTargetPeerIds({ connectedPeerIds: () => { throw new Error('boom'); } } as never)).toEqual([]);
   });
 
   test('resolveRelayState truth table', () => {

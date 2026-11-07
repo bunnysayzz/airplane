@@ -257,12 +257,43 @@ const DRAIN_HANDOFF_MAX_ROWS = 500;
  * simultaneous burst (B draining 7 posts in 130 ms while A drained
  * 6) lost every frame on the wire with no receipt signal, and the
  * comparables pace or serialize for the same reason (Meshtastic
- * retries with backoff, MeshCore 1/2/4/8/16 s). A full app-level ACK
- * frame is the follow-up that closes this for good. Mutable only so
- * tests can set it to 0 (fake timers never advance otherwise).
+ * retries with backoff, MeshCore 1/2/4/8/16 s). The app-level ACK
+ * frame (v0.1.36) now closes the receipt gap: an unacked pair is
+ * re-sent by the drain on a bounded ladder instead of being lost
+ * silently. Mutable only so tests can set it to 0 (fake timers never
+ * advance otherwise).
  */
 const DRAIN_ROW_DELAY_MS = 50;
 let drainRowDelayMs = DRAIN_ROW_DELAY_MS;
+/**
+ * BLE post-ack tracking (v0.1.36): event id hex -> peer tag (first 8
+ * hex) -> ack state. A BLE-sent post is not done until acked: the
+ * receiver acks every decoded, verified post, and an unacked pair is
+ * re-sent by the drain (bypassing the handoff window) on a bounded
+ * retry ladder. An ack proves BLE receipt only: it never removes an
+ * outbox row and never replaces relay confirmation, so a row stays
+ * queued until World-confirmed exactly as today. A forged ack can at
+ * most suppress a BLE retry: it is accepted only for a pending
+ * (event, peer) this phone actually sent, and the row still needs
+ * relay confirmation to leave the outbox. Posts carry no shared
+ * secret with the peer (unlike DMs, which have a conversation key),
+ * so post acks carry no HMAC. Entries are pruned when their row
+ * leaves the outbox (see drainPostOutbox).
+ */
+const BLE_ACK_TIMEOUT_MS = 5_000;
+const BLE_ACK_MAX_ATTEMPTS = 3;
+interface BleAckPending {
+  attempts: number;
+  acked: boolean;
+  timeoutLogged: boolean;
+  lastSentMs: number;
+}
+const bleAckPending = new Map<string, Map<string, BleAckPending>>();
+let bleAckRetryTimer: ReturnType<typeof setTimeout> | null = null;
+/** BLE liveness watchdog timer (v0.1.36, see runBleLivenessWatchdog). */
+let bleLivenessWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+/** BLE liveness watchdog tick interval, ms (mirrors the relay pool watchdog). */
+const BLE_LIVENESS_WATCHDOG_INTERVAL_MS = 15_000;
 /** Relay pool watchdog timer (see runRelayPoolWatchdog). */
 let poolWatchdogTimer: ReturnType<typeof setInterval> | null = null;
 /** Watchdog tick interval, ms. */
@@ -701,7 +732,13 @@ async function runRecoveryPass(): Promise<void> {
 /** Test seam: reset transport recovery state between tests. */
 export function __resetTransportForTests(): void {
   drainHandoffByEvent.clear();
+  bleAckPending.clear();
+  if (bleAckRetryTimer) {
+    clearTimeout(bleAckRetryTimer);
+    bleAckRetryTimer = null;
+  }
   prevMeshPeers = 0;
+  prevBleTargets = 0;
   prevDmOpenRelays = 0;
   drainRowDelayMs = DRAIN_ROW_DELAY_MS;
 }
@@ -870,6 +907,13 @@ export async function startTransport(): Promise<void> {
         ],
         finalStatus: 'forwarded via BLE',
       });
+    },
+    // BLE post ack (v0.1.36): a peer acknowledging a post stops the
+    // retry ladder for that (event, peer) pair. The ack proves BLE
+    // receipt only; it never confirms World and never removes an
+    // outbox row (see markBleAckReceived).
+    onBleAck: (peerId, eventIdHex) => {
+      markBleAckReceived(peerId, eventIdHex);
     },
   });
   // Relay list is user-configurable in Settings > Relays and persisted in
@@ -1093,6 +1137,20 @@ export async function startTransport(): Promise<void> {
     poolWatchdogTimer = setInterval(() => runRelayPoolWatchdog(), POOL_WATCHDOG_INTERVAL_MS);
   }
 
+  // BLE liveness watchdog (v0.1.36): a sighted peer with no live
+  // connection gets a (re)connect attempt every 15 s, bounded by the
+  // .29 cooldown inside the port, plus a bounded radio reset after
+  // repeated connect timeouts. Cleared in stopTransport.
+  if (!bleLivenessWatchdogTimer) {
+    bleLivenessWatchdogTimer = setInterval(() => {
+      try {
+        blePort?.port.runBleLivenessWatchdog?.();
+      } catch {
+        // The watchdog must never break the timer.
+      }
+    }, BLE_LIVENESS_WATCHDOG_INTERVAL_MS);
+  }
+
   // Startup retention cleanup (best-effort, never fails launch). This is
   // the first prune a long-lived install has ever run, so it deletes
   // rows past the designed 24 h window on first launch after this change.
@@ -1288,6 +1346,26 @@ export function blePeerIdsForPublish(port: TransportPort | null | undefined): st
   }
 }
 
+/**
+ * BLE send targets (v0.1.36): connected peers plus recently sighted
+ * peers, deduped. A sighted peer with no live connection still gets
+ * a blind notify on our TX when the port supports it (see
+ * BleTransport.broadcast): the peer central may be subscribed to
+ * our TX even though our central to it is dead, which is exactly
+ * the .35 defect-1 shape. The mesh pill keeps using
+ * blePeerIdsForPublish (connected only): "linked neighbours" means
+ * linked, not merely heard.
+ */
+export function bleTargetPeerIds(port: TransportPort | null | undefined): string[] {
+  try {
+    const connected = port?.connectedPeerIds?.() ?? [];
+    const sighted = port?.sightedPeerIds?.() ?? [];
+    return [...new Set([...connected, ...sighted])];
+  } catch {
+    return [];
+  }
+}
+
 /** Mesh pill state: linked neighbours + what the app is actually syncing over. */
 export interface MeshStatusSnapshot {
   /** Established BLE connections (linked neighbours - not merely heard ads). */
@@ -1340,6 +1418,8 @@ export function getMeshStatus(): MeshStatusSnapshot {
  */
 /** Connected-peer count at the last mesh-status poll (peer-arrival edge). */
 let prevMeshPeers = 0;
+/** BLE target count (connected plus sighted) at the last mesh-status poll. */
+let prevBleTargets = 0;
 /** DM relay open-socket count at the last mesh-status poll. */
 let prevDmOpenRelays = 0;
 
@@ -1359,6 +1439,19 @@ export function subscribeMeshStatus(cb: () => void): () => void {
       void drainPostOutbox().catch(() => {});
     }
     prevMeshPeers = next.peersNearby;
+    // Sighted-peer arrival (v0.1.36) drains the post outbox the same
+    // way: a post queued with no peers gets its blind-notify re-send
+    // when a peer is merely sighted, without waiting for a live
+    // connection. Fires only when no peer is connected (the
+    // connected edge above covers the connected case), and only on
+    // the 0-to-N edge, so a steady sighted set does not re-drain
+    // every poll. The DM outbox is not flushed here: DMs need a
+    // connection, not a sighting.
+    const bleTargets = bleTargetPeerIds(blePort?.port).length;
+    if (prevBleTargets === 0 && bleTargets > 0 && next.peersNearby === 0) {
+      void drainPostOutbox().catch(() => {});
+    }
+    prevBleTargets = bleTargets;
     // DM pool recovery is a transport return too (v0.1.31): the DM
     // pool recovered at 03:26:41 while the post pool stayed dead, and
     // no recovery covered it. A rise in the DM open count
@@ -1454,6 +1547,16 @@ export function __getHybridForTests(): HybridTransport | null {
 /** Test-only seam: replace the BLE port (transport tests drive bring-up without native modules). */
 export function __setBlePortForTests(port: TransportPort | null): void {
   blePort = port ? { port, close: async () => {} } : null;
+}
+
+/**
+ * Test-only seam: deliver an inbound BLE ack as if a peer acknowledged
+ * a post (v0.1.36). The production path is BleTransport.onBleAck ->
+ * markBleAckReceived; this seam drives the same tracker so tests can
+ * verify the retry ladder without a radio.
+ */
+export function __simulateBleAckForTests(peerId: string, eventIdHex: string): void {
+  markBleAckReceived(peerId, eventIdHex);
 }
 
 /**
@@ -1572,6 +1675,15 @@ export async function stopTransport(): Promise<void> {
     clearInterval(poolWatchdogTimer);
     poolWatchdogTimer = null;
   }
+  if (bleLivenessWatchdogTimer) {
+    clearInterval(bleLivenessWatchdogTimer);
+    bleLivenessWatchdogTimer = null;
+  }
+  if (bleAckRetryTimer) {
+    clearTimeout(bleAckRetryTimer);
+    bleAckRetryTimer = null;
+  }
+  bleAckPending.clear();
   netUnsub?.();
   netUnsub = null;
   lastOnline = null;
@@ -1596,6 +1708,97 @@ export async function stopTransport(): Promise<void> {
   transportStartFailed = false;
   bleRadioState = 'unavailable';
   syncDiagnosticsAdapterState();
+}
+
+/**
+ * Register a BLE send for ack tracking (v0.1.36): one pending entry
+ * per (event, peer) pair, attempts counting sends (publish-time and
+ * drain-time alike). A pair is re-sent by the drain until acked or
+ * until the bounded ladder runs out; a pair whose row left the
+ * outbox is pruned by the drain, not here.
+ */
+function registerBleAckPending(eventIdHex: string, peerIds: string[], nowMs: number): void {
+  let byPeer = bleAckPending.get(eventIdHex);
+  if (!byPeer) {
+    byPeer = new Map<string, BleAckPending>();
+    bleAckPending.set(eventIdHex, byPeer);
+  }
+  for (const peerId of peerIds) {
+    const tag = peerId.slice(0, 8);
+    const existing = byPeer.get(tag);
+    if (existing) {
+      existing.attempts += 1;
+      existing.lastSentMs = nowMs;
+    } else {
+      byPeer.set(tag, { attempts: 1, acked: false, timeoutLogged: false, lastSentMs: nowMs });
+    }
+  }
+  scheduleBleAckRetry();
+}
+
+/**
+ * Record an inbound BLE ack (v0.1.36): the (event, peer) pair stops
+ * retrying. Unknown acks (no pending entry: the row already left the
+ * outbox, or the ack is for a post this phone never sent) are
+ * ignored silently. A fully acked event drops its entry.
+ */
+function markBleAckReceived(peerId: string, eventIdHex: string): void {
+  const byPeer = bleAckPending.get(eventIdHex);
+  if (!byPeer) return;
+  const entry = byPeer.get(peerId.slice(0, 8));
+  if (!entry || entry.acked) return;
+  entry.acked = true;
+  recordServiceEvent(`ble ack received ${peerId.slice(0, 8)} event ${eventIdHex.slice(0, 8)}`);
+  // The entry is deliberately NOT deleted when every peer has acked:
+  // the acked state is what makes the drain skip the pair even after
+  // the handoff window lapses (see drainTargetsForRow). The entry is
+  // pruned when its row leaves the outbox (see drainPostOutbox), so
+  // it lives at most as long as the row does.
+  scheduleBleAckRetry();
+}
+
+/**
+ * Arm the single ack-retry timer (v0.1.36) for the earliest unacked
+ * pair still inside its ladder. On fire, the drain re-sends unacked
+ * rows (bypassing the handoff window, see drainTargetsForRow) and
+ * the timer re-arms only after the drain runs, so the new send
+ * times are what the next deadline is computed from. A pair whose
+ * ladder is exhausted logs its timeout line exactly once and is
+ * never scheduled again; the row still waits for relay confirmation.
+ * No pending pair means no timer.
+ */
+function scheduleBleAckRetry(): void {
+  if (bleAckRetryTimer) {
+    clearTimeout(bleAckRetryTimer);
+    bleAckRetryTimer = null;
+  }
+  const nowMs = Date.now();
+  let earliest: number | null = null;
+  for (const [eventId, byPeer] of [...bleAckPending]) {
+    for (const [tag, entry] of [...byPeer]) {
+      if (entry.acked) continue;
+      if (entry.attempts >= BLE_ACK_MAX_ATTEMPTS) {
+        if (!entry.timeoutLogged) {
+          entry.timeoutLogged = true;
+          recordServiceEvent(
+            `ble ack timeout ${tag} event ${eventId.slice(0, 8)} attempts ${entry.attempts}`,
+          );
+        }
+        continue;
+      }
+      const dueMs = entry.lastSentMs + BLE_ACK_TIMEOUT_MS;
+      if (earliest === null || dueMs < earliest) earliest = dueMs;
+    }
+  }
+  if (earliest === null) return;
+  const delay = Math.max(0, earliest - nowMs);
+  bleAckRetryTimer = setTimeout(() => {
+    bleAckRetryTimer = null;
+    if (!hybrid) return;
+    void drainPostOutbox()
+      .catch(() => {})
+      .finally(() => scheduleBleAckRetry());
+  }, delay);
 }
 
 /**
@@ -1626,7 +1829,10 @@ export async function stopTransport(): Promise<void> {
  */
 export async function drainPostOutbox(): Promise<number> {
   if (!hybrid) return 0;
-  const peers = blePeerIdsForPublish(blePort?.port);
+  // Targets are connected plus sighted peers (v0.1.36): a sighted
+  // peer with no live connection still gets a blind notify on our
+  // TX, which is how an unacked post is re-sent to it.
+  const peers = bleTargetPeerIds(blePort?.port);
   if (peers.length === 0) return 0;
   const nowMs = Date.now();
   pruneDrainHandoffMemory(nowMs);
@@ -1636,6 +1842,14 @@ export async function drainPostOutbox(): Promise<number> {
   try {
     const store = getStore();
     const rows = await store.listPostOutbox();
+    // Ack entries for rows that left the outbox (World-confirmed or
+    // expired) are pruned here: no ack is owed for a row that is
+    // gone, and without this the retry timer would fire forever for
+    // a row the drain can never re-send.
+    const liveIds = new Set(rows.map((r) => r.eventId));
+    for (const eventId of [...bleAckPending.keys()]) {
+      if (!liveIds.has(eventId)) bleAckPending.delete(eventId);
+    }
     for (const row of rows) {
       const event = await store.getEvent(row.eventId).catch(() => null);
       if (!event) {
@@ -1664,6 +1878,10 @@ export async function drainPostOutbox(): Promise<number> {
       if (sent > 0) {
         sentRows += 1;
         recordDrainHandoff(row.eventId, targets, nowMs);
+        // Ack tracking (v0.1.36): this send counts as one attempt
+        // for each target pair; the retry timer re-sends unacked
+        // pairs until acked or the ladder runs out.
+        registerBleAckPending(row.eventId, targets, nowMs);
         await store.markPostOutboxAttempt(row.eventId, 'ble-sent').catch(() => {});
       } else {
         await store.markPostOutboxAttempt(row.eventId, 'unsent').catch(() => {});
@@ -1705,12 +1923,17 @@ export async function drainPostOutbox(): Promise<number> {
   return sentRows;
 }
 
-/** Peers this row has not been handed to inside the window. */
+/** Peers this row has not been handed to inside the window, plus peers with an unacked BLE send whose ack is overdue (v0.1.36). An acked pair is never re-sent, even after the handoff window lapses: the peer confirmed receipt, and re-sending it is the .35 duplicate drain. An unacked pair bypasses the handoff window only once its ack is overdue (last send more than BLE_ACK_TIMEOUT_MS ago), so a drain-trigger storm inside the timeout still dedupes via the .31 handoff window and the retry stays spaced at the timeout, not per trigger. */
 function drainTargetsForRow(eventId: string, peers: string[], nowMs: number): string[] {
   const handed = drainHandoffByEvent.get(eventId);
-  if (!handed || handed.size === 0) return [...peers];
+  const pending = bleAckPending.get(eventId);
   return peers.filter((peerId) => {
-    const atMs = handed.get(peerId.slice(0, 8));
+    const tag = peerId.slice(0, 8);
+    const ack = pending?.get(tag);
+    if (ack?.acked) return false;
+    if (ack && ack.attempts < BLE_ACK_MAX_ATTEMPTS && nowMs - ack.lastSentMs >= BLE_ACK_TIMEOUT_MS) return true;
+    if (!handed || handed.size === 0) return true;
+    const atMs = handed.get(tag);
     return atMs === undefined || nowMs - atMs >= DRAIN_HANDOFF_WINDOW_MS;
   });
 }
@@ -1745,11 +1968,29 @@ function pruneDrainHandoffMemory(nowMs: number): void {
 /** Publish a local event through the ordered router (R4). */
 export async function publishViaTransport(event: SignedEvent): Promise<RouteResult> {
   if (!hybrid) await startTransport();
-  // BLE fan-out targets the currently connected peers. Previously this
-  // call passed no peer ids at all, so local posts NEVER went out over
-  // BLE - only Nostr - even with phones connected over GATT.
-  const blePeersAtPublish = blePeerIdsForPublish(blePort?.port);
+  // BLE fan-out targets the currently connected peers plus recently
+  // sighted peers (v0.1.36, see bleTargetPeerIds): a sighted peer
+  // with no live connection still gets a blind notify on our TX.
+  // Previously this call passed no peer ids at all, so local posts
+  // NEVER went out over BLE - only Nostr - even with phones
+  // connected over GATT.
+  const blePeersAtPublish = bleTargetPeerIds(blePort?.port);
   const result = await hybrid!.publish(event, blePeersAtPublish);
+  // Ack tracking (v0.1.36): a mesh win hands the post to the radio
+  // for at least one peer, so each target pair gets a pending ack
+  // (attempt 1); the drain re-sends unacked pairs until acked or
+  // the ladder runs out. A relay win removes the outbox row, so no
+  // ack is tracked for it. The publish also records drain handoff
+  // memory for its targets: without it a drain trigger a second
+  // later would re-send a post the publish just handed to the radio
+  // (the .35 duplicate drain), and only the overdue-ack bypass
+  // would ever re-send it.
+  if (result.transport === 'mesh' && result.blePeers > 0 && event.kind === EVENT_KIND_POST) {
+    const idHex = toHex(event.id);
+    const nowMs = Date.now();
+    recordDrainHandoff(idHex, blePeersAtPublish, nowMs);
+    registerBleAckPending(idHex, blePeersAtPublish, nowMs);
+  }
   // Rank 5, World honesty: a direct relay OK no longer confirms World
   // at once. A relay can OK an envelope and then drop it before any
   // peer fetches it, and the old code left the sender showing the

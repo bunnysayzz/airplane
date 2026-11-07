@@ -51,6 +51,39 @@ export interface TransportPort {
    * full identity has been resolved can receive frames.
    */
   connectedPeerIds?(): string[];
+  /**
+   * Full peerIds sighted recently (identity resolved earlier), whether
+   * or not a live connection exists. Optional and additive (not a
+   * breaking change): ports that do not track sightings omit it, and
+   * callers fall back to connected peers only. A sighted peer is one
+   * whose advertisement was heard inside the port's fresh window; it
+   * may or may not be subscribed to our TX.
+   */
+  sightedPeerIds?(): string[];
+  /**
+   * Notify one raw frame to a peer with no live connection (blind
+   * notify on our own TX, chunked at the last-known MTU for that
+   * peer). Resolves when the native layer accepts the notify, which
+   * is a radio handoff, not a receipt: the peer central must be
+   * subscribed to our TX for the frame to land. Optional and
+   * additive: ports without it skip sighted-only targets.
+   */
+  notifyUnconnected?(peerId: string, bytes: Uint8Array): Promise<void>;
+  /**
+   * Send a per-post BLE acknowledgement datagram to a connected peer
+   * (the 32-byte event id the peer's post carried). Best effort:
+   * throws when no connection exists. Optional and additive.
+   */
+  sendAck?(peerId: string, eventId: Uint8Array): Promise<void>;
+  /** Subscribe to inbound BLE acknowledgement datagrams. Returns an unsubscribe function. Optional and additive. */
+  onAck?(cb: (peerId: string, eventId: Uint8Array) => void): () => void;
+  /**
+   * BLE liveness watchdog (v0.1.36): attempt (re)connects for sighted
+   * peers with no live connection, bounded by the port's cooldown,
+   * and escalate to a bounded radio reset after repeated connect
+   * timeouts. Optional and additive: ports without it never run it.
+   */
+  runBleLivenessWatchdog?(): void;
   /** Subscribe to inbound frames. Returns an unsubscribe function. */
   onReceive(cb: (peerId: string, bytes: Uint8Array) => void): () => void;
 }

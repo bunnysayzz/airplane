@@ -52,7 +52,9 @@ export class BleTransport {
   private readonly floodForwardDelayMs: number | undefined;
   private readonly floodJitterRand: (() => number) | undefined;
   private readonly floodForwardEnabled: boolean;
+  private readonly onBleAck: ((peerId: string, eventIdHex: string) => void) | undefined;
   private unsubscribe: (() => void) | null = null;
+  private ackUnsubscribe: (() => void) | null = null;
   private lastPurgeMs = 0;
   /**
    * TTL stamped on the first fragment seen for a pending reassembly
@@ -115,6 +117,14 @@ export class BleTransport {
        * callers that must never relay (no production caller does).
        */
       floodForwardEnabled?: boolean;
+      /**
+       * BLE post-ack hook (v0.1.36): called with the ingress peer id
+       * and the event id hex when a peer acknowledges a post over
+       * BLE. The app uses it to stop its retry ladder for that
+       * (event, peer) pair. Diagnostics hook only; no routing
+       * decision reads it.
+       */
+      onBleAck?: (peerId: string, eventIdHex: string) => void;
     },
   ) {
     this.ttl = opts?.ttl ?? DEFAULT_TTL;
@@ -124,11 +134,17 @@ export class BleTransport {
     this.floodForwardDelayMs = opts?.floodForwardDelayMs;
     this.floodJitterRand = opts?.floodJitterRand;
     this.floodForwardEnabled = opts?.floodForwardEnabled ?? true;
+    this.onBleAck = opts?.onBleAck;
   }
 
   /** Start listening for inbound frames. Idempotent. */
   async start(): Promise<void> {
     if (this.unsubscribe) return;
+    if (this.port.onAck) {
+      this.ackUnsubscribe = this.port.onAck((peerId, eventId) => {
+        this.onBleAck?.(peerId, toHex(eventId));
+      });
+    }
     this.unsubscribe = this.port.onReceive((peerId, frame) => {
       // Opportunistic reassembly-buffer purge: no timers in this class.
       const nowMs = Date.now();
@@ -175,6 +191,17 @@ export class BleTransport {
         }
         if (!ok) return; // bad id/signature - drop, never deliver
       }
+      // BLE ack (v0.1.36): a decoded, verified post is acked to its
+      // ingress peer BEFORE the seen-check, so a duplicate re-send
+      // is acked too and the sender's retry ladder stops. Invalid
+      // posts are never acked (the verify above already returned).
+      // Best effort: a missing or broken ack path must not drop the
+      // post, so a failure here is swallowed.
+      try {
+        void this.port.sendAck?.(peerId, event.id)?.catch(() => {});
+      } catch {
+        // never break ingress on an ack failure
+      }
       const idHex = toHex(event.id);
       if (this.seen.has(idHex)) {
         // Loop suppression, plus overhear suppression: a duplicate
@@ -204,6 +231,10 @@ export class BleTransport {
     if (this.unsubscribe) {
       this.unsubscribe();
       this.unsubscribe = null;
+    }
+    if (this.ackUnsubscribe) {
+      this.ackUnsubscribe();
+      this.ackUnsubscribe = null;
     }
     for (const timer of this.pendingForwards.values()) clearTimeout(timer);
     this.pendingForwards.clear();
@@ -262,27 +293,57 @@ export class BleTransport {
   }
 
   /**
-   * Broadcast one event to all connected BLE peers.
-   * The event is fragmented to each peer's port frame size (MTU-aware);
-   * every frame goes through port.send() which must fit the link MTU.
-   * Marks the id seen so our own broadcast isn't re-emitted on receipt.
-   * Returns the count of peers that completed without error, so the
-   * router can tell "handed to radio for N peers" from "failed on
-   * every peer". Handed to radio is the honest wording: a GATT notify
-   * can resolve even with no peer central subscribed, and there is no
-   * BLE ack for posts, so a completed broadcast is never peer
-   * delivery.
+   * Broadcast one event to the given BLE peers plus any recently
+   * sighted peers (see targetPeerIds). The event is fragmented to
+   * each peer's port frame size (MTU-aware); connected peers go
+   * through port.send(), sighted-only peers through the port's
+   * blind notify (a notify on our own TX, which lands when the
+   * peer central is subscribed to it even though our central to it
+   * is dead: the .35 case). Marks the id seen so our own broadcast
+   * isn't re-emitted on receipt. Returns the count of peers that
+   * completed without error, so the router can tell "handed to
+   * radio for N peers" from "failed on every peer". Handed to radio
+   * is the honest wording: a GATT notify can resolve even with no
+   * peer central subscribed. Peer receipt is proven separately by
+   * the BLE ack frame (v0.1.36), tracked at the app layer, so a
+   * completed broadcast is never peer delivery by itself.
    */
   async broadcast(event: SignedEvent, peerIds: string[], ttl: number = this.ttl): Promise<number> {
     const bytes = encodeEvent(event);
     this.seen.add(toHex(event.id));
+    const targets = this.targetPeerIds(peerIds);
+    // Which targets are live connections: a port that does not
+    // report connected peers (legacy fakes, SimTransport) treats
+    // every target as connected, preserving the old send() path.
+    let connected: Set<string> | null = null;
+    try {
+      const ids = this.port.connectedPeerIds?.();
+      if (ids) connected = new Set(ids);
+    } catch {
+      connected = null;
+    }
     let sent = 0;
-    for (const peerId of peerIds) {
+    for (const peerId of targets) {
       try {
         const frameSize = this.port.frameSizeFor?.(peerId) ?? FRAG_WIRE_MAX;
         const frames = fragment(bytes, ttl, frameSize);
-        for (const frame of frames) {
-          await this.port.send(peerId, frame);
+        const isConnected = connected === null || connected.has(peerId);
+        if (isConnected) {
+          for (const frame of frames) {
+            await this.port.send(peerId, frame);
+          }
+        } else if (this.port.notifyUnconnected) {
+          for (const frame of frames) {
+            await this.port.notifyUnconnected(peerId, frame);
+          }
+        } else {
+          // No blind-notify path: fall back to send(), the pre-0.1.36
+          // behaviour for an explicitly requested peer. The port
+          // either delivers it or throws, which the catch below
+          // turns into a non-fatal per-peer failure.
+          for (const frame of frames) {
+            await this.port.send(peerId, frame);
+          }
         }
         sent += 1;
       } catch {
@@ -291,6 +352,26 @@ export class BleTransport {
       }
     }
     return sent;
+  }
+
+  /**
+   * Connected targets plus recently sighted peers (deduped). A
+   * sighted peer with no live connection still gets a blind notify
+   * on our TX when the port supports it (see broadcast): the peer
+   * central may be subscribed to our TX even though our central to
+   * it is dead, which is exactly the .35 defect-1 shape.
+   */
+  targetPeerIds(peerIds: string[]): string[] {
+    return [...new Set([...peerIds, ...this.sightedPeerIds()])];
+  }
+
+  /** Recently sighted peers with a resolved identity (port support optional). */
+  sightedPeerIds(): string[] {
+    try {
+      return this.port.sightedPeerIds?.() ?? [];
+    } catch {
+      return [];
+    }
   }
 
   /** Has this event id been seen on BLE (sent or received)? */
@@ -332,11 +413,12 @@ export type RouterTransport = 'relay' | 'mesh' | 'none';
  * Result of one routed publish. blePeers and relays keep their old
  * meaning for callers: blePeers is the count of BLE peers the frames
  * were handed to via the radio (a radio handoff, not peer receipt:
- * there is no BLE ack for posts, and a GATT notify can resolve with
- * no subscriber), relays is the list of relay URLs that sent an
- * accepted OK. On a relay win, blePeers is the count of connected
- * peers the event was also handed to over Bluetooth (best effort,
- * v0.1.19); zero means no radio leg ran or it reached nobody.
+ * a GATT notify can resolve with no subscriber). Peer receipt is
+ * proven separately by the BLE ack frame (v0.1.36), tracked at the
+ * app layer; the ack never changes this count. On a relay win,
+ * blePeers is the count of peers the event was also handed to over
+ * Bluetooth (best effort, v0.1.19); zero means no radio leg ran or
+ * it reached nobody.
  */
 export interface RouteResult {
   transport: RouterTransport;
@@ -639,7 +721,11 @@ export class HybridTransport {
     blePeerIds: string[],
     relay: { ok: string[]; tried: boolean; detail: string | null },
   ): Promise<RouteResult> {
-    if (blePeerIds.length === 0) {
+    // Sighted-only peers count as mesh targets too (blind notify):
+    // a publish with no connected peers but a sighted peer must
+    // still attempt the radio leg instead of queuing at once.
+    const targets = this.ble.targetPeerIds(blePeerIds);
+    if (targets.length === 0) {
       return {
         transport: 'none',
         status: 'queued',
@@ -649,7 +735,7 @@ export class HybridTransport {
         relayDetail: relay.detail,
       };
     }
-    const sent = await this.ble.broadcast(event, blePeerIds);
+    const sent = await this.ble.broadcast(event, targets);
     if (sent === 0) {
       return {
         transport: 'none',

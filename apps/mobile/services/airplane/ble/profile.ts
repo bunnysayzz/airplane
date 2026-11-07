@@ -77,6 +77,14 @@ export const MAX_BLE_PEERS = 8;
 /** Port-layer datagram kinds. */
 export const DATAGRAM_HELLO = 0x01;
 export const DATAGRAM_FRAME = 0x02;
+/**
+ * Per-post BLE acknowledgement (v0.1.36): the 32-byte event id of a
+ * post the receiver decoded and verified. An older peer drops unknown
+ * kinds in dispatchDatagram, so an ack sent to it is ignored
+ * harmlessly; a .36 sender talking to an old peer simply never
+ * receives acks and its bounded retry ladder runs out.
+ */
+export const DATAGRAM_ACK = 0x03;
 
 /** Length-prefix size for port-layer datagrams. */
 export const DATAGRAM_LEN_PREFIX = 2;

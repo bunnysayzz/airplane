@@ -104,6 +104,7 @@ import {
   ATT_REQUEST_MTU,
   DATAGRAM_FRAME,
   DATAGRAM_HELLO,
+  DATAGRAM_ACK,
   MAX_BLE_PEERS,
   MESH_IDENT_CHAR_UUID,
   MESH_RX_CHAR_UUID,
@@ -286,6 +287,24 @@ export const IDENT_RETRY_SETTLE_MS = 300;
 export const DISCOVERED_STALE_MS = 60_000;
 /** Discovered peer map cap: past this, the stalest entry is evicted. */
 export const DISCOVERED_MAX = 100;
+/**
+ * Sighted-peer freshness for the liveness watchdog and blind notify
+ * (v0.1.36): a peer heard inside this window counts as sighted. The
+ * window is half the discovered stale window, so a peer the watchdog
+ * acts on was heard recently, not merely remembered.
+ */
+export const BLE_LIVENESS_SIGHTED_FRESH_MS = 30_000;
+/**
+ * Consecutive connect-stage timeouts for one tag before the radio
+ * reset escalation fires (v0.1.36). Three is the .35 evidence: A
+ * timed out four times in 96 s while the peer advertised at rssi
+ * -46, so two timeouts could still be a transient radio flap and
+ * three means the native connect path is wedged or the peer GATT
+ * server is not accepting.
+ */
+export const BLE_RADIO_RESET_AFTER_TIMEOUTS = 3;
+/** Cap for the remembered peer-id / MTU maps (bounded like discovered). */
+export const BLE_KNOWN_PEER_MAX = 100;
 
 export const BLE_TIMEOUT_MS = {
   ready: 10_000,
@@ -360,6 +379,22 @@ export class GattBlePort implements TransportPort {
   private readonly connectCooldownUntil = new Map<string, number>();
   /** Consecutive auto-connect failures per bleId (drives the backoff). */
   private readonly connectCooldownFailures = new Map<string, number>();
+  /** Inbound BLE ack subscribers (event id per ack). */
+  private readonly ackSubs = new Set<(peerId: string, eventId: Uint8Array) => void>();
+  /**
+   * Full peerId by tag hex, for peers whose identity was resolved
+   * (survives disconnects, so a sighted peer stays addressable for a
+   * blind notify even after the link drops). The tag is stable (derived
+   * from the pubkey) while the BLE address rotates, so this is the
+   * address-independent memory of who a tag is.
+   */
+  private readonly knownPeerIdsByTag = new Map<string, string>();
+  /** Last negotiated MTU by full peerId (survives disconnects, so a blind notify chunks at the link size). */
+  private readonly lastMtuByPeer = new Map<string, number>();
+  /** Consecutive connect-stage timeouts per tag hex (drives the radio-reset escalation). */
+  private readonly connectTimeoutStreakByTag = new Map<string, number>();
+  /** Tags already radio-reset in the current disconnect episode (one reset per episode). */
+  private readonly radioResetDoneByTag = new Set<string>();
   private peripheral: PeripheralAdapter | null = null;
   private readonly peripheralUnsubs: (() => void)[] = [];
   private centralUnsubs: (() => void)[] = [];
@@ -696,7 +731,7 @@ export class GattBlePort implements TransportPort {
       recordConnectFailure(
         `auto-connect tag:${toHex(tag)}: ${err instanceof Error ? err.message : String(err)}`,
       );
-      this.noteConnectFailure(id, err);
+      this.noteConnectFailure(id, err, tag);
       this.scheduleAutoConnectRetry(id, tag);
     });
   }
@@ -708,10 +743,23 @@ export class GattBlePort implements TransportPort {
    * the gate (see TRANSIENT_CONNECT_FAILURES); deterministic failures
    * do not. A successful connect or a disconnect clears the counters
    * (see registerConn and dropConn), so the backoff spans one
-   * disconnect episode, not the whole session.
+   * disconnect episode, not the whole session. A connect-stage
+   * timeout also extends the per-tag timeout streak (v0.1.36): three
+   * consecutive timeouts for one tag is the radio-reset escalation
+   * trigger (see runBleLivenessWatchdog). A non-timeout failure
+   * breaks the timeout run, so the streak counts consecutive
+   * timeouts only.
    */
-  private noteConnectFailure(bleId: string, err: unknown): void {
+  private noteConnectFailure(bleId: string, err: unknown, tag?: Uint8Array): void {
     const message = err instanceof Error ? err.message : String(err);
+    if (tag) {
+      const tagHex = toHex(tag);
+      if (/timed out after \d+ms/i.test(message)) {
+        this.connectTimeoutStreakByTag.set(tagHex, (this.connectTimeoutStreakByTag.get(tagHex) ?? 0) + 1);
+      } else {
+        this.connectTimeoutStreakByTag.delete(tagHex);
+      }
+    }
     if (!TRANSIENT_CONNECT_FAILURES.some((re) => re.test(message))) return;
     const failures = (this.connectCooldownFailures.get(bleId) ?? 0) + 1;
     this.connectCooldownFailures.set(bleId, failures);
@@ -729,39 +777,60 @@ export class GattBlePort implements TransportPort {
   }
 
   /**
-   * Schedule the single bounded auto-connect retry for a bleId (about 2s
-   * out). No retry is scheduled when one is already pending or the peer
-   * limit is hit; the timer is cancelled on disconnect (see dropConn) and
-   * on close, and the retry never schedules a further retry. The retry
-   * is exempt from the sighting cooldown (it is the one prompt retry),
-   * but its own failure extends the cooldown, so later sightings stay
-   * quiet after the retry is spent.
+   * Schedule the single bounded auto-connect retry for a tag (about 2s
+   * out). Keyed by tag, not bleId: the peer's BLE address can rotate
+   * between the failure and the retry, so the retry re-resolves the
+   * current bleId from the discovered map at fire time and skips when
+   * the peer is gone. A stale bleId closed over at schedule time
+   * would time out again (the .35 hazard: a retry timed out after
+   * its own successful connect, two attempts for the same peer in
+   * flight at once). No retry is scheduled when one is already
+   * pending or the peer limit is hit; the timer is cancelled on
+   * disconnect (see dropConn) and on close, and the retry never
+   * schedules a further retry. The retry is exempt from the sighting
+   * cooldown (it is the one prompt retry), but its own failure
+   * extends the cooldown, so later sightings stay quiet after the
+   * retry is spent.
    */
   private scheduleAutoConnectRetry(bleId: string, tag: Uint8Array): void {
-    if (this.autoConnectRetries.has(bleId)) return;
+    const key = provisionalTagKey(tag);
+    if (this.autoConnectRetries.has(key)) return;
     if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) return;
     const timer = setTimeout(() => {
-      this.autoConnectRetries.delete(bleId);
-      if (this.bleIndex.has(bleId) || this.pendingConnects.has(bleId)) return;
+      this.autoConnectRetries.delete(key);
+      // Re-resolve the bleId at fire time (see above): the bleId
+      // passed in is the one that failed, and the peer may have
+      // rotated since. The discovered entry is refreshed on every
+      // sighting, so it holds the freshest address.
+      const disc = this.discovered.get(key);
+      if (!disc) return;
+      const freshBleId = disc.bleId;
+      if (this.bleIndex.has(freshBleId) || this.pendingConnects.has(freshBleId)) return;
       if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) return;
-      void this.connectCentral(bleId, tag).catch((err) => {
+      void this.connectCentral(freshBleId, tag).catch((err) => {
         // Single retry spent. Its outcome is logged now: a spent retry
         // used to stay silent, so a peer that never connected left
         // only the first failure line and no trace of the retry.
         recordConnectFailure(
           `auto-connect retry failed tag:${toHex(tag)}: ${err instanceof Error ? err.message : String(err)}`,
         );
-        this.noteConnectFailure(bleId, err);
+        this.noteConnectFailure(freshBleId, err, tag);
       });
     }, AUTO_CONNECT_RETRY_MS);
-    this.autoConnectRetries.set(bleId, timer);
+    this.autoConnectRetries.set(key, timer);
   }
 
-  private cancelAutoConnectRetry(bleId: string): void {
-    const timer = this.autoConnectRetries.get(bleId);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      this.autoConnectRetries.delete(bleId);
+  private cancelAutoConnectRetry(bleId: string, tag?: Uint8Array | null): void {
+    // The retry is keyed by tag (see scheduleAutoConnectRetry); a
+    // tag-less conn falls back to the bleId key, and both are tried
+    // so a stale key never leaves a timer behind.
+    const keys = tag ? [provisionalTagKey(tag), bleId] : [bleId];
+    for (const key of keys) {
+      const timer = this.autoConnectRetries.get(key);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        this.autoConnectRetries.delete(key);
+      }
     }
   }
 
@@ -1074,6 +1143,11 @@ export class GattBlePort implements TransportPort {
       const peerId = toHex(hello.publicKey);
       conn.mtu = Math.min(Math.max(hello.centralMtu, ATT_DEFAULT_MTU), 517);
       this.rekeyConn(conn, peerId);
+      // Remember the identity and MTU past this connection: the tag
+      // is derived from the pubkey, so even a peripheral-side conn
+      // (which never saw the advertisement) stays addressable for a
+      // blind notify after the link drops.
+      this.rememberPeer(peerId, peerTagOf(hello.publicKey), conn.mtu);
       // The peripheral side learns the central identity and MTU here.
       // CCCD stays unknown: the library does not report TX subscribers.
       recordPeerConnected(peerId, conn.mtu, null);
@@ -1083,6 +1157,25 @@ export class GattBlePort implements TransportPort {
           cb({ peerId });
         } catch {
           // ignore
+        }
+      }
+      return;
+    }
+    if (kind === DATAGRAM_ACK) {
+      // A v0.1.36 ack frame: the 32-byte event id of a post this peer
+      // decoded and verified. An older peer drops unknown kinds here,
+      // so an ack sent to it is ignored harmlessly; a .36 sender
+      // talking to an old peer simply never receives acks and its
+      // bounded retry ladder runs out. The ack is handed to
+      // subscribers with the ingress peer id; a malformed payload is
+      // dropped silently, and a subscriber error never breaks the port.
+      if (payload.length !== 32) return;
+      const ackPeer = conn.peerId ?? this.keyOf(conn);
+      for (const cb of this.ackSubs) {
+        try {
+          cb(ackPeer, payload);
+        } catch {
+          // subscriber errors must not break the port
         }
       }
       return;
@@ -1118,9 +1211,18 @@ export class GattBlePort implements TransportPort {
     if (existing && existing !== conn) this.dropConn(key);
     this.conns.set(key, conn);
     this.bleIndex.set(conn.bleId, key);
+    // Remember the resolved identity and MTU past this connection
+    // (see rememberPeer): a later sighting of the same tag stays
+    // addressable for a blind notify even after the link drops.
+    if (conn.peerId) this.rememberPeer(conn.peerId, conn.tag, conn.mtu);
     // A connected peer starts a fresh episode: past failures no
     // longer gate its next sightings after a later disconnect.
     this.clearConnectCooldown(conn.bleId);
+    if (conn.tag) {
+      const tagHex = toHex(conn.tag);
+      this.connectTimeoutStreakByTag.delete(tagHex);
+      this.radioResetDoneByTag.delete(tagHex);
+    }
   }
 
   private rekeyConn(conn: PeerConn, peerId: string): void {
@@ -1143,10 +1245,15 @@ export class GattBlePort implements TransportPort {
   private dropConn(key: string): void {
     const conn = this.conns.get(key);
     if (!conn) return;
-    this.cancelAutoConnectRetry(conn.bleId);
+    this.cancelAutoConnectRetry(conn.bleId, conn.tag);
     // A disconnect starts a fresh episode: the next sightings after
     // it are not gated by failures from the previous episode.
     this.clearConnectCooldown(conn.bleId);
+    if (conn.tag) {
+      const tagHex = toHex(conn.tag);
+      this.connectTimeoutStreakByTag.delete(tagHex);
+      this.radioResetDoneByTag.delete(tagHex);
+    }
     recordPeerDisconnected(key);
     this.conns.delete(key);
     if (this.bleIndex.get(conn.bleId) === key) this.bleIndex.delete(conn.bleId);
@@ -1183,6 +1290,11 @@ export class GattBlePort implements TransportPort {
     this.autoConnectRetries.clear();
     this.pendingCentralTags.clear();
     this.discovered.clear();
+    this.ackSubs.clear();
+    this.knownPeerIdsByTag.clear();
+    this.lastMtuByPeer.clear();
+    this.connectTimeoutStreakByTag.clear();
+    this.radioResetDoneByTag.clear();
     await this.stopAdvertise();
   }
 
@@ -1202,6 +1314,192 @@ export class GattBlePort implements TransportPort {
       if (conn.peerId) ids.add(conn.peerId);
     }
     return [...ids];
+  }
+
+  /**
+   * Remember a resolved peer identity and MTU past the connection
+   * (v0.1.36): the tag maps to the full peerId so a later sighting
+   * of the same tag stays addressable for a blind notify even after
+   * the link drops, and the MTU sizes that notify's chunks. Both
+   * maps are bounded (oldest entries drop past the cap). The tag is
+   * stable across BLE address rotation; the peerId never rotates.
+   */
+  private rememberPeer(peerId: string, tag: Uint8Array | null, mtu: number): void {
+    if (tag) {
+      this.knownPeerIdsByTag.set(toHex(tag), peerId);
+      while (this.knownPeerIdsByTag.size > BLE_KNOWN_PEER_MAX) {
+        const oldest = this.knownPeerIdsByTag.keys().next();
+        if (oldest.done) break;
+        this.knownPeerIdsByTag.delete(oldest.value);
+      }
+    }
+    this.lastMtuByPeer.set(peerId, mtu);
+    while (this.lastMtuByPeer.size > BLE_KNOWN_PEER_MAX) {
+      const oldest = this.lastMtuByPeer.keys().next();
+      if (oldest.done) break;
+      this.lastMtuByPeer.delete(oldest.value);
+    }
+  }
+
+  /**
+   * Full peerIds sighted recently (identity resolved earlier),
+   * whether or not a live connection exists. A sighted peer is one
+   * whose advertisement was heard inside
+   * BLE_LIVENESS_SIGHTED_FRESH_MS and whose full identity is known
+   * from an earlier connection: only then can a blind notify be
+   * addressed to it. Unresolved tags are never returned (no peerId
+   * to address), and a peer whose identity was never resolved is
+   * invisible here even while sighted.
+   */
+  sightedPeerIds(): string[] {
+    const nowMs = Date.now();
+    const ids = new Set<string>();
+    for (const disc of this.discovered.values()) {
+      if (nowMs - disc.lastSeenMs > BLE_LIVENESS_SIGHTED_FRESH_MS) continue;
+      const peerId = this.knownPeerIdsByTag.get(toHex(disc.tag));
+      if (peerId) ids.add(peerId);
+    }
+    return [...ids];
+  }
+
+  /**
+   * Notify one raw frame to a peer with no live connection (blind
+   * notify on our own TX, v0.1.36). The datagram is chunked at the
+   * last-known MTU for that peer, defaulting to the ATT default.
+   * Resolves when the native layer accepts the notify: a radio
+   * handoff, not a receipt (the peer central must be subscribed to
+   * our TX for the frame to land, which is exactly the .35 case:
+   * B was subscribed to A-TX while A counted zero peers). Throws
+   * when the peer was never resolved or the advertiser is down.
+   * The frame is logged distinctly (a service line, not a connected
+   * frames line) so a blind send never reads as a connected send.
+   */
+  async notifyUnconnected(peerId: string, frame: Uint8Array): Promise<void> {
+    const peripheral = this.peripheral;
+    if (!peripheral) throw new Error('ble: peripheral role unavailable');
+    const known =
+      this.conns.has(peerId) || [...this.knownPeerIdsByTag.values()].includes(peerId);
+    if (!known) throw new Error(`ble: unknown peer ${peerId}`);
+    const mtu = this.lastMtuByPeer.get(peerId) ?? ATT_DEFAULT_MTU;
+    const datagram = encodeDatagram(DATAGRAM_FRAME, frame);
+    const chunkSize = Math.max(mtu - ATT_OVERHEAD, 1);
+    let fragments = 0;
+    for (const chunk of chunkBytes(datagram, chunkSize)) {
+      await withBleTimeout(peripheral.notify(chunk), BLE_TIMEOUT_MS.notify, 'notify');
+      fragments += 1;
+    }
+    recordServiceEvent(`ble blind notify tag ${peerId.slice(0, 8)} fragments ${fragments}`);
+  }
+
+  /**
+   * Send a per-post BLE acknowledgement datagram to a connected peer
+   * (v0.1.36): the 32-byte event id the peer's post carried. The
+   * ack travels as a notify on our own TX, chunked at the live link
+   * MTU, exactly like a frame send. Best effort: the receiver acks
+   * every decoded, verified post, and the sender treats a missing
+   * ack as a retry signal, never as a failure. Throws when no
+   * connection exists for the peer.
+   */
+  async sendAck(peerId: string, eventId: Uint8Array): Promise<void> {
+    const conn = this.conns.get(peerId);
+    if (!conn) throw new Error(`ble: unknown peer ${peerId}`);
+    const peripheral = this.peripheral;
+    if (!peripheral) throw new Error('ble: peripheral role unavailable');
+    const datagram = encodeDatagram(DATAGRAM_ACK, eventId);
+    const chunkSize = Math.max(conn.mtu - ATT_OVERHEAD, 1);
+    for (const chunk of chunkBytes(datagram, chunkSize)) {
+      await withBleTimeout(peripheral.notify(chunk), BLE_TIMEOUT_MS.notify, 'notify');
+    }
+  }
+
+  /** Subscribe to inbound BLE acknowledgement datagrams. Returns an unsubscribe function. */
+  onAck(cb: (peerId: string, eventId: Uint8Array) => void): () => void {
+    this.ackSubs.add(cb);
+    return () => {
+      this.ackSubs.delete(cb);
+    };
+  }
+
+  /**
+   * BLE liveness watchdog (v0.1.36). Runs on the app's 15 s tick
+   * (see transport.ts): for each peer sighted inside the fresh
+   * window whose identity is resolved, with no live connection and
+   * no connect in flight, and whose sighting cooldown has expired,
+   * attempt a connect and log the decision. This closes the .35
+   * defect-1 hole: the sighting path only fires on advertisement
+   * callbacks, so a peer that stays sighted while the radio stops
+   * delivering advertisements, or whose connects keep timing out,
+   * never reconnected. After three consecutive connect timeouts for
+   * one tag, the central scan is reset once per episode (stop scan,
+   * clear a wedged pending connect, restart the scan): a wedged
+   * native connect or a peer GATT server that stopped accepting is
+   * not fixed by retrying the same connect. The reset is checked
+   * before the cooldown gate (the 2 s retry re-arms the cooldown on
+   * every failure, so a cooldown-gated reset would never fire); the
+   * connect attempt stays bounded by the .29 cooldown (no storm)
+   * and by the peer limit. Quiet when nothing is due. Never throws.
+   */
+  runBleLivenessWatchdog(): void {
+    if (!this.ownPeerId) return; // advertise has not run yet: no connect is possible
+    const nowMs = Date.now();
+    for (const disc of [...this.discovered.values()]) {
+      if (nowMs - disc.lastSeenMs > BLE_LIVENESS_SIGHTED_FRESH_MS) continue;
+      const tagHex = toHex(disc.tag);
+      const peerId = this.knownPeerIdsByTag.get(tagHex);
+      if (!peerId) continue;
+      if (this.conns.has(peerId)) continue;
+      if (this.bleIndex.has(disc.bleId) || this.pendingConnects.has(disc.bleId)) continue;
+      if (this.pendingCentralTags.has(tagHex)) continue;
+      // The reset is checked BEFORE the cooldown gate on purpose:
+      // the 2 s retry re-arms the cooldown on every failure, so a
+      // reset gated by the cooldown would never fire. The reset is a
+      // one-time radio recovery (once per episode), not a connect
+      // attempt, so it does not need the cooldown to expire. The
+      // connect attempt below stays gated by the cooldown.
+      const streak = this.connectTimeoutStreakByTag.get(tagHex) ?? 0;
+      if (streak >= BLE_RADIO_RESET_AFTER_TIMEOUTS && !this.radioResetDoneByTag.has(tagHex)) {
+        this.radioResetDoneByTag.add(tagHex);
+        recordServiceEvent(`ble radio reset tag ${tagHex.slice(0, 8)} after ${streak} timeouts`);
+        void this.resetCentralScan(disc.bleId).catch((err) => {
+          recordServiceEvent(
+            `ble radio reset failed ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+        continue;
+      }
+      const cooledUntil = this.connectCooldownUntil.get(disc.bleId);
+      if (cooledUntil !== undefined && nowMs < cooledUntil) continue;
+      if (this.conns.size + this.pendingConnects.size >= MAX_BLE_PEERS) continue;
+      recordServiceEvent(`ble liveness watchdog tag ${tagHex.slice(0, 8)} attempting connect`);
+      void this.connectCentral(disc.bleId, disc.tag).catch((err) => {
+        recordConnectFailure(
+          `liveness watchdog connect failed tag:${tagHex}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        this.noteConnectFailure(disc.bleId, err, disc.tag);
+        this.scheduleAutoConnectRetry(disc.bleId, disc.tag);
+      });
+    }
+  }
+
+  /**
+   * Reset the central scan (v0.1.36 radio-reset escalation): clear a
+   * wedged pending connect for the tag's bleId, stop the native
+   * scan, restart it. Live connections are NOT touched (the reset
+   * is about the scan/connect path, not the links), and the
+   * transport's scan subscription survives: the listeners are never
+   * removed, only the native scan is restarted, so sightings resume
+   * on the same callbacks. Throws when the adapter is off or the
+   * native scan refuses (the caller logs it); the next watchdog
+   * tick and the transport's existing scan retry cover the restart.
+   */
+  private async resetCentralScan(bleId: string): Promise<void> {
+    const central = this.deps.central;
+    if (!central || !this.centralStarted) return;
+    if (this.pendingConnects.has(bleId)) {
+      await central.disconnect(bleId).catch(() => {});
+    }
+    await central.stopScan().catch(() => {});
+    await central.scan();
   }
 }
 
