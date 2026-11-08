@@ -38,8 +38,8 @@ describe('extractNewPostCards', () => {
   });
 
   test('fresh cards buried below viewed cards come out newest first', () => {
-    // Ranked page order: viewed posts first (score above zero), then the
-    // fresh zero view posts. The tap must still surface the fresh ones,
+    // Ranked page order: viewed posts first (higher score), then the
+    // fresh posts. The tap must still surface the fresh ones,
     // newest first, at the top.
     const viewedOld = makeCard('a'.repeat(64), 1000, 0.2);
     const viewedOlder = makeCard('b'.repeat(64), 500, 0.1);

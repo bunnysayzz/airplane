@@ -292,6 +292,58 @@ describe('listFeedPosts', () => {
     expect(page2.nextCursor).toBeNull();
   });
 
+  it('a fresh unseen post tops page 1 above a day-old viewed post', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const store = getStore();
+    // 23 h old: inside the 24 h retention window, but old enough that its
+    // 10 views decayed far below a fresh post.
+    const dayOld = makePost({ created_at: nowSec - 23 * 3600 });
+    const fresh = makePost({ created_at: nowSec - 60 });
+    await store.saveEvent(dayOld);
+    await store.saveEvent(fresh);
+    for (let i = 0; i < 10; i++) {
+      const receipt = makePost({
+        kind: 2 as EventKind,
+        tags: [['e', toHex(dayOld.id)]],
+        content: '',
+        created_at: nowSec,
+      });
+      await store.saveReceipt(receipt);
+    }
+    const page1 = await listFeedPage({ cells: ['tdr1v'], limit: 2 });
+    expect(page1.cards.map((c) => c.eventId)).toEqual([toHex(fresh.id), toHex(dayOld.id)]);
+  });
+
+  it('among day-old posts views still decide page order', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const store = getStore();
+    const dayOldPopular = makePost({ created_at: nowSec - 23 * 3600 });
+    const dayOldQuiet = makePost({ created_at: nowSec - 23 * 3600 });
+    await store.saveEvent(dayOldPopular);
+    await store.saveEvent(dayOldQuiet);
+    for (let i = 0; i < 10; i++) {
+      const receipt = makePost({
+        kind: 2 as EventKind,
+        tags: [['e', toHex(dayOldPopular.id)]],
+        content: '',
+        created_at: nowSec,
+      });
+      await store.saveReceipt(receipt);
+    }
+    const receipt = makePost({
+      kind: 2 as EventKind,
+      tags: [['e', toHex(dayOldQuiet.id)]],
+      content: '',
+      created_at: nowSec,
+    });
+    await store.saveReceipt(receipt);
+    const page1 = await listFeedPage({ cells: ['tdr1v'], limit: 2 });
+    expect(page1.cards.map((c) => c.eventId)).toEqual([
+      toHex(dayOldPopular.id),
+      toHex(dayOldQuiet.id),
+    ]);
+  });
+
   it('marks confirmed cards via the batched lookup', async () => {
     const post = await publishPost('confirmed post', { geohash5: 'tdr1v' });
     const store = getStore();
