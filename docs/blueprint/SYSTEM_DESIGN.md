@@ -463,7 +463,7 @@ communication · error handling · security · runtime location · OSS choice ·
   2 000 posts - ASSUMPTION - then paginate by score cutoff).
 
 #### FEED-2 RankingEngine - `src/feed/Ranking.ts` - L2 - custom (pure)
-- **Responsibility:** pure scoring. `score(views, ageSec) = log10(1+views) / ((ageSec/3600)+2)^1.5`.
+- **Responsibility:** pure scoring. `score(views, ageSec) = log10(2+views) / ((ageSec/3600)+2)^1.5`.
   Also `viewsFor(postId)` aggregation helper (distinct pubkeys in current day bucket + carried
   prior buckets? - views are lifetime-distinct-pubkeys; ASSUMPTION).
 - **Interface:** `function scorePost(views: number, ageSec: number): number`;

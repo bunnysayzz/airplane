@@ -304,7 +304,7 @@ flowchart TB
     end
     subgraph FEED_S["FEED (L2) - the domain; never knows BLE/SQL"]
         FEED1["FEED-1 FeedStore<br/>IFeedStore: UI-facing facade"]
-        FEED2["FEED-2 RankingEngine<br/>pure: log10(1+v)/(age_h+2)^1.5"]
+        FEED2["FEED-2 RankingEngine<br/>pure: log10(2+v)/(age_h+2)^1.5"]
         FEED3["FEED-3 ViewTracker<br/>impression ≥1.5s/50% → receipt"]
         FEED4["FEED-4 GeohashScoper<br/>cell + 8-neighbor ring policy"]
         FEED5["FEED-5 PostPublisher<br/>draft→sign→store→flood; offline queue"]
