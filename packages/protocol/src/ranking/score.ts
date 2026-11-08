@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Feed ranking: views win, recency decays.
-//   score = log10(1 + views) / (ageHours + 2) ^ gravity, gravity = 1.5
+//   score = log10(2 + views) / (ageHours + 2) ^ gravity, gravity = 1.5
+// The +2 (not +1) keeps a zero-view post scorable: with log10(1 + views)
+// a fresh post scored exactly 0 and sank below every viewed post in the
+// globally ranked feed, no matter how fresh it was. A zero-view post now
+// scores what a one-view post used to, so fresh posts surface at the top
+// while older posts still rank by views among themselves.
 // Pure functions; the store layer supplies views/createdAt.
 
 import { RANK_GRAVITY, type FeedPost, type SignedEvent, type UnixSec } from '../events/types';
@@ -9,7 +14,7 @@ import { RANK_GRAVITY, type FeedPost, type SignedEvent, type UnixSec } from '../
 export function scorePost(views: number, ageHours: number, gravity: number = RANK_GRAVITY): number {
   const v = Math.max(0, views);
   const age = Math.max(0, ageHours);
-  return Math.log10(1 + v) / Math.pow(age + 2, gravity);
+  return Math.log10(2 + v) / Math.pow(age + 2, gravity);
 }
 
 /** Age of a post in hours at `nowSec`. */

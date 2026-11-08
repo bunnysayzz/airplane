@@ -36,7 +36,7 @@ export const GEOHASH_PRECISION = 5;
 /** View-receipt dedup day bucket, seconds. */
 export const RECEIPT_DAY_BUCKET_S = 86400;
 
-/** Ranking gravity exponent. score = log10(1+views) / (ageHours+2)^gravity */
+/** Ranking gravity exponent. score = log10(2+views) / (ageHours+2)^gravity */
 export const RANK_GRAVITY = 1.5;
 
 /** Max BLE wire frame size in bytes. */

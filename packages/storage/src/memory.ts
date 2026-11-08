@@ -34,11 +34,16 @@ export function clampFutureCreatedAt(createdAtSec: number, nowSec: number): numb
 
 /**
  * Ranking score. Mirrors the protocol formula
- * `log10(1 + views) / (ageHours + 2) ^ RANK_GRAVITY` (RANK_GRAVITY = 1.5).
+ * `log10(2 + views) / (ageHours + 2) ^ RANK_GRAVITY` (RANK_GRAVITY = 1.5).
+ * The +2 (not +1) keeps a zero-view post scorable: with log10(1 + views)
+ * a fresh post scored exactly 0 and sank below every viewed post in the
+ * globally ranked feed. A zero-view post now scores what a one-view post
+ * used to, so fresh posts surface at the top while older posts still rank
+ * by views among themselves.
  * listFeed sorts newest-first; score is computed for downstream ranking.
  */
 export function rankScore(views: number, ageHours: number): number {
-  return Math.log10(1 + views) / Math.pow(ageHours + 2, 1.5);
+  return Math.log10(2 + views) / Math.pow(ageHours + 2, 1.5);
 }
 
 const HEX_DIGITS = '0123456789abcdef';

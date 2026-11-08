@@ -470,9 +470,10 @@ describe('hex helpers', () => {
 });
 
 describe('rankScore', () => {
-  test('zero views scores zero at any age', () => {
-    expect(rankScore(0, 0)).toBe(0);
-    expect(rankScore(0, 5)).toBe(0);
+  test('zero views scores like one view used to, never zero', () => {
+    expect(rankScore(0, 0)).toBeCloseTo(Math.log10(2) / Math.pow(2, 1.5), 10);
+    expect(rankScore(0, 5)).toBeGreaterThan(0);
+    expect(rankScore(0, 5)).toBeLessThan(rankScore(0, 0));
   });
 
   test('score rises with views and falls with age', () => {
@@ -481,7 +482,16 @@ describe('rankScore', () => {
   });
 
   test('matches the documented formula', () => {
-    expect(rankScore(5, 0)).toBeCloseTo(Math.log10(6) / Math.pow(2, 1.5), 10);
+    expect(rankScore(5, 0)).toBeCloseTo(Math.log10(7) / Math.pow(2, 1.5), 10);
+  });
+
+  test('a fresh unseen post outranks a day-old viewed post', () => {
+    expect(rankScore(0, 0)).toBeGreaterThan(rankScore(10, 24));
+  });
+
+  test('among day-old posts views still decide', () => {
+    expect(rankScore(10, 24)).toBeGreaterThan(rankScore(1, 24));
+    expect(rankScore(100, 24)).toBeGreaterThan(rankScore(10, 24));
   });
 });
 

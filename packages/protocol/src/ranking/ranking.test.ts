@@ -6,11 +6,27 @@ import { makePost } from '../test-helpers';
 const NOW = 1_700_000_000;
 
 describe('ranking', () => {
-  test('score matches the formula log10(1+views)/(ageHours+2)^1.5', () => {
-    // views=9, age=0 → log10(10) / 2^1.5 = 1 / 2.8284271247461903
-    expect(scorePost(9, 0)).toBeCloseTo(1 / Math.pow(2, RANK_GRAVITY), 12);
-    expect(scorePost(0, 0)).toBe(0); // log10(1) = 0
-    expect(scorePost(99, 2)).toBeCloseTo(2 / Math.pow(4, 1.5), 12);
+  test('score matches the formula log10(2+views)/(ageHours+2)^1.5', () => {
+    // views=9, age=0 → log10(11) / 2^1.5
+    expect(scorePost(9, 0)).toBeCloseTo(Math.log10(11) / Math.pow(2, RANK_GRAVITY), 12);
+    // views=0 scores like one view used to: log10(2) / 2^1.5, never zero.
+    expect(scorePost(0, 0)).toBeCloseTo(Math.log10(2) / Math.pow(2, RANK_GRAVITY), 12);
+    expect(scorePost(99, 2)).toBeCloseTo(Math.log10(101) / Math.pow(4, 1.5), 12);
+  });
+
+  test('a fresh unseen post outranks a day-old viewed post', () => {
+    const unseen = { event: makePost('unseen', NOW - 60), views: 0 };
+    const seen = { event: makePost('seen', NOW - 24 * 3600), views: 10 };
+    const ranked = rankPosts([seen, unseen], NOW);
+    expect(ranked[0].event.content).toBe('unseen');
+    expect(ranked[0].score).toBeGreaterThan(ranked[1].score);
+  });
+
+  test('a recent viewed post still outranks a fresh unseen one', () => {
+    const unseen = { event: makePost('unseen', NOW - 60), views: 0 };
+    const recent = { event: makePost('recent', NOW - 3600), views: 2 };
+    const ranked = rankPosts([unseen, recent], NOW);
+    expect(ranked[0].event.content).toBe('recent');
   });
 
   test('more views outranks fewer views at equal age', () => {
@@ -38,11 +54,21 @@ describe('ranking', () => {
     }
   });
 
-  test('a much-viewed old post can still beat a fresh unseen one (views win)', () => {
+  test('a much-viewed day-old post no longer beats a fresh unseen one', () => {
     const viral = { event: makePost('viral', NOW - 24 * 3600), views: 10000 };
     const unseen = { event: makePost('unseen', NOW - 60), views: 0 };
     const ranked = rankPosts([unseen, viral], NOW);
-    expect(ranked[0].event.content).toBe('viral');
+    expect(ranked[0].event.content).toBe('unseen');
+  });
+
+  test('equal scores keep insertion order (stable sort)', () => {
+    // Same age and same views, so identical scores: the ranked order must
+    // follow the input order, not shuffle the two posts.
+    const first = { event: makePost('first', NOW - 60), views: 0 };
+    const second = { event: makePost('second', NOW - 60), views: 0 };
+    const ranked = rankPosts([first, second], NOW);
+    expect(ranked[0].score).toBe(ranked[1].score);
+    expect(ranked.map((p) => p.event.content)).toEqual(['first', 'second']);
   });
 
   test('rankPosts attaches views, score and ageHours', () => {
