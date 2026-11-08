@@ -84,6 +84,16 @@ export interface TransportPort {
    * timeouts. Optional and additive: ports without it never run it.
    */
   runBleLivenessWatchdog?(): void;
+  /**
+   * Drop a dead connection registration and force an immediate
+   * reconnect for a peer (v0.1.38 fix): when the BLE ack ladder
+   * exhausts for a peer, the link is dead but the conn still counts
+   * as connected, so the mesh asks the port to invalidate it and
+   * reconnect now instead of waiting for the watchdog tick or the
+   * next sighting. Optional and additive: ports without it leave
+   * the dead conn in place and the watchdog owns the reconnect.
+   */
+  forceReconnectPeer?(peerId: string): void;
   /** Subscribe to inbound frames. Returns an unsubscribe function. */
   onReceive(cb: (peerId: string, bytes: Uint8Array) => void): () => void;
 }

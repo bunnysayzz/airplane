@@ -1002,6 +1002,12 @@ describe('v0.1.32 IDENT provisional link: per-tag dedup + disconnect guard', () 
     // read fails (v0.1.31: two attempts 9 s apart for one tag).
     central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
     central.discoverCb!({ id: 'ble-2', rssi: -61, tag: PEER_TAG });
+    // The connect now awaits the adapter pre-check first (v0.1.38
+    // fix), so the native attempt lands a tick later, not
+    // synchronously. The dedup assertion is unchanged in substance:
+    // two addresses for one tag still start exactly one central
+    // connect.
+    await tick(20);
     expect(central.connectAttempts).toEqual(['ble-1']);
     await tick(50);
     expect(port.peerCount).toBe(1);
@@ -1964,5 +1970,161 @@ describe('BLE connect-cancel + radio-reset fix (v0.1.37)', () => {
       setDiagnosticsLogSink(null);
       resetDiagnosticsForTests();
     }
+  });
+});
+
+describe('BLE ack-timeout reconnect + adapter pre-check (v0.1.38)', () => {
+  const TIMEOUT_ERR = new Error('ble: central connect timed out after 10000ms');
+
+  /** Connect the fake peer, then drop the central link (peer stays sighted + known). */
+  async function connectThenDisconnect(
+    deps: BleNativeDeps,
+    central: FakeCentral,
+    port: GattBlePort,
+  ): Promise<void> {
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    central.disconnectCb!('ble-1');
+    await tick(20);
+    expect(port.connectedPeerIds()).toEqual([]);
+  }
+
+  test('connect with the adapter off fails fast: no native connect, pre-check line, no cooldown', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind: string, detail: string) => lines.push(`${kind}:${detail}`));
+    try {
+      const { deps, central } = makeDeps();
+      const port = new GattBlePort(deps);
+      await port.advertise(OWN_HEX);
+      await port.scan(() => {});
+      central.adapterState = 'off';
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+      await tick(50);
+      // The pre-check throws before any native call: the watchdog
+      // used to burn a 10 s attempt against a dead adapter (v0.1.37
+      // test: both adapters off 53 to 55 s, two timeouts plus two
+      // nulls). The failure line carries the pre-check stage.
+      expect(central.connectAttempts).toEqual([]);
+      expect(port.peerCount).toBe(0);
+      expect(lines.some((l) => l.includes('adapter not on, connect skipped'))).toBe(true);
+      // Adapter back on: the next sighting connects at once. If the
+      // adapter-off failure had armed the sighting cooldown, this
+      // sighting would be gated and the peer would stay unconnected.
+      central.adapterState = 'on';
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+      await tick(50);
+      expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+      await port.close();
+    } finally {
+      setDiagnosticsLogSink(null);
+      resetDiagnosticsForTests();
+    }
+  });
+
+  test('a connect-stage timeout logs the cleanup disconnect line', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind: string, detail: string) => lines.push(`${kind}:${detail}`));
+    try {
+      const { deps, central } = makeDeps();
+      central.failConnect.add('ble-1');
+      central.failConnectError = TIMEOUT_ERR;
+      const port = new GattBlePort(deps);
+      await port.advertise(OWN_HEX);
+      await port.scan(() => {});
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+      await tick(50);
+      expect(port.peerCount).toBe(0);
+      expect(central.disconnects).toContain('ble-1');
+      // The v0.1.37 cancel was unobservable: no log could prove it
+      // fired. The line fires only when the cleanup disconnect ran.
+      expect(lines.some((l) => l.includes('ble connect cleanup disconnect'))).toBe(true);
+      await port.close();
+    } finally {
+      setDiagnosticsLogSink(null);
+      resetDiagnosticsForTests();
+    }
+  });
+
+  test('an adapter-off failure does not clear the timeout streak: the third timeout still escalates', async () => {
+    const { setDiagnosticsLogSink, resetDiagnosticsForTests } = await import('../diagnostics');
+    const lines: string[] = [];
+    setDiagnosticsLogSink((kind: string, detail: string) => lines.push(`${kind}:${detail}`));
+    try {
+      const { deps, central } = makeDeps();
+      const port = new GattBlePort(deps);
+      await connectThenDisconnect(deps, central, port);
+      central.failConnect.add('ble-1');
+      central.failConnect.add('ble-2');
+      central.failConnectError = TIMEOUT_ERR;
+      // Timeout 1 (sighting path, ble-1) and timeout 2 (sighting
+      // path after rotation to ble-2): the streak is per tag, so
+      // rotation does not reset it.
+      central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+      await tick(50);
+      central.discoverCb!({ id: 'ble-2', rssi: -58, tag: PEER_TAG });
+      await tick(50);
+      // The scheduled retry (~2 s after the first failure) fires
+      // with the adapter off: it fails fast on the pre-check and
+      // must NOT clear the streak of 2. The retry never schedules a
+      // further retry, so the third timeout comes from a fresh
+      // sighting under a rotated address, which carries no cooldown.
+      central.adapterState = 'off';
+      await tick(2200);
+      expect(lines.some((l) => l.includes('adapter not on, connect skipped'))).toBe(true);
+      expect(lines.some((l) => l.includes('ble radio reset'))).toBe(false);
+      // Adapter back on: the fresh sighting times out for real,
+      // streak 3, and the watchdog escalates to the radio reset.
+      // Without the guard the adapter-off failure would have cleared
+      // the streak and no reset would fire.
+      central.adapterState = 'on';
+      central.failConnect.add('ble-3');
+      central.discoverCb!({ id: 'ble-3', rssi: -59, tag: PEER_TAG });
+      await tick(50);
+      expect(central.scanCalls).toBe(1);
+      port.runBleLivenessWatchdog();
+      await tick(50);
+      expect(central.scanCalls).toBe(2);
+      expect(lines.some((l) => l.includes('ble radio reset'))).toBe(true);
+      await port.close();
+    } finally {
+      setDiagnosticsLogSink(null);
+      resetDiagnosticsForTests();
+    }
+  });
+
+  test('forceReconnectPeer drops the dead conn and reconnects at once', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    central.discoverCb!({ id: 'ble-1', rssi: -60, tag: PEER_TAG });
+    await tick(50);
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    const attemptsBefore = central.connectAttempts.length;
+    port.forceReconnectPeer(PEER_HEX);
+    await tick(50);
+    // The dead registration is gone and a fresh connect ran for the
+    // same peer (the bleId re-resolved from the sighting), so the
+    // link is re-established instead of waiting for the watchdog.
+    expect(central.connectAttempts.length).toBe(attemptsBefore + 1);
+    expect(central.connectAttempts[central.connectAttempts.length - 1]).toBe('ble-1');
+    expect(port.connectedPeerIds()).toEqual([PEER_HEX]);
+    await port.close();
+  });
+
+  test('forceReconnectPeer is a no-op for a peer with no conn', async () => {
+    const { deps, central } = makeDeps();
+    const port = new GattBlePort(deps);
+    await port.advertise(OWN_HEX);
+    await port.scan(() => {});
+    port.forceReconnectPeer(PEER_HEX);
+    await tick(20);
+    expect(central.connectAttempts).toEqual([]);
+    await port.close();
   });
 });

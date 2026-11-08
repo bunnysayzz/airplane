@@ -1106,6 +1106,59 @@ describe('transport manager', () => {
     }
   });
 
+  test('ack timeout forces an immediate reconnect for the dead peer', async () => {
+    const serviceLines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => {
+      if (kind === 'service') serviceLines.push(detail);
+    });
+    try {
+      await startTransport();
+      const hybrid = __getHybridForTests();
+      expect(hybrid).not.toBeNull();
+      const store = getStore();
+      const event = { ...makeSignedEvent(), id: new Uint8Array(32).fill(75), created_at: Math.floor(Date.now() / 1000) - 600, tags: [['seq', '25']] };
+      await store.saveEvent(event);
+      await store.enqueuePostOutbox(toHex(event.id), event.created_at);
+      const sendOverMesh = jest.spyOn(hybrid!, 'sendOverMesh').mockResolvedValue(1);
+      const forceReconnectPeer = jest.fn();
+      __setBlePortForTests({ connectedPeerIds: () => ['peerX'], forceReconnectPeer } as never);
+      expect(await drainPostOutbox()).toBe(1);
+      await jest.advanceTimersByTimeAsync(6000);
+      await jest.advanceTimersByTimeAsync(6000);
+      await jest.advanceTimersByTimeAsync(6000);
+      expect(sendOverMesh).toHaveBeenCalledTimes(3);
+      expect(serviceLines.some((l) => l.includes('ble ack timeout'))).toBe(true);
+      // The exhausted ladder invalidates the dead link and reconnects
+      // now (v0.1.38 fix): the reconnect fires once, for the peer the
+      // ack tag resolves to, instead of waiting for the watchdog.
+      expect(forceReconnectPeer).toHaveBeenCalledTimes(1);
+      expect(forceReconnectPeer).toHaveBeenCalledWith('peerX');
+      expect(serviceLines.some((l) => l.includes('ble ack timeout reconnect'))).toBe(true);
+      __setBlePortForTests(null);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
+  test('an ack with no pending entry is logged instead of silently ignored', async () => {
+    const serviceLines: string[] = [];
+    setDiagnosticsLogSink((kind, detail) => {
+      if (kind === 'service') serviceLines.push(detail);
+    });
+    try {
+      await startTransport();
+      // No post was ever sent for this event: the ack is untracked
+      // (the v0.1.37 relay-won case, where the seq 67 and seq 19 ack
+      // legs were undecidable), and the log must show it so receipt
+      // stays decidable.
+      __simulateBleAckForTests('peerX', toHex(new Uint8Array(32).fill(99)));
+      expect(serviceLines.some((l) => l.includes('ble ack untracked'))).toBe(true);
+      __setBlePortForTests(null);
+    } finally {
+      setDiagnosticsLogSink(null);
+    }
+  });
+
   test('old-peer-no-ack fallback: the row leaves via relay confirmation, nothing stalls', async () => {
     await startTransport();
     const hybrid = __getHybridForTests();

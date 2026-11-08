@@ -752,6 +752,12 @@ export class GattBlePort implements TransportPort {
    */
   private noteConnectFailure(bleId: string, err: unknown, tag?: Uint8Array): void {
     const message = err instanceof Error ? err.message : String(err);
+    // Adapter-off skips are not connect failures (v0.1.38 fix): the
+    // adapter pre-check in connectCentral fails fast before any
+    // native attempt, so it must neither count as a timeout, arm
+    // the sighting cooldown, nor clear a timeout streak built from
+    // real attempts.
+    if (/adapter not on/i.test(message)) return;
     if (tag) {
       const tagHex = toHex(tag);
       if (/timed out after \d+ms/i.test(message)) {
@@ -882,6 +888,25 @@ export class GattBlePort implements TransportPort {
     this.pendingConnects.add(bleId);
     this.pendingCentralTags.add(tagHex);
     try {
+      // Adapter pre-check (v0.1.38 fix): fail fast when the adapter
+      // is off instead of hanging to the 10 s connect timeout. This
+      // mirrors the scan pre-check in ensureCentral: the native
+      // connect call with the adapter off either returns null at
+      // once or hangs to the JS timeout, and the watchdog burned
+      // 10 s attempts against a dead adapter in the v0.1.37 test
+      // (both adapters off 53 to 55 s, two timeouts plus two nulls).
+      // The check sits after the reservation on purpose: the
+      // in-flight dedup above must stay atomic, and the finally
+      // below releases the reservation when the check throws. A null
+      // or unknown state means the check is unavailable, so proceed
+      // to the connect as before. The throw is not a connect failure
+      // (see noteConnectFailure): no timeout streak, no cooldown.
+      if (central.checkState) {
+        const adapterState = await central.checkState().catch(() => null);
+        if (typeof adapterState === 'string' && adapterState !== 'on') {
+          throw new Error('ble: adapter not on, connect skipped');
+        }
+      }
       await this.connectCentralInner(central, bleId, tag);
     } finally {
       this.pendingConnects.delete(bleId);
@@ -1002,6 +1027,11 @@ export class GattBlePort implements TransportPort {
       const liveKey = this.bleIndex.get(bleId);
       if (liveKey === undefined || liveKey === registeredKey) {
         await central.disconnect(bleId).catch(() => {});
+        // Log the cleanup disconnect (v0.1.38 fix): the v0.1.37
+        // cancel was unobservable, so no log could ever prove it
+        // fired, and the v0.1.37 test left it unproven. The line
+        // fires only when the disconnect actually ran.
+        recordServiceEvent('ble connect cleanup disconnect');
       }
       // Previously the native disconnect ran but the registration stayed:
       // a dead peer kept counting as connected and publish fan-out kept
@@ -1040,6 +1070,43 @@ export class GattBlePort implements TransportPort {
     }
     // Peripheral role: this library exposes no force-disconnect; forgetting
     // the mapping is the honest close. The central will time out or go away.
+  }
+
+  /**
+   * Drop a dead connection registration and force an immediate
+   * reconnect (v0.1.38 fix): the ack ladder exhausted for this peer,
+   * so the link is dead but the conn still counts as connected and
+   * the drain keeps notifying into the void. Dropping the
+   * registration stops the drain targeting the dead peer, and the
+   * immediate reconnect re-runs the handshake (including a fresh TX
+   * subscription) instead of waiting for the watchdog tick or the
+   * next sighting. dropConn clears the sighting cooldown and the
+   * timeout streak, so this one attempt is not gated by failures
+   * from the dead episode; a failure of this attempt re-arms the
+   * cooldown and schedules the bounded retry as usual. No-op when
+   * no conn is registered: the link is already gone and the
+   * watchdog owns the reconnect. The discovered entry is resolved
+   * by the conn's tag (the discovered map is keyed by tag, never by
+   * peerId), so a rotated address is picked up at fire time.
+   */
+  forceReconnectPeer(peerId: string): void {
+    const conn = this.conns.get(peerId);
+    if (!conn) return;
+    const tag = conn.tag;
+    this.dropConn(peerId);
+    if (conn.role === 'central') {
+      void this.deps.central?.disconnect(conn.bleId).catch(() => {});
+    }
+    if (!tag) return;
+    const disc = this.discovered.get(provisionalTagKey(tag));
+    if (!disc) return;
+    void this.connectCentral(disc.bleId, disc.tag).catch((err) => {
+      recordConnectFailure(
+        `ack reconnect failed tag:${toHex(disc.tag)}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      this.noteConnectFailure(disc.bleId, err, disc.tag);
+      this.scheduleAutoConnectRetry(disc.bleId, disc.tag);
+    });
   }
 
   // --------------------------------------------------------------------- send

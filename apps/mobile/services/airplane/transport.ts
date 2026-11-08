@@ -1738,15 +1738,21 @@ function registerBleAckPending(eventIdHex: string, peerIds: string[], nowMs: num
 
 /**
  * Record an inbound BLE ack (v0.1.36): the (event, peer) pair stops
- * retrying. Unknown acks (no pending entry: the row already left the
- * outbox, or the ack is for a post this phone never sent) are
- * ignored silently. A fully acked event drops its entry.
+ * retrying. An ack with no pending entry (the row already left the
+ * outbox, the ack is for a relay-won post this phone never tracked,
+ * or the ack is for a post this phone never sent) is logged, not
+ * silently ignored (v0.1.38 fix): the v0.1.37 test left the seq 67
+ * and seq 19 ack legs undecidable because untracked acks produced
+ * no line at all. A fully acked event drops its entry.
  */
 function markBleAckReceived(peerId: string, eventIdHex: string): void {
   const byPeer = bleAckPending.get(eventIdHex);
-  if (!byPeer) return;
-  const entry = byPeer.get(peerId.slice(0, 8));
-  if (!entry || entry.acked) return;
+  const entry = byPeer?.get(peerId.slice(0, 8));
+  if (!entry) {
+    recordServiceEvent(`ble ack untracked ${peerId.slice(0, 8)} event ${eventIdHex.slice(0, 8)}`);
+    return;
+  }
+  if (entry.acked) return;
   entry.acked = true;
   recordServiceEvent(`ble ack received ${peerId.slice(0, 8)} event ${eventIdHex.slice(0, 8)}`);
   // The entry is deliberately NOT deleted when every peer has acked:
@@ -1755,6 +1761,25 @@ function markBleAckReceived(peerId: string, eventIdHex: string): void {
   // pruned when its row leaves the outbox (see drainPostOutbox), so
   // it lives at most as long as the row does.
   scheduleBleAckRetry();
+}
+
+/**
+ * Drop a dead peer's conn registration and force an immediate
+ * reconnect when its ack ladder exhausts (v0.1.38 fix). The peer is
+ * resolved from the ack tag via the port's connected peer ids; when
+ * the port does not implement the reconnect, or the peer is already
+ * gone, this is a no-op and the watchdog owns the reconnect. The
+ * forced attempt bypasses the sighting cooldown for this one case:
+ * the port's drop clears the cooldown, and a failure of the forced
+ * attempt re-arms it as usual.
+ */
+function forceBleAckReconnect(tag: string, eventId: string): void {
+  const port = blePort?.port;
+  if (!port?.forceReconnectPeer) return;
+  const peerId = port.connectedPeerIds?.().find((id) => id.startsWith(tag));
+  if (!peerId) return;
+  recordServiceEvent(`ble ack timeout reconnect ${tag} event ${eventId.slice(0, 8)}`);
+  port.forceReconnectPeer(peerId);
 }
 
 /**
@@ -1783,6 +1808,12 @@ function scheduleBleAckRetry(): void {
           recordServiceEvent(
             `ble ack timeout ${tag} event ${eventId.slice(0, 8)} attempts ${entry.attempts}`,
           );
+          // Turn the exhausted ladder into an active liveness signal
+          // (v0.1.38 fix): the peer's link is dead but still counts
+          // as connected, so invalidate it and reconnect now instead
+          // of retrying the same dead link (B seq 20, v0.1.37 test:
+          // three sends, zero acks, relay delivery only).
+          forceBleAckReconnect(tag, eventId);
         }
         continue;
       }
